@@ -1,16 +1,17 @@
 # EXACT pins (CLAUDE.md §3 rule 3). Do not edit without re-running
 # tests/test_parity.py on all platforms.
 #
-# jax/flax/optax are pinned to the versions frozen for this week (§7).
-# numpy/scipy/pandas/matplotlib/tqdm/wandb are intentionally unpinned below
-# until the first successful Kaggle T4 smoke run resolves them via
-# `pip freeze`; that output then replaces these bare names with exact pins.
+# jax/flax/optax pinned per §7. numpy/scipy/pandas/matplotlib/tqdm/wandb
+# resolved via `pip freeze` on the first successful Kaggle T4 smoke kernel
+# (mlresearch42/s4dpc-smoke, run 1, 2026-08-07) and pinned exactly from there
+# — not hand-guessed. jax[cuda12] correctly pulled jax-cuda12-pjrt and
+# jax-cuda12-plugin as transitive deps; no need to pin those separately.
 jax[cuda12]==0.7.2
 flax==0.11.2
 optax==0.2.8
-numpy
-scipy
-pandas
-matplotlib
-tqdm
-wandb
+numpy==2.0.2
+scipy==1.16.3
+pandas==2.3.3
+matplotlib==3.10.0
+tqdm==4.67.3
+wandb==0.26.1
