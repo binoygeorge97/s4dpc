@@ -1,0 +1,32 @@
+[project]
+name = "s4dpc"
+version = "0.1.0"
+description = "Why DPC fails on learned S4 surrogates: control-relevant derivative fidelity vs. prediction error"
+requires-python = ">=3.10"
+dependencies = [
+    "jax==0.7.2",
+    "flax==0.11.2",
+    "optax==0.2.8",
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "tqdm",
+    "wandb",
+]
+
+# s4-nnx (git+https://github.com/USER/s4-nnx.git@v0.2.0, CLAUDE.md §7) is
+# deliberately not listed yet: no code in this repo imports it until model.py
+# lands.
+
+[project.optional-dependencies]
+# Kaggle/TACC install this extra; jax[cuda12] wheels are Linux-only, so plain
+# `pip install -e .` still works for local editing on a CPU-only machine.
+cuda = ["jax[cuda12]==0.7.2"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["s4dpc*"]

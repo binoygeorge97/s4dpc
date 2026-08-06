@@ -1,0 +1,17 @@
+# CLAUDE.md transport plan (§2, §5)
+results/
+wandb/
+venv/
+*.msgpack
+!tests/fixtures/*.msgpack
+
+# local staging for `kaggle kernels output -p ./out` (§4)
+/out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+.env
