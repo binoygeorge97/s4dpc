@@ -3,6 +3,11 @@ CLAUDE.md §5 ("the refactored code ... must reproduce the original notebook
 code exactly"). Trains the LEGACY model (legacy/s4.py via legacy/_shim.py),
 not s4-nnx — this checkpoint is what the s4-nnx port has to reproduce.
 
+Real case-3 data (s4dpc.data.generate_microgrid_trajectory, built on the
+real s4dpc.systems.get_discrete_matrices - no more placeholder systems),
+at the canonical bilinear/Tustin discretization, dt=0.01 (see DT below and
+tests/test_systems.py for why that one, not zoh@0.02).
+
 Not well-trained, just reproducible: fixed seeds throughout, no wall-clock
 or unseeded randomness anywhere, so re-running this on the same backend
 reproduces the same msgpack bytes and the same sidecar digests.
@@ -29,7 +34,7 @@ from flax import nnx
 import flax.serialization as serialization
 
 from legacy import S4LayerEnsemble, StackedModelRegression
-from s4dpc.systems import get_discrete_system
+from s4dpc.data import generate_microgrid_trajectory
 
 SEED = 0
 D_MODEL, STATE_SIZE, N_LAYERS, L_MAX = 16, 32, 1, 100
@@ -37,6 +42,10 @@ D_INPUT, D_OUTPUT = 9, 6
 CASE = 3
 N_STEPS = 100
 LEARNING_RATE = 1e-3
+# Canonical discretization: bilinear/Tustin, not zoh. Settled empirically in
+# tests/test_systems.py - only tustin@0.01 reproduces the known rho(A_d) for
+# case 3 (~1.02019) and case 6 (~1.034); zoh@0.02 gives 1.04081/1.06912.
+DT = 0.01
 
 REPO_ROOT = _REPO_ROOT
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "reference_model.msgpack"
@@ -67,25 +76,16 @@ def _build_model(decode: bool, seed: int = SEED) -> StackedModelRegression:
 
 
 def _make_case_data(case: int, seed: int):
-    """(state, control) -> next-state data from `case`, generated directly
-    via get_discrete_system rather than a ported Datasets registry.
-    Uniform-random u: simplest deterministic choice, not APRBS."""
-    a_d, b_d, name = get_discrete_system(case)
-    a_d, b_d = jnp.asarray(a_d), jnp.asarray(b_d)
-    state_dim, input_dim = b_d.shape[0], b_d.shape[1]
-
-    key_x0, key_u = jax.random.split(jax.random.PRNGKey(seed))
-    x0 = jax.random.uniform(key_x0, (state_dim,), minval=-1.0, maxval=1.0)
-    u = jax.random.uniform(key_u, (L_MAX, input_dim), minval=-1.0, maxval=1.0)
-
-    def step(x, u_t):
-        x_next = a_d @ x + b_d @ u_t
-        return x_next, (x, x_next)
-
-    _, (states, next_states) = jax.lax.scan(step, x0, u)
-    inputs = jnp.concatenate([states, u], axis=-1)  # (L_MAX, state_dim + input_dim)
-    targets = next_states  # (L_MAX, state_dim)
-    return inputs, targets, name
+    """Real case data via the ported pipeline (s4dpc.data.
+    generate_microgrid_trajectory, itself built on the canonical
+    s4dpc.systems.get_discrete_matrices), batch_size=1 then squeezed since
+    the legacy model takes one unbatched sequence at a time."""
+    batch_inputs, batch_targets = generate_microgrid_trajectory(
+        batch_size=1, length=L_MAX, seed=seed, system_case=case, dt=DT,
+    )
+    inputs = jnp.asarray(batch_inputs[0])
+    targets = jnp.asarray(batch_targets[0])
+    return inputs, targets
 
 
 def _train(model: StackedModelRegression, inputs, targets, n_steps: int) -> list[float]:
@@ -128,7 +128,7 @@ def _forward_digest_rnn(trained_state, inputs) -> str:
 
 def main() -> None:
     model = _build_model(decode=False, seed=SEED)
-    inputs, targets, system_name = _make_case_data(CASE, seed=SEED)
+    inputs, targets = _make_case_data(CASE, seed=SEED)
 
     losses = _train(model, inputs, targets, N_STEPS)
 
@@ -156,7 +156,8 @@ def main() -> None:
             "d_input": D_INPUT,
             "d_output": D_OUTPUT,
             "case": CASE,
-            "system_name": system_name,
+            "dt": DT,
+            "discretization": "bilinear_tustin",
             "n_steps": N_STEPS,
             "learning_rate": LEARNING_RATE,
         },
