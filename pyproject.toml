@@ -13,13 +13,9 @@ dependencies = [
     "matplotlib",
     "tqdm",
     "wandb",
-    "s4-nnx @ git+https://github.com/binoygeorge97/s4-nnx.git@c706151e976c856b08fccfeaadc825e1e456e7c8",
+    "s4-nnx @ git+https://github.com/binoygeorge97/s4-nnx.git@v0.2.0",
+    "pytest",
 ]
-
-# CLAUDE.md §7 says to pin s4-nnx to git tag v0.2.0, but that tag does not
-# exist on the repo (only branches: main, copilot/create-repo-structure).
-# Pinned to main's HEAD commit as of 2026-08-07 instead, which is at least
-# as exact. Repoint this to v0.2.0 once that tag exists upstream.
 
 [project.optional-dependencies]
 # Kaggle/TACC install this extra; jax[cuda12] wheels are Linux-only, so plain
@@ -32,3 +28,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["s4dpc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

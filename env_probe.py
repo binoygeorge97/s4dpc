@@ -94,7 +94,11 @@ def _model_canary(seed: int = 0) -> dict:
         rnn_out_steps.append(step_out)
     rnn_out = jax.device_get(jnp.stack(rnn_out_steps, axis=0))
 
-    cnn_rnn_max_abs_diff = float(jnp.max(jnp.abs(cnn_out - rnn_out)))
+    cnn_rnn_diff = cnn_out - rnn_out
+    cnn_rnn_max_abs_diff = float(jnp.max(jnp.abs(cnn_rnn_diff)))
+    cnn_rnn_rmse = float(jnp.sqrt(jnp.mean(cnn_rnn_diff**2)))
+    # relative to the conv-mode (cnn) output, not the recurrent one
+    cnn_rnn_rel_l2 = float(jnp.linalg.norm(cnn_rnn_diff) / jnp.linalg.norm(cnn_out))
 
     # one optax adamw step on the conv-mode instance, the package's own
     # documented training mode (examples/regression.py)
@@ -126,6 +130,8 @@ def _model_canary(seed: int = 0) -> dict:
         "fwd_digest_cnn": hashlib.sha256(cnn_out.tobytes()).hexdigest(),
         "fwd_digest_rnn": hashlib.sha256(rnn_out.tobytes()).hexdigest(),
         "cnn_rnn_max_abs_diff": cnn_rnn_max_abs_diff,
+        "cnn_rnn_rmse": cnn_rnn_rmse,
+        "cnn_rnn_rel_l2": cnn_rnn_rel_l2,
         "grad_digest": grad_digest,
     }
 
