@@ -5,8 +5,9 @@ venv/
 *.msgpack
 !tests/fixtures/*.msgpack
 
-# local staging for `kaggle kernels output -p ./out` (§4)
-/out/
+# local staging for `kaggle kernels output -p ./out` (§4) and any one-off
+# comparison pulls (e.g. ./out-cpu/)
+/out*/
 
 # Python
 __pycache__/
