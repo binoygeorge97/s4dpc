@@ -48,7 +48,9 @@ from flax import nnx
 import flax.serialization as serialization
 
 from legacy import S4LayerEnsemble, StackedModelRegression
+from s4dpc.blocks import BlockConfig, VARIANTS
 from s4dpc.data import generate_microgrid_trajectory
+from s4dpc.model import StackedModel
 
 FIXTURE_DIR = pathlib.Path(__file__).parent / "fixtures"
 MSGPACK_PATH = FIXTURE_DIR / "reference_model.msgpack"
@@ -157,6 +159,121 @@ def test_grad_digest_matches(loaded_legacy_model, case_data, sidecar):
 
     def loss_fn(m):
         pred, _ = m(inputs, states=states, training=False)
+        return jnp.mean((pred - targets) ** 2)
+
+    _, grads = nnx.value_and_grad(loss_fn)(model)
+    digest = hashlib.sha256(
+        b"".join(jax.device_get(g).tobytes() for g in jax.tree_util.tree_leaves(grads))
+    ).hexdigest()
+    assert digest == sidecar["grad_digest"]
+
+
+# ---------------------------------------------------------------------------
+# M6 (s4dpc.model, consuming s4-nnx) vs. legacy: the actual port comparison.
+# M6's BlockConfig (norm="layer", activation="gelu", glu=True, prenorm=True,
+# residual=True) is designed to be architecturally identical to legacy's
+# SequenceBlockNNX, with s4dpc.model.StackedModel's RNG key-splitting order
+# matching legacy.StackedModelRegression exactly (encoder key, decoder key,
+# one fresh nnx.Rngs per layer; within each block, the S4 layer consumes
+# rngs.params() first, then norm/out/out2 consume a second split) - so a
+# same-seed M6 build should reproduce legacy's params bit-exactly, with no
+# key remapping. Checked against the SAME sidecar digests the legacy tests
+# above use (already proven equal to legacy's own outputs), which is
+# equivalent to and simpler than re-deriving legacy's outputs a second time.
+# ---------------------------------------------------------------------------
+
+
+def _build_m6(decode: bool, cfg: dict) -> StackedModel:
+    block_config = BlockConfig(d_model=cfg["d_model"], N=cfg["N"], l_max=cfg["l_max"], **VARIANTS["M6"])
+    return StackedModel(
+        block_config=block_config,
+        d_input=cfg["d_input"],
+        d_output=cfg["d_output"],
+        n_layers=cfg["n_layers"],
+        decode=decode,
+        rngs=nnx.Rngs(params=jax.random.PRNGKey(cfg["seed"])),
+    )
+
+
+@pytest.fixture(scope="module")
+def loaded_m6_model(sidecar):
+    current_backend = jax.default_backend()
+    if current_backend != sidecar["jax_backend"]:
+        pytest.skip(
+            "LOUD SKIP: tests/fixtures/reference_model.msgpack was generated "
+            f"on jax backend {sidecar['jax_backend']!r}, but this process is "
+            f"running on {current_backend!r}. See loaded_legacy_model's skip "
+            "reason above; same logic applies here."
+        )
+
+    cfg = sidecar["config"]
+    model = _build_m6(decode=False, cfg=cfg)
+
+    state = nnx.state(model, nnx.Param)
+    pure_dict = serialization.msgpack_restore(MSGPACK_PATH.read_bytes())
+    state.replace_by_pure_dict(pure_dict)
+    nnx.update(model, state)
+
+    return model, cfg
+
+
+def test_m6_param_tree_sha_matches_legacy(loaded_m6_model, sidecar):
+    model, _ = loaded_m6_model
+    state = nnx.state(model, nnx.Param)
+    tree_sha = hashlib.sha256(str(jax.tree_util.tree_structure(state)).encode()).hexdigest()
+    assert tree_sha == sidecar["param_tree_sha"]
+
+
+def test_m6_init_params_match_legacy(sidecar):
+    """Same seed, before any checkpoint is loaded: M6 and legacy should
+    already agree at initialization, which is the strongest possible
+    evidence that the RNG key-splitting order was replicated correctly
+    (not just that loading the checkpoint papers over a difference)."""
+    cfg = sidecar["config"]
+    m6 = _build_m6(decode=False, cfg=cfg)
+    legacy = _build_legacy(decode=False, cfg=cfg)
+
+    m6_leaves = jax.tree_util.tree_leaves(nnx.state(m6, nnx.Param))
+    legacy_leaves = jax.tree_util.tree_leaves(nnx.state(legacy, nnx.Param))
+    assert len(m6_leaves) == len(legacy_leaves)
+    for a, b in zip(m6_leaves, legacy_leaves):
+        assert a.shape == b.shape
+        assert bool(jnp.array_equal(a, b))
+
+
+def test_m6_fwd_digest_cnn_matches_legacy(loaded_m6_model, case_data, sidecar):
+    model, cfg = loaded_m6_model
+    inputs, _ = case_data
+    states = model.init_state(N=cfg["N"])
+    out, _ = model(inputs, states)
+    digest = hashlib.sha256(jax.device_get(out).tobytes()).hexdigest()
+    assert digest == sidecar["fwd_digest_cnn"]
+
+
+def test_m6_fwd_digest_rnn_matches_legacy(loaded_m6_model, case_data, sidecar):
+    model, cfg = loaded_m6_model
+    inputs, _ = case_data
+
+    model_rnn = _build_m6(decode=True, cfg=cfg)
+    nnx.update(model_rnn, nnx.state(model, nnx.Param))
+
+    states = model_rnn.init_state(N=cfg["N"])
+    outputs = []
+    for t in range(inputs.shape[0]):
+        step_out, states = model_rnn(inputs[t], states)
+        outputs.append(step_out)
+    out = jax.device_get(jnp.stack(outputs, axis=0))
+    digest = hashlib.sha256(out.tobytes()).hexdigest()
+    assert digest == sidecar["fwd_digest_rnn"]
+
+
+def test_m6_grad_digest_matches_legacy(loaded_m6_model, case_data, sidecar):
+    model, cfg = loaded_m6_model
+    inputs, targets = case_data
+    states = model.init_state(N=cfg["N"])
+
+    def loss_fn(m):
+        pred, _ = m(inputs, states)
         return jnp.mean((pred - targets) ** 2)
 
     _, grads = nnx.value_and_grad(loss_fn)(model)

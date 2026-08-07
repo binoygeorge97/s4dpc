@@ -20,10 +20,12 @@
     "optax": "0.2.8",
     "numpy": "2.0.2"
   },
+  "jax_backend": "cpu",
   "param_tree_sha": "2df0eecc49e8e9871bdbf0ff7952eb8ea8ab1dedfd893b82d32e1134ebceff6c",
   "param_count": 3942,
-  "fwd_digest_cnn": "54fbb8d9de65790dee6cddb7852de463fc215417eca25eae2bf32e544693f23b",
-  "fwd_digest_rnn": "ef05ceb8a5cfef117386b48921e7884e2fd1feeb2ba0ca7e884502ec5a1dc575",
+  "fwd_digest_cnn": "2763cdc14609fa2cc7705c717712fc45db44a86ab4118ea0070bbe8abcde9cde",
+  "fwd_digest_rnn": "750261ea8b3a7bdc20d9edca58e42105aae358e5cf7593b3f287349b1665eb71",
+  "grad_digest": "0a6eb25f22150de20ee44fd2c21f669d14ca0ee6934757e9e220e5521ef3f615",
   "final_loss": 4.314962863922119,
-  "msgpack_sha256": "5163776edd487b4deea19c66399b8b8ea3bcfc412ac1a80a680e2087bc8873ed"
+  "msgpack_sha256": "8ec41e7d0299b140a9ef9e2019a5bcf40fc4f00a3b6258c9cbd6d0ca3e74333e"
 }
