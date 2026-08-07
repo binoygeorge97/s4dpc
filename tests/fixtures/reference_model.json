@@ -1,0 +1,29 @@
+{
+  "config": {
+    "seed": 0,
+    "d_model": 16,
+    "N": 32,
+    "n_layers": 1,
+    "l_max": 100,
+    "d_input": 9,
+    "d_output": 6,
+    "case": 3,
+    "dt": 0.01,
+    "discretization": "bilinear_tustin",
+    "n_steps": 100,
+    "learning_rate": 0.001
+  },
+  "versions": {
+    "python": "3.12.13",
+    "jax": "0.7.2",
+    "flax": "0.11.2",
+    "optax": "0.2.8",
+    "numpy": "2.0.2"
+  },
+  "param_tree_sha": "2df0eecc49e8e9871bdbf0ff7952eb8ea8ab1dedfd893b82d32e1134ebceff6c",
+  "param_count": 3942,
+  "fwd_digest_cnn": "54fbb8d9de65790dee6cddb7852de463fc215417eca25eae2bf32e544693f23b",
+  "fwd_digest_rnn": "ef05ceb8a5cfef117386b48921e7884e2fd1feeb2ba0ca7e884502ec5a1dc575",
+  "final_loss": 4.314962863922119,
+  "msgpack_sha256": "5163776edd487b4deea19c66399b8b8ea3bcfc412ac1a80a680e2087bc8873ed"
+}
