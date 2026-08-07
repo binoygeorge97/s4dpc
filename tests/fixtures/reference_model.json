@@ -1,0 +1,28 @@
+{
+  "config": {
+    "seed": 0,
+    "d_model": 16,
+    "N": 32,
+    "n_layers": 1,
+    "l_max": 100,
+    "d_input": 9,
+    "d_output": 6,
+    "case": 3,
+    "system_name": "placeholder_case_3",
+    "n_steps": 100,
+    "learning_rate": 0.001
+  },
+  "versions": {
+    "python": "3.12.13",
+    "jax": "0.7.2",
+    "flax": "0.11.2",
+    "optax": "0.2.8",
+    "numpy": "2.0.2"
+  },
+  "param_tree_sha": "2df0eecc49e8e9871bdbf0ff7952eb8ea8ab1dedfd893b82d32e1134ebceff6c",
+  "param_count": 3942,
+  "fwd_digest_cnn": "e323e538e2bc53c0c259eb843f4f89f2eb8b657e9cf779c0174fd2c1c2c90281",
+  "fwd_digest_rnn": "952e235ebdd9fd8f0f4eca96c5f015714f831d423080ad8f25230dd4a954e0ca",
+  "final_loss": 0.09157157689332962,
+  "msgpack_sha256": "bb9930169a88d47059b31fbee768bbaafd9dfba769982944424a0a652ea9781d"
+}
