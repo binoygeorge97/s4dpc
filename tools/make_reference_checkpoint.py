@@ -12,6 +12,11 @@ Not well-trained, just reproducible: fixed seeds throughout, no wall-clock
 or unseeded randomness anywhere, so re-running this on the same backend
 reproduces the same msgpack bytes and the same sidecar digests.
 
+The sidecar's jax_backend records what backend this was generated on
+(tests/test_parity.py skips loudly rather than compare cross-backend,
+since float reduction order isn't guaranteed identical across backends -
+see CLAUDE.md §4 rule 4).
+
     python tools/make_reference_checkpoint.py
 """
 from __future__ import annotations
@@ -126,6 +131,23 @@ def _forward_digest_rnn(trained_state, inputs) -> str:
     return hashlib.sha256(out.tobytes()).hexdigest()
 
 
+def _grad_digest(model: StackedModelRegression, inputs, targets) -> str:
+    """Gradients of the same loss/data used for training, w.r.t. the
+    TRAINED (post-N_STEPS) params - one more step's worth, computed but
+    never applied (no optimizer.update call), so this doesn't perturb
+    fwd_digest_cnn/rnn's model state."""
+    states = model.init_state(N=STATE_SIZE)
+
+    def loss_fn(m):
+        pred, _ = m(inputs, states=states, training=False)
+        return jnp.mean((pred - targets) ** 2)
+
+    _, grads = nnx.value_and_grad(loss_fn)(model)
+    return hashlib.sha256(
+        b"".join(jax.device_get(g).tobytes() for g in jax.tree_util.tree_leaves(grads))
+    ).hexdigest()
+
+
 def main() -> None:
     model = _build_model(decode=False, seed=SEED)
     inputs, targets = _make_case_data(CASE, seed=SEED)
@@ -140,6 +162,7 @@ def main() -> None:
 
     fwd_digest_cnn = _forward_digest_cnn(model, inputs)
     fwd_digest_rnn = _forward_digest_rnn(param_state, inputs)
+    grad_digest = _grad_digest(model, inputs, targets)
 
     pure_dict = _stringify_keys(param_state.to_pure_dict())
     msgpack_bytes = serialization.msgpack_serialize(pure_dict)
@@ -168,10 +191,12 @@ def main() -> None:
             "optax": optax.__version__,
             "numpy": numpy.__version__,
         },
+        "jax_backend": jax.default_backend(),
         "param_tree_sha": param_tree_sha,
         "param_count": param_count,
         "fwd_digest_cnn": fwd_digest_cnn,
         "fwd_digest_rnn": fwd_digest_rnn,
+        "grad_digest": grad_digest,
         "final_loss": losses[-1],
         "msgpack_sha256": hashlib.sha256(msgpack_bytes).hexdigest(),
     }
