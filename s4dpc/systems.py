@@ -5,7 +5,10 @@ different shapes - 1x1 and 2x2 - and are not used in vmapped sweeps).
 get_discrete_matrices is the CANONICAL discretization: bilinear (Tustin)
 at dt=0.01, ported verbatim from the user's data.py (byte-exact, including
 its original trailing whitespace/CRLF, extracted programmatically rather
-than retyped).
+than retyped) - WITH ONE DELIBERATE EXCEPTION: case 4's off-diagonals were
+rescaled (100/80/120 -> 5/4/6) after np.linalg.eig produced a nonsensical
+cond(eigenvectors)=0 (impossible; condition numbers are >= 1) on the
+original, too-extreme defective Jordan structure. See docs/DECISIONS.md.
 
 get_discrete_matrices_zoh is a comparison-only variant, added per instruction
 (NOT verbatim, new code): the same continuous-time A/B construction,
@@ -58,9 +61,9 @@ def get_discrete_matrices(dt=0.01, case=3):
 
     elif case == 4:
         # Case 4: Non-normal Jordan Block
-        A4 = np.array([[1.0, 100.0], [0.0,   1.0]])
-        A5 = np.array([[1.5,  80.0], [0.0,   1.5]])
-        A6 = np.array([[2.0, 120.0], [0.0,   2.0]])
+        A4 = np.array([[1.0, 5.0], [0.0,   1.0]])
+        A5 = np.array([[1.5,  4.0], [0.0,   1.5]])
+        A6 = np.array([[2.0, 6.0], [0.0,   2.0]])
         A = np.block([
             [A4, Z, Z],
             [Z, A5, Z],
@@ -147,7 +150,7 @@ def get_discrete_matrices(dt=0.01, case=3):
     Ad = inv_term @ (I + (dt / 2.0) * A)
     Bd = inv_term @ B * dt
     
-    return Ad, Bd
+    return Ad, Bd
 
 def get_discrete_matrices_zoh(dt=0.02, case=3):
     """Comparison-only. Same continuous-time systems as get_discrete_matrices
@@ -188,9 +191,9 @@ def get_discrete_matrices_zoh(dt=0.02, case=3):
 
     elif case == 4:
         # Case 4: Non-normal Jordan Block
-        A4 = np.array([[1.0, 100.0], [0.0,   1.0]])
-        A5 = np.array([[1.5,  80.0], [0.0,   1.5]])
-        A6 = np.array([[2.0, 120.0], [0.0,   2.0]])
+        A4 = np.array([[1.0, 5.0], [0.0,   1.0]])
+        A5 = np.array([[1.5,  4.0], [0.0,   1.5]])
+        A6 = np.array([[2.0, 6.0], [0.0,   2.0]])
         A = np.block([
             [A4, Z, Z],
             [Z, A5, Z],

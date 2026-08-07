@@ -2,6 +2,16 @@
 ZOH@0.02) that settles which discretization is canonical: whichever one
 reproduces the user's prior rho(A_d) values (case 3 ~= 1.02019, case 6
 ~= 1.034) is the one identify.py and control.py must standardize on.
+
+Never uses np.linalg.eig: its eigenvector output is unreliable for
+defective/near-defective matrices (case 4, by design, is close to a
+non-diagonalizable Jordan block) and a condition number computed from a
+numerically-broken eigenvector matrix can silently read as small/finite
+when the true answer is "this matrix doesn't have a reliable eigenbasis."
+rho(A_d) uses np.linalg.eigvals (eigenvalues only - no eigenvector solve
+to go unstable); everything else here is SVD-based
+(np.linalg.norm(..., ord=2) and np.linalg.matrix_power), which stays
+well-behaved regardless of how defective A_d is.
 """
 from __future__ import annotations
 
@@ -15,6 +25,8 @@ DISCRETIZATIONS = (
     ("tustin@0.01", lambda case: get_discrete_matrices(dt=0.01, case=case)),
     ("zoh@0.02", lambda case: get_discrete_matrices_zoh(dt=0.02, case=case)),
 )
+# transient-growth horizons for ||A_d^k||_2 and the Kreiss-like ratio
+K_VALUES = (1, 5, 10, 25, 50)
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -24,17 +36,30 @@ def test_case_shapes(case):
     assert Bd.shape == (6, 3)
 
 
-def _stats(Ad: np.ndarray) -> tuple[float, float, float, float]:
-    eigvals, eigvecs = np.linalg.eig(Ad)
-    rho = float(np.max(np.abs(eigvals)))
-    norm2 = float(np.linalg.norm(Ad, ord=2))
-    cond_eigvecs = float(np.linalg.cond(eigvecs))
+def _stats(Ad: np.ndarray) -> dict:
+    rho = float(np.max(np.abs(np.linalg.eigvals(Ad))))
+
+    power_norms = {}
+    for k in K_VALUES:
+        power_norms[k] = float(np.linalg.norm(np.linalg.matrix_power(Ad, k), ord=2))
+
+    # Kreiss-like amplification: max_k ||A^k||_2 / rho^k, over the same
+    # k-grid as power_norms (a practical proxy for the true Kreiss constant
+    # sup_{k>=1}, not an exact sup over all k).
+    kreiss_like = max(power_norms[k] / rho**k for k in K_VALUES)
+
     non_normality = float(np.linalg.norm(Ad @ Ad.T - Ad.T @ Ad, ord="fro"))
-    return rho, norm2, cond_eigvecs, non_normality
+
+    return {
+        "rho": rho,
+        "power_norms": power_norms,
+        "kreiss_like": kreiss_like,
+        "non_normality": non_normality,
+    }
 
 
-def build_comparison_table() -> dict[tuple[int, str], tuple[float, float, float, float]]:
-    rows: dict[tuple[int, str], tuple[float, float, float, float]] = {}
+def build_comparison_table() -> dict[tuple[int, str], dict]:
+    rows: dict[tuple[int, str], dict] = {}
     for case in CASES:
         for name, discretize in DISCRETIZATIONS:
             Ad, _ = discretize(case)
@@ -42,14 +67,19 @@ def build_comparison_table() -> dict[tuple[int, str], tuple[float, float, float,
     return rows
 
 
-def print_comparison_table(rows: dict[tuple[int, str], tuple[float, float, float, float]]) -> None:
-    header = f"{'case':<5}{'method':<14}{'rho(A_d)':>12}{'||A_d||_2':>12}{'cond(V)':>16}{'||AAT-ATA||_F':>16}"
+def print_comparison_table(rows: dict[tuple[int, str], dict]) -> None:
+    power_headers = "".join(f"{'||A^' + str(k) + '||_2':>13}" for k in K_VALUES)
+    header = f"{'case':<5}{'method':<14}{'rho(A_d)':>10}{power_headers}{'kreiss-like':>13}{'||AAT-ATA||_F':>15}"
     print(header)
     print("-" * len(header))
     for case in CASES:
         for name, _ in DISCRETIZATIONS:
-            rho, norm2, cond_v, nn = rows[(case, name)]
-            print(f"{case:<5}{name:<14}{rho:>12.5f}{norm2:>12.5f}{cond_v:>16.5f}{nn:>16.5f}")
+            s = rows[(case, name)]
+            power_cells = "".join(f"{s['power_norms'][k]:>13.3e}" for k in K_VALUES)
+            print(
+                f"{case:<5}{name:<14}{s['rho']:>10.5f}{power_cells}"
+                f"{s['kreiss_like']:>13.3e}{s['non_normality']:>15.3e}"
+            )
 
 
 def test_discretization_comparison_table(capsys):
@@ -58,8 +88,11 @@ def test_discretization_comparison_table(capsys):
         print()
         print_comparison_table(rows)
 
-    for (case, name), (rho, norm2, cond_v, nn) in rows.items():
-        assert np.isfinite(rho) and np.isfinite(norm2) and np.isfinite(cond_v) and np.isfinite(nn)
+    for stats in rows.values():
+        assert np.isfinite(stats["rho"])
+        assert all(np.isfinite(v) for v in stats["power_norms"].values())
+        assert np.isfinite(stats["kreiss_like"])
+        assert np.isfinite(stats["non_normality"])
 
     # The two discretizations should generally disagree (different dt AND
     # method) - except case 1, whose continuous A has exact zero eigenvalues
@@ -70,7 +103,7 @@ def test_discretization_comparison_table(capsys):
     disagreements = [
         case
         for case in CASES
-        if rows[(case, "tustin@0.01")][0] != pytest.approx(rows[(case, "zoh@0.02")][0], rel=1e-6)
+        if rows[(case, "tustin@0.01")]["rho"] != pytest.approx(rows[(case, "zoh@0.02")]["rho"], rel=1e-6)
     ]
     assert disagreements == [c for c in CASES if c != 1], (
         "expected tustin@0.01 and zoh@0.02 to disagree on every case except "
@@ -83,8 +116,8 @@ def test_canonical_matches_prior_analysis():
     it, not the zoh@0.02 variant, reproduces the user's known-good rho(A_d)
     values. See the printed table from test_discretization_comparison_table
     (run with `-s`) for the full comparison that established this."""
-    rho_case3, _, _, _ = _stats(get_discrete_matrices(dt=0.01, case=3)[0])
-    rho_case6, _, _, _ = _stats(get_discrete_matrices(dt=0.01, case=6)[0])
+    rho_case3 = _stats(get_discrete_matrices(dt=0.01, case=3)[0])["rho"]
+    rho_case6 = _stats(get_discrete_matrices(dt=0.01, case=6)[0])["rho"]
     assert rho_case3 == pytest.approx(1.02019, abs=5e-5)
     assert rho_case6 == pytest.approx(1.034, abs=5e-4)
 
