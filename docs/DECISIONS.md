@@ -172,3 +172,78 @@ more steps alone would eventually close most of the gap, or whether
 initialization/conditioning of the specific factorization is the limiter)
 - reported per-step as instructed; controller work is on hold pending
 this.
+
+---
+
+## 2026-08-07 — M3's D-only gap is a genuine parameter non-identifiability (exact rank-deficient Gauss-Newton matrix), not slow conditioning
+
+Follow-up to the entry above. Four experiments (case 3, D-only ablation
+throughout unless noted), each self-checked before trusting the result and
+reported before the next:
+
+**1. Asymptotic-or-stuck** (`tools/diagnose_m3_asymptotic.py`, 50k steps,
+lr=1e-3, wd=0, Kaggle T4, 64.70 GPU-minutes - logged in `gpu_ledger.csv`):
+neither pattern predicted. A clean power-law descent for the first ~2000
+steps (mse 29.5 -> ~1e-2), then a steep drop to ~1e-6 by step ~10k, then
+**non-monotonic noisy oscillation** between ~1e-4 and ~1e-8 for the
+remaining 40k steps - never getting closer to the LS floor (5.46e-15).
+`final mse (50k) = 1.575e-7`, ratio to floor = 2.88e7. See
+`docs/m3_d_only_50k_loglog.png`.
+
+**2. Conditioning** (`tools/diagnose_m3_conditioning.py`, Gauss-Newton
+`J^T J` over D-only params via `jax.jacfwd`, at init and step 2000. First
+pass used `eigvalsh` directly on `J^T J` and produced small spurious
+negative eigenvalues from float roundoff on near-zero true eigenvalues,
+which a naive `cond = max/max(min, floor)` turned into a meaningless
+`1e+305` - not reported; fixed by computing eigenvalues as
+`svd(J)**2` (non-negative by construction) before trusting or reporting
+anything):
+
+| | init | step 2000 |
+|---|---|---|
+| numerical rank | 518 / 550 | 518 / 550 |
+| rank deficiency | **32 = 2 x d_model (16)** | **32 = 2 x d_model (16)** |
+| top eigenvalue | 1.04e5 | 1.03e5 |
+| cond. restricted to nonzero eigenvalues | 4.86e19 | 6.02e19 |
+
+`J^T J` is exactly rank-deficient by 32 dimensions, unchanged from init to
+step 2000. This is the signature of an exact scale/gauge symmetry in the
+factorization (e.g. `D_i -> D_i * t`, `out_kernel[i,:] -> out_kernel[i,:] / t`
+per channel leaves the D-only forward pass invariant) - a genuine flat
+manifold in parameter space, not merely a badly-scaled but full-rank
+optimization landscape.
+
+**3. Does reparameterization fix it** (`tools/diagnose_m3_reparam.py`,
+2000 steps each, Kaggle CPU):
+
+| variant | init_mse | final_mse (2000 steps) | nmse |
+|---|---|---|---|
+| a. as-is (random init, adamw lr=1e-3) | 29.5 | 5.67e-3 | 8.90e-4 |
+| b. ls_init (hand-set to the exact LS solution at init) | 2.86e-14 | **1.89e-6** | 2.97e-7 |
+| c. clipped_adam (random init, lr=1e-2 + grad-norm clip) | 29.5 | 1.05e-3 | 1.64e-4 |
+
+(b)'s self-check confirms the construction lands within float32 precision
+of the true LS floor at step 0 (2.86e-14 vs 5.46e-15). Neither (b) nor (c)
+closes the gap. (c) helps only ~5x over (a). (b) is the sharper result:
+**starting exactly at the optimum, 2000 steps of ordinary Adam training
+moves the model 8 orders of magnitude away from it**, landing at
+`1.89e-6` - squarely inside the same noisy attractor band (~1e-4 to 1e-8)
+that experiment 1's 50k-step run oscillates in regardless of starting
+point. The optimum is not merely hard to *reach* under this
+parameterization; it is unstable under continued gradient-based training.
+
+**Revised conclusion:** this is not a conditioning-severity/speed problem
+that more steps, a better init, or a cruder optimizer would fix (all three
+were tried; none closes the gap). It is a genuine non-identifiability
+in the S4 block's multiplicatively-factored parameterization: an exact
+32-dimensional (= 2 x d_model) null space in the loss's local curvature,
+present at init and persisting through training, that a per-channel
+feedthrough/gain factorization (`D`, `out_kernel`) exposes to gradient
+noise regardless of where training starts. Combined with experiment 4
+above (a single unfactored `nnx.Linear` also fails, ruling out
+factorization *alone* as sufficient to explain the failure), the
+likeliest complete picture is: the factorization creates the flat
+directions, and Adam's own dynamics (momentum + per-parameter adaptive
+step size) actively wander along them rather than converging - a specific,
+checkable mechanism, not a vague "optimization is hard" statement.
+Controller work remains on hold pending explicit go-ahead.
