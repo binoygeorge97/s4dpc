@@ -10,16 +10,39 @@ tests/test_systems.py for why that one, not zoh@0.02).
 
 Not well-trained, just reproducible: fixed seeds throughout, no wall-clock
 or unseeded randomness anywhere, so re-running this on the same backend
-reproduces the same msgpack bytes and the same sidecar digests.
+reproduces the same msgpack bytes and the same sidecar digests - PROVIDED
+XLA:CPU's own multi-threaded reduction ops are pinned to a single thread
+(set below, before jax is imported). Verified the hard way: two Kaggle CPU
+sessions (kernel v3/v4) agreed with each other but a later pair (v5/v6,
+different container instance) gave a different fwd_digest_cnn/msgpack for
+byte-identical code+data+config. Floating-point addition isn't
+associative, so a different core count / thread-to-work assignment across
+sessions can silently change results even on "the same backend" - single-
+threaded execution removes that degree of freedom.
 
 The sidecar's jax_backend records what backend this was generated on
 (tests/test_parity.py skips loudly rather than compare cross-backend,
 since float reduction order isn't guaranteed identical across backends -
-see CLAUDE.md §4 rule 4).
+see CLAUDE.md §4 rule 4). It does NOT capture thread count; this file
+just always forces 1.
 
     python tools/make_reference_checkpoint.py
 """
 from __future__ import annotations
+
+import os
+
+# Must precede `import jax` - XLA reads these at backend initialization.
+# Forces deterministic (single-threaded) CPU reduction order; see the
+# module docstring above for why this is here. Appended (not setdefault)
+# for XLA_FLAGS specifically, since blindly deferring to a pre-existing
+# value would silently skip this if something else (e.g. the Kaggle image)
+# has already set XLA_FLAGS to anything that doesn't happen to include it.
+_xla_flags = os.environ.get("XLA_FLAGS", "")
+if "xla_cpu_multi_thread_eigen" not in _xla_flags:
+    os.environ["XLA_FLAGS"] = (_xla_flags + " --xla_cpu_multi_thread_eigen=false").strip()
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 import hashlib
 import json
