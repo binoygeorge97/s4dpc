@@ -26,6 +26,7 @@ import pathlib
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax import nnx
 import flax.serialization as serialization
@@ -53,6 +54,38 @@ def case_data(case: int, l_max: int, aprbs_low: float, aprbs_high: float) -> tup
     return jnp.asarray(batch_inputs[0]), jnp.asarray(batch_targets[0])
 
 
+def fit_least_squares(
+    case: int, l_max: int = 100, aprbs_low: float = -10.0, aprbs_high: float = 10.0
+) -> tuple[np.ndarray, float]:
+    """M1: the capacity floor M3 must approach. Closed-form
+    [A_hat B_hat] = Y Z^dagger on the SAME (state, control) -> next-state
+    data the neural variants train on (case_data), via np.linalg.lstsq
+    (numerically preferred over forming Z^dagger explicitly - same
+    closed-form solution) in float64.
+
+    float64, not JAX's default float32: the ~1e-14-level floor this is
+    meant to establish is inherently a float64-precision number (float32
+    machine epsilon alone is ~1e-7), so this is not an apples-to-apples
+    precision comparison against the float32-trained neural variants -
+    but the conclusion doesn't depend on which: either floor is orders
+    of magnitude below where M3 currently sits.
+
+    Deliberately NOT dpc_example's LinearDynamicsModel-with-LayerNorm
+    weight extraction: extracting W/V from a LayerNorm'd model does not
+    give an equivalent linear system (that file's own comment admits
+    this - LayerNorm is a nonlinear op). See docs/DECISIONS.md.
+
+    Returns ([A_hat | B_hat] as a (d_output, d_input) array, mse)."""
+    inputs, targets = case_data(case, l_max, aprbs_low, aprbs_high)
+    z = np.asarray(inputs, dtype=np.float64)  # (L, d_input)
+    y = np.asarray(targets, dtype=np.float64)  # (L, d_output)
+
+    ab_hat_t, _, _, _ = np.linalg.lstsq(z, y, rcond=None)  # (d_input, d_output)
+    pred = z @ ab_hat_t
+    mse = float(np.mean((pred - y) ** 2))
+    return ab_hat_t.T, mse  # (d_output, d_input) = [A_hat | B_hat]
+
+
 def _build_model(block_config: BlockConfig, n_layers: int, key: jax.Array) -> StackedModel:
     return StackedModel(
         block_config=block_config,
@@ -72,13 +105,18 @@ def _train_one(
     key: jax.Array,
     inputs: jax.Array,
     targets: jax.Array,
+    weight_decay: float = 0.0,
 ) -> tuple[nnx.State, jax.Array]:
     """One (case, seed) member: teacher-forced one-step MSE identification.
     Returns (trained param state, final MSE). The --no-vmap path calls
     this directly per member; the vmapped path's per-member computation
-    (inside _train_ensemble) mirrors it exactly."""
+    (inside _train_ensemble) mirrors it exactly.
+
+    weight_decay defaults to 0.0, NOT optax.adamw's own default of 1e-4:
+    for an LTI target (case identification), decay actively fights an
+    exact fit. See docs/DECISIONS.md."""
     model = _build_model(block_config, n_layers, key)
-    optimizer = nnx.Optimizer(model, optax.adamw(learning_rate), wrt=nnx.Param)
+    optimizer = nnx.Optimizer(model, optax.adamw(learning_rate, weight_decay=weight_decay), wrt=nnx.Param)
     states = model.init_state(N=block_config.N)
 
     def loss_fn(m):
@@ -101,6 +139,7 @@ def _train_ensemble(
     keys: jax.Array,
     inputs_grid: jax.Array,
     targets_grid: jax.Array,
+    weight_decay: float = 0.0,
 ) -> tuple[nnx.State, jax.Array]:
     """keys: (n_ensemble,) PRNGKeys. inputs_grid/targets_grid: (n_ensemble,
     l_max, d_input/d_output). Returns (ensemble param state - every leaf has
@@ -111,7 +150,7 @@ def _train_ensemble(
         return _build_model(block_config, n_layers, key)
 
     ensemble = init_ensemble(keys)
-    optimizer = nnx.Optimizer(ensemble, optax.adamw(learning_rate), wrt=nnx.Param)
+    optimizer = nnx.Optimizer(ensemble, optax.adamw(learning_rate, weight_decay=weight_decay), wrt=nnx.Param)
 
     def loss_fn(model):
         graphdef, params = nnx.split(model, nnx.Param)
@@ -145,6 +184,7 @@ def run_identify(
     n_layers: int,
     l_max: int = 100,
     learning_rate: float = 1e-3,
+    weight_decay: float = 0.0,
     aprbs_low: float = -10.0,
     aprbs_high: float = 10.0,
     use_vmap: bool = True,
@@ -175,7 +215,8 @@ def run_identify(
         )
 
         ensemble_state, final_mse = _train_ensemble(
-            block_config, n_layers, epochs, learning_rate, keys, inputs_grid, targets_grid
+            block_config, n_layers, epochs, learning_rate, keys, inputs_grid, targets_grid,
+            weight_decay=weight_decay,
         )
         for i, (case, seed) in enumerate(zip(flat_cases, flat_seeds)):
             member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ensemble_state)
@@ -193,7 +234,8 @@ def run_identify(
             key = jax.random.fold_in(jax.random.PRNGKey(seed_base + seed), case)
             inputs, targets = data[case]
             param_state, final_mse = _train_one(
-                block_config, n_layers, epochs, learning_rate, key, inputs, targets
+                block_config, n_layers, epochs, learning_rate, key, inputs, targets,
+                weight_decay=weight_decay,
             )
             rows.append(
                 {
