@@ -3,3 +3,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-07,s4dpc-smoke,T4,1.32
 2026-08-07,s4dpc-smoke,T4,2.39
 2026-08-07,s4dpc-diagnose,T4,64.70
+2026-08-07,s4dpc-smoke-control,T4,192.70
