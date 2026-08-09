@@ -247,3 +247,159 @@ directions, and Adam's own dynamics (momentum + per-parameter adaptive
 step size) actively wander along them rather than converging - a specific,
 checkable mechanism, not a vague "optimization is hard" statement.
 Controller work remains on hold pending explicit go-ahead.
+
+---
+
+## 2026-08-09 — Mechanism chain, run as branch-gated experiments: both a generic Adam/data-scale problem AND an S4-specific exact non-identifiability are real, and compound
+
+Working hypothesis going in: the S4 parameterization is multiplicatively
+factored (`decoder x out x C x kernel(Lambda,P,B,step) x encoder`) and
+badly conditioned for representing a near-instantaneous linear map,
+because `Lambda_re <= -1e-4` and `log_step` in `[log 1e-3, log 1e-1]` are
+both tuned for long-range sequence modelling, not for identifying an
+unstable plant. Run as a branch-gated chain; result and branch decision
+recorded after each step.
+
+**EXP 1 - the clean control** (`tools/diagnose_m3_linear_control.py`,
+new script - no committed script/log survived from the earlier ad-hoc
+run of this same control before this session's context was compacted,
+so it was rebuilt and re-run rather than trusting a recollected number
+for the experiment that gates the whole chain). Single `nnx.Linear(9,6)`
+on case-3 data, same Adam budget as the M3 diagnosis (lr=1e-3, wd=0,
+2000 epochs) - same function class as the least-squares floor, zero S4
+factorization:
+
+```
+LS floor:              mse=5.464e-15  nmse=8.582e-16
+nnx.Linear(9,6):  init_mse=1.721e+01  final_mse=3.272e-02
+                   nmse=5.140e-03     ratio_to_LS_floor=5.989e+12
+```
+
+**Implication:** does NOT reach ~1e-12; stalls at nmse~5e-3, ~12.8 orders
+of magnitude above the floor - in the same ballpark as D-only's own
+final nmse (8.9e-4, section above), not qualitatively better.
+
+**Branch taken:** per the stated rule this result triggers "skip EXP
+2-3, go straight to EXP 4" - a plain, already-fully-identifiable linear
+regression struggling by itself means the S4 factorization is not
+*required* to reproduce a failure of this magnitude, which is a real
+complication for the working hypothesis. **Deviation, flagged explicitly:**
+EXP 2 and EXP 3 are included anyway, because both were already run (same
+exact specs the chain calls for) in the immediately preceding
+investigation in this session, and their results don't just confirm what
+EXP 1 already showed - they add information EXP 1 alone cannot produce
+(see EXP 3's implication below). Nothing was re-run to pad the chain;
+this is existing, already-verified data being read into the new branch
+structure, not new compute.
+
+**EXP 2 - asymptotic or stuck?** (`tools/diagnose_m3_asymptotic.py`,
+D-only, case 3, 50k steps, lr=1e-3, wd=0 - identical to this section's
+spec; result reused verbatim from the entry above): non-monotonic noisy
+oscillation between ~1e-4 and ~1e-8 after an initial fast descent, never
+converging closer to the floor. Neither a clean straight line nor a
+clean bend/plateau.
+
+**Implication:** doesn't cleanly match either predicted pattern, so
+strictly the chain's branch rule for this step doesn't resolve cleanly
+either - continued to EXP 3 regardless, since a noisy non-convergent
+floor is at least consistent with "there's a mechanism actively
+preventing convergence," worth explaining.
+
+**EXP 3 - confirm the mechanism** (`tools/diagnose_m3_conditioning.py`,
+Gauss-Newton `J^T J` over D-only params, reused verbatim from the entry
+above): exactly rank-deficient by 32 = 2 x d_model at both init and step
+2000; condition number restricted to the numerically-nonzero eigenvalues
+is 4.86e19-6.02e19, vastly past the stated 1e8 threshold.
+
+**Implication - this is the piece EXP 1 alone cannot produce:** a plain
+`nnx.Linear(9,6)`'s Gauss-Newton matrix (`Z^T Z` on the augmented input,
+L=100 samples >> 10 parameters) is generically full-rank - it has no
+multiplicative factorization to create a scale/gauge symmetry in the
+first place. D-only's *exact*, dimension-matched (2 x d_model) rank
+deficiency is a signature that only a factorized parameterization like
+`D_i -> D_i * t`, `out_kernel[i,:] -> out_kernel[i,:] / t` can produce.
+So EXP 1 and EXP 3 are not in conflict - they show two different,
+additive things: a generic Adam/data-scale sensitivity that affects even
+the minimal, fully-identifiable linear regression (EXP 1), plus an
+*extra*, S4-specific exact non-identifiability that only the factored
+parameterization has (EXP 3). **Branch:** condition number confirms the
+mechanism per the stated threshold - continue to EXP 4.
+
+**EXP 4 - what actually fixes it** (`tools/diagnose_m3_reparam.py`,
+D-only, case 3, 2000 epochs each, reused verbatim from the entry above).
+(c) used gradient-clipped high-lr Adam (the explicitly offered
+alternative to `optax.lbfgs`):
+
+```
+a. as-is (baseline):        final_mse=5.67e-3   nmse=8.90e-4
+b. informed (LS) init:      final_mse=1.89e-6   nmse=2.97e-7  (init was 2.86e-14, at the floor)
+c. clipped high-lr Adam:    final_mse=1.05e-3   nmse=1.64e-4
+```
+
+**Implication:** neither closes the gap. (c) helps only ~5x. (b) is the
+sharp result - initialized within float32 precision of the exact
+optimum, 2000 ordinary Adam steps move it 8 orders of magnitude away,
+landing inside the same noisy attractor band EXP 2's 50k-step run
+oscillates in regardless of starting point. **Branch:** "nothing closes
+the gap" - the harder, more interesting finding. Stated plainly, as
+instructed.
+
+**Full synthesis:** the working hypothesis as originally stated (badly-
+conditioned multiplicative S4 factorization, full stop) is not quite
+right, and EXP 1 is why: a plain, single, already-full-rank linear layer
+fails by a comparable order of magnitude under the same optimizer, so
+factorization is not *necessary* to produce a large gap. But EXP 3 shows
+the factorization adds something a plain linear layer structurally
+cannot have - an exact, dimension-matched null space - and EXP 4's (b)
+shows that null space is not benign: it actively destabilizes an exact
+optimum under continued training, which a full-rank quadratic bowl
+(the plain-linear-layer case) would not do. The most defensible complete
+picture is two compounding effects, not one:
+1. A generic Adam/data-scale sensitivity on this case-3 regression task
+   that affects even the minimal, fully-identifiable linear map (EXP 1).
+2. An S4-specific, exact multiplicative-gauge non-identifiability that
+   only the factored parameterization has, which turns "slow" into
+   "actively unstable at the optimum" (EXP 3 + EXP 4b).
+Neither alone explains all four results; both together do.
+
+**M3-as-control confound, flagged per instruction:** M3 was intended as
+the "capacity is fine" control for the M3/M4/M5/M6 variant ladder - the
+LTI cell the other variants' norm/activation/glu ablations are compared
+against, on the assumption that M3 itself sits near its achievable
+floor. It does not: at the identification budget used everywhere else in
+this project (2000 epochs, lr=1e-3, wd=0), M3 sits ~9-13 orders of
+magnitude above the least-squares floor it can provably represent. Every
+M3-vs-M4/M5/M6 comparison run so far (including the controller smoke
+test) is implicitly comparing "M4/M5/M6 against an M3 that is itself
+badly under-converged," not against M3's true capacity ceiling. **Whether
+EXP 4's fix should be applied to all variants before the ladder is
+run:** no fix found here closes the gap (EXP 4's conclusion above), so
+there is not yet a fix to propagate - applying (b) or (c) to M4/M5/M6
+would not resolve this confound, only relocate it. What the ladder needs
+before it's trustworthy is either (i) a training budget/optimizer change
+that closes M3's gap for real (not yet found), or (ii) explicitly
+reporting every variant's nmse *relative to its own variant-specific
+least-squares-reachable floor* rather than assuming M3 defines that
+floor for the whole ladder - (ii) is the low-risk option available today
+and doesn't require a another open-ended optimization investigation.
+
+**Recommendation:** don't chase a fix for M3's gap this week - EXP 4
+already tried the two most standard fixes (better init, cruder/higher-lr
+optimizer) and neither worked, and further reparameterization search is
+exactly the kind of open-ended detour CLAUDE.md sec 11 warns against on
+a 7-day timeline. Instead: (1) keep this as a reported, documented
+finding rather than a solved bug - "even the LTI control cell is far
+from its achievable floor under the standard optimizer, and that failure
+has two identified, compounding causes" is a legitimate, checkable paper
+result in its own right, not a loose end; (2) when the M3-M6 ladder is
+run for the paper, report every variant's nmse normalized against its
+own fit_least_squares floor (M0/M1), not against an assumed-converged
+M3, so the norm/activation/glu comparisons stay valid regardless of how
+far any one variant is from its own ceiling; (3) the controller smoke
+test already run (M3 vs M6 through the learned surrogate, true-plant
+cost 895.8 vs 878.7) should not be over-read as a real M3-vs-M6 signal
+yet, precisely because of this confound - both identification runs
+feeding it were similarly under-converged (teacher_mse 3.6e-3 and
+3.3e-3), so the controller comparison inherits the same normalization
+problem before it says anything about the LayerNorm/derivative-fidelity
+hypothesis.
