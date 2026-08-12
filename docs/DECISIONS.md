@@ -543,3 +543,134 @@ feeding it were similarly under-converged (teacher_mse 3.6e-3 and
 3.3e-3), so the controller comparison inherits the same normalization
 problem before it says anything about the LayerNorm/derivative-fidelity
 hypothesis.
+
+---
+
+## 2026-08-12 — Part B (gauge symmetry verified directly) and a float64 recheck of EXP 4(b): both survive, the divergence is if anything sharper
+
+Direct verification of the 490-dim null space (corrected above), plus a
+float64 recheck of whether EXP 4(b)'s "diverges 8 orders of magnitude
+from the exact optimum" finding was itself a float32 artifact, the same
+way EXP 3's rank number was.
+
+**B.1 - transform invariance** (`tools/diagnose_m3_gauge_verify.py`,
+trained D-only model, c=2.3):
+
+| candidate transform | max abs output diff | holds? |
+|---|---|---|
+| `D_i -> c*D_i`, encoder column `i -> /c` (the working hypothesis's own proposal) | 2.52 (relative 0.38) | NO |
+| `D_i -> c*D_i`, `out_kernel[i,:] -> /c` (derived in the entry above) | 2.67e-15 (relative 4.0e-16) | YES, to machine precision |
+
+The proposed encoder-based pairing does not hold - it breaks the skip
+connection (`skip = encoder(x)` feeds the decoder directly, untouched by
+`D` or `out_kernel`, so scaling the encoder column alone changes `skip`
+with nothing to compensate). Worth stating plainly since it was offered
+as the working hypothesis: the analytically-derived pairing is the real
+one, not this one.
+
+**B.2 - null-space alignment**: for all 16 channels, the analytic
+generator of the confirmed `(D_i, out_kernel[i,:])` symmetry has cosine
+similarity **1.000000** (exactly, to printed precision) with its own
+projection onto the empirically-measured 490-dim null space. This
+symmetry family is a real, verified subset of the true null space - not
+merely algebraically plausible, but empirically confirmed to be exactly
+tangent to the loss surface's flat directions.
+
+**B.3 - rank scan across d_model** (`tools/diagnose_m3_gauge_rank_scan.py`,
+freshly-initialized models, x64 throughout):
+
+| d_model | n_params | rank | null_dim | predicted (n_params - 60) | match |
+|---|---|---|---|---|---|
+| 8 | 214 | 60 | 154 | 154 | YES |
+| 16 | 550 | 60 | 490 | 490 | YES |
+| 32 | 1606 | 60 | 1546 | 1546 | YES |
+| 64 | 5254 | 60 | 5194 | 5194 | YES |
+
+Rank is exactly 60 at every d_model tested - as clean a structural
+confirmation as this kind of check produces. D-only's redundancy is
+generic overparameterization (a fixed 60-dof affine map, however many
+raw parameters implement it), not a d_model-scaled symmetry.
+
+**B.4 - does the full S4 conv path add or remove redundancy?**
+(`tools/diagnose_m3_gauge_full_m3.py`). Unlike D-only, full M3 has no
+clean closed-form DOF bound - the S4 kernel makes each channel a causal
+linear filter over the L=100 sequence via N=32 exponential modes, so
+this was measured, not predicted. First attempt crashed: a single
+L=100 trajectory gives only 600 output samples against 3638 raw
+parameters, so the Jacobian's rank was trivially capped at 600
+regardless of any real structure (caught by an IndexError when the
+rank-cliff printer assumed more headroom than the singular-value array
+actually had - not a subtle bug, a batch-too-small one). Fixed by
+stacking 8 independent trajectories (4800 output samples > 3638
+params):
+
+```
+D-only:  rank=60,   null=490   (of 550 params, 89.1% redundant)
+full M3: rank=1183, null=2455  (of 3638 params, 67.5% redundant)
+```
+
+**Caveat that matters:** D-only's 60/490 split is a sharp, provable
+cliff (idx 59 = 0.49, idx 60 = 1.7e-13, one index step, exact machine
+zero). Full M3's spectrum has no such cliff - it decays *smoothly*
+around the rank boundary (idx 1173: 4.9e-9 -> idx 1192: 2.8e-10 over 19
+indices, with true machine-zero only reached around idx ~3600 at
+~1e-20). So "rank=1183" is a reasonable, tolerance-based estimate of
+where the S4 kernel's genuinely-informative directions give way to
+increasingly-negligible ones (consistent with a bank of exponential
+modes at a continuum of decay rates - some fast, most too slow or too
+fast to matter over L=100 steps), not a hard structural fact the way
+D-only's 60 is. Qualitative answer to B.4's question: the conv path
+adds real expressive capacity (1183 effective directions vs D-only's
+60, roughly 19x) while *also* remaining substantially redundant in
+relative terms (67.5% vs 89.1% - better, not solved).
+
+**Float64 recheck of EXP 4(b)** (`tools/diagnose_m3_exp4_x64.py` - this
+file and its Kaggle kernel existed on disk, written but never run or
+pushed; found while auditing repo state for this write-up, run now
+rather than left stale). Same D-only/LS-init construction, x64
+throughout (including the same `nnx.Linear` `param_dtype=float32`-by-
+default gotcha `diagnose_m3_rank_x64.py` needed - the LS-init leaves
+must be constructed as float64 directly, not inherited from the model's
+pre-existing float32 leaf, or the "float64" run silently trains in
+float32 anyway). Three variants, MSE logged every step:
+
+```
+LS floor (float64): mse=4.746674e-30
+init (LS-init, self-checked): mse=4.775484e-30
+
+adam_lr1e-3 (the original EXP4(b) setup):
+  final=1.053126e-07   orders of magnitude rise: +22.34
+  first step exceeding 1e8x init: step 1
+
+sgd_lr1e-3 (same nominal step size, no momentum/adaptive scaling):
+  final=6.162454e-31   orders of magnitude rise: -0.89 (went DOWN)
+  first step exceeding 10x init: never (over all 2000 steps)
+
+adam_lr1e-5 (100x smaller step):
+  final=2.422722e-11   orders of magnitude rise: +18.71
+  first step exceeding 1e8x init: step 1
+```
+
+**This is not a float32 artifact - it is real, and float64 makes it
+look worse, not better.** Starting from a point 16 orders of magnitude
+closer to the true optimum than the float32 measurement could even
+represent (1e-30 vs float32's representable floor of ~1e-14), Adam
+still explodes past 1e8x the initial loss in a single step, landing at a
+final MSE of a similar order to the original float32 finding (1.05e-7
+here vs 1.89e-6 there). Plain SGD at the identical nominal learning rate
+does not move - it stays at or below the initial loss for the entire
+run. Cutting Adam's learning rate 100x (`adam_lr1e-5`) does not fix it
+either - still an 18.71-order-of-magnitude, single-step blowup. That
+last result is the sharp one: this rules out "Adam's step size is too
+large" as the mechanism. Adam's update is *not* proportional to the
+nominal learning rate here - it is dominated by its own per-coordinate
+normalization (dividing by a second-moment estimate built from the same
+near-zero, noise-level gradient), which produces a roughly
+`lr`-scaled step regardless of how small the true gradient is, as long
+as it is not exactly zero. SGD's step, being directly proportional to
+the raw gradient magnitude, stays correspondingly tiny. This is now a
+specific, mechanistic, float64-verified claim about *why* Adam
+destabilizes the exact optimum: its adaptive normalization amplifies
+whatever machine-precision noise exists along the null space's flat
+directions into a full-sized step, independent of the nominal learning
+rate.
