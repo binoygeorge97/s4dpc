@@ -153,11 +153,50 @@ def _apply_ls_init_general(model: StackedModel, w_ls_in_out: np.ndarray, has_glu
 
 
 # --------------------------------------------------------------------------
+# real-safe ravel: S4LayerEnsemble's P/B params are genuinely complex
+# (unlike Lambda_re/Lambda_im/C_real_imag, which are already split into
+# real arrays - see legacy/s4.py). Concatenating them with the real
+# leaves via plain ravel_pytree promotes the WHOLE flat vector to
+# complex128 (confirmed empirically: this is exactly what happened -
+# jax.jacfwd then refuses outright, "requires real-valued inputs...
+# got complex128"). This is the SAME hazard tools/diagnose_m3_gauge_
+# full_m3.py (Part B.4) hit and got WRONG silently instead of crashing:
+# its blanket `jnp.asarray(x, dtype=jnp.float64)` cast DISCARDS P/B's
+# imaginary part rather than raising, so B.4's reported "full M3:
+# rank=1183, null=2455" was computed on a model with P/B's imaginary
+# parts silently zeroed - not the real parameterization (see
+# docs/DECISIONS.md's Task 2 entry for the correction). Splitting each
+# complex leaf into a real [real,imag] pair before raveling (and
+# rejoining after unraveling) keeps the flat vector real-valued for
+# jacfwd while losing no information.
+# --------------------------------------------------------------------------
+
+def _make_real_ravel(params):
+    is_complex = jax.tree_util.tree_map(lambda x: jnp.iscomplexobj(x), params)
+
+    def _split(x):
+        return jnp.stack([x.real, x.imag], axis=-1) if jnp.iscomplexobj(x) else x
+
+    real_params = jax.tree_util.tree_map(_split, params)
+    flat, unravel_real = ravel_pytree(real_params)
+
+    def unravel(flat_p):
+        real_tree = unravel_real(flat_p)
+
+        def _join(x, was_complex):
+            return (x[..., 0] + 1j * x[..., 1]) if was_complex else x
+
+        return jax.tree_util.tree_map(_join, real_tree, is_complex)
+
+    return flat, unravel
+
+
+# --------------------------------------------------------------------------
 # stacked-trajectory Gauss-Newton Jacobian, via the model's REAL __call__
 # --------------------------------------------------------------------------
 
-def _stacked_jacobian(graphdef, params) -> tuple[np.ndarray, int]:
-    flat_params, unravel = ravel_pytree(params)
+def _stacked_jacobian(graphdef, params, rest) -> tuple[np.ndarray, int]:
+    flat_params, unravel = _make_real_ravel(params)
     n_params = flat_params.shape[0]
 
     traj_inputs, _ = generate_microgrid_trajectory(
@@ -169,7 +208,9 @@ def _stacked_jacobian(graphdef, params) -> tuple[np.ndarray, int]:
         inputs_t = jnp.asarray(traj_inputs[t], dtype=jnp.float64)
 
         def predict_flat(flat_p, inputs_t=inputs_t):
-            m = nnx.merge(graphdef, unravel(flat_p))
+            # rest (e.g. M6_fix's StaticNorm mu/sigma) is not part of
+            # what's being differentiated - held fixed, closed over.
+            m = nnx.merge(graphdef, unravel(flat_p), rest)
             states = m.init_state()
             out, _ = m(inputs_t, states)
             return out.reshape(-1)
@@ -195,10 +236,15 @@ def _null_basis(j: np.ndarray, rank: int) -> np.ndarray:
 # Adam / SGD trajectories from the LS-init point
 # --------------------------------------------------------------------------
 
-def _run_trajectory(label, variant, tx, graphdef, ls_init_params, inputs, targets, null_basis):
-    flat_init, unravel = ravel_pytree(ls_init_params)
+def _run_trajectory(label, variant, tx, graphdef, ls_init_params, rest, inputs, targets, null_basis):
+    # null_basis's columns are in the _make_real_ravel ordering (from
+    # _stacked_jacobian) - displacement must be raveled the SAME way for
+    # the projection below to be meaningful, not plain ravel_pytree
+    # (which would promote to complex128 and silently misalign/break -
+    # see _make_real_ravel's docstring).
+    flat_init, _ = _make_real_ravel(ls_init_params)
     flat_init_np = np.asarray(flat_init, dtype=np.float64)
-    model = nnx.merge(graphdef, ls_init_params)
+    model = nnx.merge(graphdef, ls_init_params, rest)
 
     pred_dtype_check, _ = model(inputs, model.init_state())
     if pred_dtype_check.dtype != jnp.float64:
@@ -217,7 +263,7 @@ def _run_trajectory(label, variant, tx, graphdef, ls_init_params, inputs, target
         steps.append(step)
         losses.append(loss_v)
         if step % DISPLACEMENT_EVERY == 0 or step == EPOCHS - 1:
-            cur_flat = np.asarray(ravel_pytree(nnx.state(model, nnx.Param))[0], dtype=np.float64)
+            cur_flat = np.asarray(_make_real_ravel(nnx.state(model, nnx.Param))[0], dtype=np.float64)
             disp = cur_flat - flat_init_np
             null_component = null_basis.T @ (null_basis @ disp)
             null_norm = float(np.linalg.norm(null_component))
@@ -252,9 +298,13 @@ def _self_check_ravel_roundtrip(variant: str, model: StackedModel, inputs: jax.A
     throughout blocks.py/control.py). Checked directly rather than
     trusted: split -> ravel -> unravel -> merge -> forward, compared
     bit-exactly against the original model's own forward output."""
-    graphdef, state = nnx.split(model, nnx.Param)
+    # M6_fix's StaticNorm holds mu/sigma as nnx.Variable, not nnx.Param
+    # (s4dpc/blocks.py) - nnx.split with a single non-exhaustive filter
+    # raises ValueError("Non-exhaustive filters...") once any such
+    # leftover state exists; `...` explicitly captures everything else.
+    graphdef, state, rest = nnx.split(model, nnx.Param, ...)
     flat, unravel = ravel_pytree(state)
-    rebuilt = nnx.merge(graphdef, unravel(flat))
+    rebuilt = nnx.merge(graphdef, unravel(flat), rest)
     original_out, _ = model(inputs, model.init_state())
     rebuilt_out, _ = rebuilt(inputs, rebuilt.init_state())
     max_diff = float(jnp.max(jnp.abs(original_out - rebuilt_out)))
@@ -288,8 +338,8 @@ def main() -> None:
         # --- (a) rank/redundancy at a FRESH random init ---
         rand_model = _build_model(variant, key)
         _self_check_ravel_roundtrip(variant, rand_model, inputs)
-        graphdef, rand_params = nnx.split(rand_model, nnx.Param)
-        j_rand, n_params = _stacked_jacobian(graphdef, rand_params)
+        graphdef, rand_params, rand_rest = nnx.split(rand_model, nnx.Param, ...)
+        j_rand, n_params = _stacked_jacobian(graphdef, rand_params, rand_rest)
         rank_rand, null_rand = _rank_and_null(j_rand, n_params)
         pct_redundant = 100 * null_rand / n_params
         print(f"  (a) [random init] n_params={n_params}  rank={rank_rand}  null={null_rand}  "
@@ -306,8 +356,8 @@ def main() -> None:
             continue
 
         # --- (d) null basis AT the LS-init point ---
-        graphdef_ls, ls_params = nnx.split(ls_model, nnx.Param)
-        j_ls, n_params_ls = _stacked_jacobian(graphdef_ls, ls_params)
+        graphdef_ls, ls_params, ls_rest = nnx.split(ls_model, nnx.Param, ...)
+        j_ls, n_params_ls = _stacked_jacobian(graphdef_ls, ls_params, ls_rest)
         rank_ls, null_ls = _rank_and_null(j_ls, n_params_ls)
         basis_ls = _null_basis(j_ls, rank_ls)
         print(f"  [LS-init point] rank={rank_ls}  null={null_ls}  (may differ from random-init rank - "
@@ -317,13 +367,14 @@ def main() -> None:
         # --- (b)/(c)/(d) Adam vs SGD from the LS-init point ---
         print("  --- Adam ---")
         losses_a, null_a, orth_a = _run_trajectory(
-            "Adam", variant, optax.adamw(LR, weight_decay=0.0), graphdef_ls, ls_params, inputs, targets, basis_ls
+            "Adam", variant, optax.adamw(LR, weight_decay=0.0), graphdef_ls, ls_params, ls_rest,
+            inputs, targets, basis_ls
         )
         rep_a = _orders_report("Adam", losses_a, init_loss)
 
         print("  --- SGD ---")
         losses_s, null_s, orth_s = _run_trajectory(
-            "SGD", variant, optax.sgd(LR), graphdef_ls, ls_params, inputs, targets, basis_ls
+            "SGD", variant, optax.sgd(LR), graphdef_ls, ls_params, ls_rest, inputs, targets, basis_ls
         )
         rep_s = _orders_report("SGD", losses_s, init_loss)
 

@@ -188,15 +188,27 @@ def _train_ensemble(
     optimizer = nnx.Optimizer(ensemble, optax.adamw(learning_rate, weight_decay=weight_decay), wrt=nnx.Param)
 
     def loss_fn(model):
-        graphdef, params = nnx.split(model, nnx.Param)
+        # M6_fix's StaticNorm holds mu/sigma as nnx.Variable, not
+        # nnx.Param (s4dpc/blocks.py - deliberately not wrt=nnx.Param-
+        # trainable) - nnx.split with a single non-exhaustive filter
+        # raises ValueError ("Non-exhaustive filters") once any such
+        # leftover state exists, unlike nnx.state(x, nnx.Param) alone
+        # (used elsewhere in this file), which tolerates it silently.
+        # `...` explicitly captures everything else; `rest` doesn't vary
+        # per ensemble member (StaticNorm's uncalibrated mu=0/sigma=1
+        # init doesn't depend on the per-member key) but still carries
+        # the same leading n_ensemble axis as params (built by the same
+        # nnx.vmap'd init_ensemble), so it must be vmapped alongside
+        # params, not closed over as a single shared value.
+        graphdef, params, rest = nnx.split(model, nnx.Param, ...)
 
-        def single_member(p, inp, tgt):
-            m = nnx.merge(graphdef, p)
+        def single_member(p, r, inp, tgt):
+            m = nnx.merge(graphdef, p, r)
             states = m.init_state(N=block_config.N)
             pred, _ = m(inp, states)
             return jnp.mean((pred - tgt) ** 2)
 
-        losses = jax.vmap(single_member)(params, inputs_grid, targets_grid)
+        losses = jax.vmap(single_member)(params, rest, inputs_grid, targets_grid)
         return jnp.mean(losses), losses
 
     for _ in range(epochs):
