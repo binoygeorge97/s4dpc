@@ -18,3 +18,5 @@ date,kernel_slug,accelerator,minutes
 2026-08-12,s4dpc-pilot-ensemble,T4,1.28
 2026-08-12,s4dpc-controller-oracles-m0-m1,T4,0.22
 2026-08-13,s4dpc-controller-oracles-m0-m1,T4,50.39
+2026-08-13,s4dpc-pilot-surrogates,T4,0.93
+2026-08-13,s4dpc-pilot-surrogates,T4,1.43
