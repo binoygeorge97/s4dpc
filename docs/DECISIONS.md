@@ -1357,3 +1357,154 @@ step rather than open-ended follow-up.
 
 GPU cost this batch: jit pilot 1.77 min, all-cases sweep+diagnostics
 18.23 min (both logged in `gpu_ledger.csv`).
+
+---
+
+## 2026-08-12 — 10-seed rerun: the kink is now a clean, universal result across all 7 cases; the Kreiss correlation is confirmed for M6, killed for M3; case 6 is a reproducible ~50-60% divergence case, not a fluke
+
+`tools/diagnose_all_cases_10seeds.py`, same checkpoints structure as the
+3-seed run (`sweep.py --n_seeds 10`, same 40k budget), full
+`diagnostics.py` suite on every non-diverged checkpoint this time, not
+just Markov+drift. 52.27 T4-min (`gpu_ledger.csv`).
+
+**Lead result - the cleanest thing this investigation has produced:**
+median kink magnitude and local-linearity defect, non-diverged seeds,
+every one of the 7 cases:
+
+```
+        M3 kink        M3 defect       M6 kink       M6 defect
+case1   0.000e+00      6.14e-15        7.90e+00      2.16e-01
+case2   0.000e+00      8.69e-15        1.12e+01      3.37e-01
+case3   0.000e+00      6.81e-15        9.56e+00      2.67e-01
+case4   0.000e+00      7.17e-15        1.58e+01      4.70e-01
+case5   0.000e+00      5.87e-15        1.14e+01      3.09e-01
+case6   0.000e+00      9.78e-14        1.45e+02      2.88e+00
+case7   0.000e+00      6.91e-15        6.62e+00      1.83e-01
+```
+
+M3's kink is **exactly** `0.000e+00`, bit-for-bit, on every single case
+- not "small," zero, for the same reason the case-3-only result was
+exactly zero (`jacfwd` of a truly affine map is a mathematical constant
+independent of the evaluation point). Its local-linearity defect never
+exceeds ~1e-13 anywhere. M6's kink and defect are substantial in every
+one of the 7 cases with zero overlap against M3's values anywhere in
+the table - not one case where M6 looks linear or M3 looks kinked. This
+is the built-in control working exactly as designed, now validated
+across the full case ladder rather than one case: **the kink is real,
+architectural, and present regardless of which of these 7 plants is
+being identified.**
+
+**Case 6's divergence is reproducible, not a 3-seed fluke: 5/10 (M3)
+and 6/10 (M6) seeds diverged** (`markov_err_mean > 1e3`). Every other
+case's divergence rate is 0-10%. This is a measurable ~50-60% failure
+probability specific to case 6, matching this document's established
+Adam/overparameterization mechanism (D-only, then the redundancy study,
+now a real full-scale sweep) closely enough that it reads as the same
+phenomenon recurring, not a coincidence.
+
+**Correlation, redone properly (Pearson AND Spearman, with p-values -
+Spearman is the more honest statistic at n=7, robust to the
+outlier-magnitude problem the 3-seed Pearson-only version had):**
+
+```
+                              Pearson r (p)         Spearman rho (p)
+M3, all 7 cases              +1.0000 (0.0000)        +0.179 (0.702)
+M3, excluding case 6         -0.093  (0.862)          -0.314 (0.544)
+M6, all 7 cases               +0.999 (0.0000)          +0.786 (0.036)
+M6, excluding case 6          +0.861 (0.028)            +0.657 (0.156)
+```
+
+**M3: dead on arrival, by the statistic that actually matters here.**
+Pearson still reads +1.0000 on the full 7-case set (case 6's absolute
+*magnitude* - a median of 1.67e4, driven by half its seeds landing near
+1e11 - still dominates a magnitude-sensitive statistic), but Spearman -
+which only cares about rank order, not magnitude - is 0.18 (p=0.70): the
+case ranking by M3's Markov error does not track the case ranking by
+Kreiss amplification at all. Both statistics agree once case 6 is
+excluded (-0.09 to -0.31, neither significant). M3's fit quality looks
+like pure optimization noise, exactly as the single-case entry above
+already suggested, now confirmed with 7x the data.
+
+**M6: real by Spearman on the full set, real by Pearson with case 6
+excluded - genuinely mixed evidence, not a clean confirmation, stated
+plainly rather than rounded up.** Spearman rho=0.786 (p=0.036) on all 7
+cases clears significance. Pearson r=0.861 (p=0.028) with case 6
+excluded also clears it. But Spearman with case 6 excluded (rho=0.657,
+p=0.156) does not - n=6 leaves rank correlation underpowered, and this
+is the reading the user flagged in advance as "cannot be load-bearing at
+3 seeds," now showing the same fragility persists at 10. The honest
+summary: two of four reasonable statistics clear p<0.05, none of them
+by a wide margin, and they do not all agree. This is evidence for a real
+relationship, not proof of one.
+
+**Divergence rate vs 4 case-level predictors** (kreiss_like, rho,
+non-normality `||AA^T-A^TA||_F`, `max_k||A_d^k||_2`):
+
+```
+                    Pearson r (p)              Spearman rho (p)
+            M3                M6           M3              M6
+kreiss      +0.980 (0.0001)   +0.973 (0.0002)   +0.134 (0.775)   +0.579 (0.174)
+rho         +0.240 (0.605)    +0.313 (0.494)    -0.091 (0.847)   +0.373 (0.410)
+non-norm.   +0.980 (0.0001)   +0.972 (0.0002)   +0.134 (0.775)   +0.694 (0.083)
+max||A^k||  +0.980 (0.0001)   +0.973 (0.0002)   +0.267 (0.562)   **+0.810 (0.027)**
+```
+
+**Spectral radius (`rho`) never predicts divergence - Pearson or
+Spearman, either variant.** It is flat (1.00-1.04) across every case in
+this ladder, so it structurally can't. The three transient-amplification
+-flavored predictors (kreiss_like, non-normality, max transient growth)
+all show the same story: Pearson near-perfect for both variants
+(dominated by case 6's simultaneous extremity on every one of these
+correlated predictors - they are not independent signals here, so this
+mirrors the earlier magnitude-vs-rank problem), Spearman weaker and only
+clearing significance once (`max_k||A_d^k||_2` for M6, rho=0.810,
+p=0.027). Divergence rate is 0 for 5-6 of 7 cases for either variant,
+which makes rank correlation on it inherently underpowered at n=7 (a
+near-degenerate, mostly-tied variable) - this is a sample-size
+limitation on the statistic, not evidence against the predictor.
+Qualitatively unambiguous either way: rho never shows even a hint of a
+relationship: every other correlation attempted, including the weak
+ones, is at minimum in the same direction; rho isn't just weaker, it's
+uncorrelated.
+
+**The case 4-vs-6 tension, and why it matters more than the correlation
+numbers above:** the user's own DPC failures were observed on cases 4
+AND 6, despite case 4's Kreiss (3.30) sitting far below case 6's (330.3)
+- barely above the "easy" cases. If transient amplification is really
+what drives this, case 4 should read as meaningfully harder than the
+easy cases on the identification side too, not just on the control side.
+
+```
+                case3 (kreiss=1.00)   case4 (kreiss=3.30)   case6 (kreiss=330.3)   case4 between?
+M3 median          2.168e+00             1.403e+00              1.671e+04            NO
+M6 median          1.902e+02             3.395e+02              4.554e+03             YES
+```
+
+**M3: case 4 sits BELOW case 3 - not intermediate, not even elevated.**
+**M6: case 3 < case 4 < case 6, cleanly monotonic - case 4 genuinely
+reads as intermediate-difficulty, consistent with it being a DPC
+failure case alongside case 6.** This is the single most direct piece
+of evidence in this document connecting the identification-side story
+to the control-side (DPC) observation that motivated the whole
+project: the ordering that matters for control (case 4 and case 6 both
+hard, case 3 easy) shows up in M6 - the architecture actually used for
+DPC - and does NOT show up in M3, the artificial linear control. That
+asymmetry is more informative than either variant's raw correlation
+coefficient, because it is exactly the pattern you'd want if the
+mechanism runs through M6's specific architecture rather than through
+generic identification difficulty that any variant would share.
+
+**Sample-size caveat on case 6 specifically:** with 50-60% divergence,
+the Task 3 diagnostics table above is computed from only 4-5 of 10
+seeds for case 6 (vs 9-10 for every other case) - a survivors-only
+sample. This does not affect the kink/defect finding (which is already
+unambiguous on the 6 cases with full samples) but should be kept in
+mind before leaning on case 6's specific magnitude numbers.
+
+**Not yet done, flagged rather than attempted:** re-running the case-6
+outlier seeds specifically with fresh keys to check whether the exact
+same seeds reproduce divergence (would distinguish "divergence is a
+property of the case" from "divergence is a property of specific
+unlucky initializations") - the 5/10 and 6/10 rates already answer the
+weaker "how often" question the way more seeds would, so this is a
+refinement, not a gap that blocks any claim made above.
