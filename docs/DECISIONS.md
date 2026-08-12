@@ -986,3 +986,120 @@ regardless of input.
 correlating against per-case behavior - blocked on the variant-ladder
 identification run (Task 2/the original variant-ladder work) landing
 first, so there are trained checkpoints worth diagnosing.
+
+---
+
+## 2026-08-12 — Task 2: the redundancy ordering does NOT support the LayerNorm corollary, and the instability test as designed cannot speak to norm at all (construction artifact, caught and explained, not swept under)
+
+Tested the corollary: if LayerNorm makes a variant's parameterization
+more overcomplete than M3's, the same Adam-null-space mechanism found
+for D-only predicts M6 should be more unstable, not just M3.
+`tools/diagnose_variant_redundancy.py`, case 3, float64, all 5 variants
+(`launch/kaggle-variant-redundancy`, Kaggle T4, 60.93 min - see below for
+a first attempt that failed on two real bugs before this).
+
+```
+variant  n_params  rank(rand)  null%(rand)  rank(LS-init)  null%(LS-init)  adam_orders  sgd_orders
+M3         4662        929        80.1%          60            98.7%         +21.98       +18.74
+M4         4934       1451        70.6%          60            98.8%         +22.12       +18.67
+M5         4694        964        79.5%          60            98.7%         +21.98       +18.74
+M6         4966       1476        70.3%          60            98.8%         +22.12       +18.67
+M6_fix     4934       1451        70.6%          60            98.8%         +22.12       +18.67
+```
+
+**Part (a), redundancy at a random init - the corollary's first half
+fails outright.** M5 (79.5%) is very slightly LESS redundant than M3
+(80.1%); M6 (70.3%) is very slightly LESS redundant than M4 (70.6%) -
+the opposite direction of "LayerNorm makes it more overcomplete."
+LayerNorm adds exactly 2×d_model=32 new params (scale, bias) that are
+generically full-rank contributors at a random point, which mechanically
+nudges the overall % redundant down a little, not up. M6_fix (uncalibrated
+StaticNorm ≡ identity, `s4dpc/blocks.py` - never calibrated anywhere in
+this pipeline) is bit-for-bit identical to M4 on every column, exactly
+as the architectural equivalence predicts - not a new finding, a
+consistency check passing.
+
+**Part (b)/(c)/(d) - a real problem with the experiment design, not a
+result:** M3 and M5's `adam_orders`/`sgd_orders`/`adam_final_mse`/
+`sgd_final_mse`/both displacement columns are bit-for-bit IDENTICAL
+(not just close - identical to every printed digit in the raw CSV). So
+are M4, M6, and M6_fix, all three, with each other. This is not noise or
+a coincidence; it is a structural consequence of the LS-init construction
+itself (the same one used for part (a)'s rank at the LS-init point and
+for `tools/validate_diagnostics.py` above): zeroing `out.kernel` (and
+`out2.kernel` for GLU variants) - needed to force the block's output to
+exactly zero for the LS solution to route through the skip connection
+cleanly - has a side effect nothing in the derivation above flagged:
+**it makes the Gauss-Newton gradient of every parameter upstream of `out`
+(`D`, `C_real_imag`, `Lambda_re`, `Lambda_im`, `P`, `B`, `log_step`, AND
+LayerNorm's scale/bias) exactly zero, and this stays true for the entire
+training run, not just at step 0.**
+
+Why it persists, not just holds at init: `seq_output` (the S4Layer's raw
+output, pre-activation) is `conv(norm(skip), kernel-derived-from-C) +
+D*norm(skip)`, and with `C=0, D=0` this is exactly `0` for *any* value
+`norm(skip)` takes - so `d(out.kernel)/d(loss)` is proportional to
+`activation(seq_output) = activation(0) = 0` (GELU(0)=0, or just 0
+directly for M3/M5's no-activation case) at every step, not only step 0,
+*as long as `out.kernel` itself never moves* - which Adam/SGD guarantee
+for an exactly-zero-gradient parameter (zero grad -> zero moment
+estimates -> zero update, every step, by induction). `out.kernel=0`
+therefore isn't just the init condition, it's an exact fixed point that
+gates the entire S4-kernel-and-norm sub-path off from training
+permanently. What's left doing all the work is `out.bias`, `out2.bias`
+(GLU only), `encoder`, `decoder` - a small, LayerNorm-independent
+sub-problem, which is why norm choice cannot possibly show up in
+columns computed from this trajectory. The mechanism itself (Adam's
+per-coordinate normalization random-walking an exact null space, ~22
+orders in one step, SGD staying ~4 orders smaller) clearly generalizes
+beyond D-only's specific factorization to this GLU-gated residual
+sub-network too - a mildly interesting extension - but this experiment,
+as built, cannot and does not test whether LayerNorm's presence changes
+that answer.
+
+**Verdict: the corollary is not confirmed by this experiment, and part
+of it (redundancy) is actively contradicted.** Don't read "M3 ≡ M5 and
+M4 ≡ M6 ≡ M6_fix" as "norm doesn't matter for stability" - it means
+*this specific test* structurally cannot see norm at all, which is a
+different and weaker claim. A valid dynamical test would need an
+LS-init-style starting point where `out.kernel`/`out2.kernel` (and
+therefore the norm/S4-kernel path) are NOT held at a permanent zero-
+gradient fixed point - e.g. genuinely training each variant to a good
+point first (L-BFGS, per the EXP1 resolution above, converges far faster
+than Adam on these small problems and wouldn't inherit this specific
+artifact) and testing Adam-vs-SGD stability from *that* point instead.
+Not attempted here - a real piece of new infrastructure (nonlinear
+optimization to a good point per variant, not a closed-form route
+through zeroed params), and exactly the kind of open-ended detour
+CLAUDE.md §11 warns against building without explicit go-ahead, flagged
+for the same reason the D-only reparameterization search was capped
+after two standard attempts rather than continued indefinitely.
+
+**First attempt failed on two real, independent bugs, both fixed before
+the run above (not swept aside - see the commit and the code comments):**
+(1) `ravel_pytree` concatenates S4LayerEnsemble's genuinely-complex `P`/
+`B` params with the real leaves, promoting the whole flat vector to
+`complex128` - `jax.jacfwd` then refuses outright ("requires real-valued
+inputs"). This is the SAME hazard `tools/diagnose_m3_gauge_full_m3.py`
+(Part B.4, 2026-08-12 entry above) hit and got wrong *silently* instead
+of crashing - its blanket `.astype(float64)` cast discards `P`/`B`'s
+imaginary part rather than raising, so **B.4's reported "full M3:
+rank=1183, null=2455" was computed with `P`/`B`'s imaginary parts
+zeroed, not the real parameterization.** Not re-run/edited retroactively
+(CLAUDE.md: diverged/wrong runs are results, tag don't delete) - superseded
+by this entry's M3 row instead (`rank=929`, `null=3733`, `n_params=4662`
+- note `n_params` is also higher than B.4's 3638 once P/B's imaginary
+parts are counted correctly as real DOF, which B.4's silent cast also
+undercounted). (2) M6_fix's `StaticNorm` holds `mu`/`sigma` as
+`nnx.Variable`, not `nnx.Param` - `nnx.split(model, nnx.Param)` with a
+single non-exhaustive filter raises `ValueError` the instant such
+leftover state exists; `nnx.state(x, nnx.Param)` alone tolerates it
+silently, which is why this went unnoticed until this script became the
+first in the repo to call `nnx.split` (not just `nnx.state`) on a model
+that can be M6_fix - also fixed in `identify.py`'s `_train_ensemble`
+(2026-08-12 float64-default entry above), independent of this
+investigation, since it would have broken the first real M6_fix
+identification run regardless.
+
+GPU cost: first (failed) attempt 1.04 T4-min, corrected re-run 60.93
+T4-min - both logged in `gpu_ledger.csv`.
