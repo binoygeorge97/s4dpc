@@ -250,6 +250,65 @@ Controller work remains on hold pending explicit go-ahead.
 
 ---
 
+## 2026-08-08 — s4dpc/control.py built and smoke-tested; controller work gated on the M3 investigation above, not on general readiness
+
+Per CLAUDE.md's planned repo layout: bounded GRU controller (`u =
+max_action * tanh(head(h))`) + DPC loss + rollout through either the TRUE
+linear plant or a trained S4 surrogate (decode=True, stepped) + an oracle
+discrete-LQR solve via `scipy.linalg.solve_discrete_are`. Adapted from a
+user-provided reference pipeline, not ported verbatim - the one
+deliberate architectural change is that the action is actually bounded
+(the reference computed `max_action` but never applied it).
+
+**Verification before trusting any controller result:** `identify.py`
+trains in conv mode (`decode=False`), but closed-loop control must step
+the model one input at a time (`decode=True`) since future inputs aren't
+known in advance. `tests/test_decode_construction_parity.py` already
+checked the two modes' *params* match at init; that says nothing about
+whether their *forward output* agrees. Added
+`tests/test_control_decode_parity.py`: train a model in conv mode
+(50 epochs, enough to move params off init), load those params into a
+fresh decode=True model, step through the same case-3 trajectory one
+input at a time, compare against the conv-mode output. Passed for both
+M3 (max abs diff 2.73e-4, relative ~4e-5 of target scale) and M6
+(1.31e-5, relative ~2e-6) - `rollout_learned` deploys the same function
+`identify.py` trained, not a silently different one.
+
+**Smoke test** (`tools/smoke_control.py`, case 3, a curriculum ~1/10th
+the length of the reference pipeline's - this was about proving the
+wiring works, not a real result): GRU controllers trained by unrolling
+through the M3 and M6 surrogates, evaluated on the TRUE plant, compared
+against an oracle LQR baseline and a GRU trained directly on the TRUE
+plant (same short budget):
+
+| controller | true-plant cost |
+|---|---|
+| oracle LQR | 235.90 |
+| GRU on TRUE plant (reference) | 415.88 |
+| GRU on M3 surrogate | 895.81 (id teacher_mse=3.62e-3) |
+| GRU on M6 surrogate | 878.69 (id teacher_mse=3.34e-3) |
+
+The ordering (oracle < true-plant GRU < surrogate GRUs) is sane and
+confirms the identify -> control pipeline is wired correctly end to end.
+Cost: 192.70 T4-minutes (logged in `gpu_ledger.csv`) - unexpectedly high,
+because `@nnx.jit` was deliberately left off the training step for this
+first pass (no local jax/flax environment to debug a jit-related failure
+against, so correctness was prioritized over speed). Add jit back before
+any larger controller run.
+
+**Do not read the M3-vs-M6 numbers above as evidence for or against the
+LayerNorm/derivative-fidelity hypothesis.** Both identification runs
+feeding this smoke test were stopped at teacher_mse ~3-4e-3 - by the
+investigation in the entries above and below, neither variant is
+anywhere near its own achievable floor at that budget, and M3
+specifically carries its own unresolved confound. M6 scoring (mildly)
+better than M3 here is exactly the kind of noise that confound predicts,
+not a finding. Controller work stays paused on the M3 investigation, not
+on the controller code's own readiness - the pipeline itself is verified
+and ready to use as soon as identification is trustworthy.
+
+---
+
 ## 2026-08-09 — Mechanism chain, run as branch-gated experiments: both a generic Adam/data-scale problem AND an S4-specific exact non-identifiability are real, and compound
 
 Working hypothesis going in: the S4 parameterization is multiplicatively
@@ -382,6 +441,8 @@ reporting every variant's nmse *relative to its own variant-specific
 least-squares-reachable floor* rather than assuming M3 defines that
 floor for the whole ladder - (ii) is the low-risk option available today
 and doesn't require a another open-ended optimization investigation.
+
+---
 
 **Recommendation:** don't chase a fix for M3's gap this week - EXP 4
 already tried the two most standard fixes (better init, cruder/higher-lr
