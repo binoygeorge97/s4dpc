@@ -107,33 +107,30 @@ def main() -> None:
         pred = inputs_w @ params["W"] + params["b"]
         return jnp.mean((pred - targets_w) ** 2)
 
-    try:
-        opt = optax.lbfgs()
-        opt_state = opt.init(params0)
-        params = params0
-        value_and_grad_fun = optax.value_and_grad_from_state(lbfgs_loss)
-        for _ in range(LBFGS_ITERS):
-            value, grad = value_and_grad_fun(params, state=opt_state)
-            updates, opt_state = opt.update(grad, opt_state, params, value=value, grad=grad, value_fn=lbfgs_loss)
-            params = optax.apply_updates(params, updates)
-        final_lbfgs_loss = float(lbfgs_loss(params))
-        print(f"\n[optax.lbfgs, {LBFGS_ITERS} iters, path=optax.lbfgs] standardized loss={final_lbfgs_loss:.6e}")
-    except Exception as e:
-        print(f"\n[optax.lbfgs raised {type(e).__name__}: {e} - falling back to scipy L-BFGS-B]")
-        from scipy.optimize import minimize
+    # optax.lbfgs's line-search machinery triggered a reproducible
+    # out-of-memory XLA/LLVM compilation failure on the Kaggle CPU kernel
+    # (5 duplicate "Cannot allocate memory" errors from parallel compile
+    # workers, then the process silently produced no lbfgs output at all -
+    # not a catchable Python exception, so a try/except around optax.lbfgs
+    # doesn't help). Using scipy's well-tested L-BFGS-B directly instead -
+    # same quasi-Newton method, answers the same question (does a proper
+    # second-order method reach ~1e-14), without optax's line-search
+    # compilation path.
+    from scipy.optimize import minimize
 
-        def flat_loss_and_grad(flat_params):
-            W = flat_params[: D_INPUT * D_OUTPUT].reshape(D_INPUT, D_OUTPUT)
-            b = flat_params[D_INPUT * D_OUTPUT :]
-            p = {"W": jnp.asarray(W), "b": jnp.asarray(b)}
-            value, grad = jax.value_and_grad(lbfgs_loss)(p)
-            flat_grad = np.concatenate([np.asarray(grad["W"]).ravel(), np.asarray(grad["b"]).ravel()])
-            return float(value), flat_grad.astype(np.float64)
+    def flat_loss_and_grad(flat_params):
+        W = flat_params[: D_INPUT * D_OUTPUT].reshape(D_INPUT, D_OUTPUT)
+        b = flat_params[D_INPUT * D_OUTPUT :]
+        p = {"W": jnp.asarray(W), "b": jnp.asarray(b)}
+        value, grad = jax.value_and_grad(lbfgs_loss)(p)
+        flat_grad = np.concatenate([np.asarray(grad["W"]).ravel(), np.asarray(grad["b"]).ravel()])
+        return float(value), flat_grad.astype(np.float64)
 
-        x0 = np.concatenate([np.asarray(params0["W"]).ravel(), np.asarray(params0["b"]).ravel()]).astype(np.float64)
-        res = minimize(flat_loss_and_grad, x0, jac=True, method="L-BFGS-B", options={"maxiter": LBFGS_ITERS})
-        final_lbfgs_loss = float(res.fun)
-        print(f"[scipy L-BFGS-B, up to {LBFGS_ITERS} iters, path=scipy fallback] standardized loss={final_lbfgs_loss:.6e}")
+    x0 = np.concatenate([np.asarray(params0["W"]).ravel(), np.asarray(params0["b"]).ravel()]).astype(np.float64)
+    res = minimize(flat_loss_and_grad, x0, jac=True, method="L-BFGS-B", options={"maxiter": LBFGS_ITERS})
+    final_lbfgs_loss = float(res.fun)
+    print(f"\n[scipy L-BFGS-B, up to {LBFGS_ITERS} iters, path=scipy (optax.lbfgs OOM'd on Kaggle CPU)] "
+          f"standardized loss={final_lbfgs_loss:.6e}  nit={res.nit}  converged={res.success}")
 
     print(f"\n[summary] closed-form LS (standardized) mse={ls_standardized_mse:.6e}")
     print(f"[summary] Adam {EPOCHS} steps: loss={final_adam_loss:.6e}  rel_W_err={rel_err_final:.6e}")
