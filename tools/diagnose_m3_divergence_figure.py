@@ -77,27 +77,34 @@ def _extract_params(model: StackedModel) -> dict:
 
 
 def _apply_ls_init(model: StackedModel, w_ls_in_out: np.ndarray) -> None:
-    """Same construction as diagnose_m3_reparam.py's _apply_ls_init:
-    zero D and out (so only the residual/skip path is live), route the
-    LS solution straight through via encoder's first d_output columns
-    and an identity block in decoder's first d_output rows."""
+    """Same construction as diagnose_m3_reparam.py's _apply_ls_init, but
+    every leaf is built directly as float64 (dtype=jnp.float64 hardcoded)
+    rather than inherited from the model's pre-existing float32 leaf -
+    nnx.Linear's param_dtype defaults to float32 regardless of the global
+    jax_enable_x64 flag (see tools/diagnose_m3_rank_x64.py and
+    tools/diagnose_m3_exp4_x64.py), so inheriting dtype from the live
+    module would silently stay float32 and undo the whole point of
+    forcing x64. Zero D and out (so only the residual/skip path is
+    live), route the LS solution straight through via encoder's first
+    d_output columns and an identity block in decoder's first d_output
+    rows."""
     block = model.layers[0]
     d_model = D_MODEL
     d_input, d_output = w_ls_in_out.shape
 
-    encoder_kernel = jnp.zeros((d_input, d_model), dtype=model.encoder.kernel.value.dtype)
-    encoder_kernel = encoder_kernel.at[:, :d_output].set(jnp.asarray(w_ls_in_out))
+    encoder_kernel = jnp.zeros((d_input, d_model), dtype=jnp.float64)
+    encoder_kernel = encoder_kernel.at[:, :d_output].set(jnp.asarray(w_ls_in_out, dtype=jnp.float64))
     model.encoder.kernel.value = encoder_kernel
-    model.encoder.bias.value = jnp.zeros_like(model.encoder.bias.value)
+    model.encoder.bias.value = jnp.zeros((d_model,), dtype=jnp.float64)
 
-    block.seq.D.value = jnp.zeros_like(block.seq.D.value)
-    block.out.kernel.value = jnp.zeros_like(block.out.kernel.value)
-    block.out.bias.value = jnp.zeros_like(block.out.bias.value)
+    block.seq.D.value = jnp.zeros_like(block.seq.D.value, dtype=jnp.float64)
+    block.out.kernel.value = jnp.zeros((d_model, d_model), dtype=jnp.float64)
+    block.out.bias.value = jnp.zeros((d_model,), dtype=jnp.float64)
 
-    decoder_kernel = jnp.zeros((d_model, d_output), dtype=model.decoder.kernel.value.dtype)
-    decoder_kernel = decoder_kernel.at[:d_output, :].set(jnp.eye(d_output, dtype=decoder_kernel.dtype))
+    decoder_kernel = jnp.zeros((d_model, d_output), dtype=jnp.float64)
+    decoder_kernel = decoder_kernel.at[:d_output, :].set(jnp.eye(d_output, dtype=jnp.float64))
     model.decoder.kernel.value = decoder_kernel
-    model.decoder.bias.value = jnp.zeros_like(model.decoder.bias.value)
+    model.decoder.bias.value = jnp.zeros((d_output,), dtype=jnp.float64)
 
 
 def _d_only_forward(model: StackedModel, inputs: jax.Array) -> jax.Array:
@@ -143,14 +150,20 @@ def _run_trajectory(label: str, tx, ls_init_params: dict, inputs, targets, null_
         block_config=block_config, d_input=D_INPUT, d_output=D_OUTPUT, n_layers=N_LAYERS,
         decode=False, rngs=nnx.Rngs(params=key),
     )
-    # apply LS-init params directly (fresh model of the right shape)
-    model.encoder.kernel.value = jnp.asarray(ls_init_params["encoder_kernel"], dtype=jnp.float32)
-    model.encoder.bias.value = jnp.asarray(ls_init_params["encoder_bias"], dtype=jnp.float32)
-    model.layers[0].seq.D.value = jnp.asarray(ls_init_params["D"], dtype=jnp.float32)
-    model.layers[0].out.kernel.value = jnp.asarray(ls_init_params["out_kernel"], dtype=jnp.float32)
-    model.layers[0].out.bias.value = jnp.asarray(ls_init_params["out_bias"], dtype=jnp.float32)
-    model.decoder.kernel.value = jnp.asarray(ls_init_params["decoder_kernel"], dtype=jnp.float32)
-    model.decoder.bias.value = jnp.asarray(ls_init_params["decoder_bias"], dtype=jnp.float32)
+    # apply LS-init params directly (fresh model of the right shape),
+    # hardcoded to float64 - same reasoning as _apply_ls_init above
+    model.encoder.kernel.value = jnp.asarray(ls_init_params["encoder_kernel"], dtype=jnp.float64)
+    model.encoder.bias.value = jnp.asarray(ls_init_params["encoder_bias"], dtype=jnp.float64)
+    model.layers[0].seq.D.value = jnp.asarray(ls_init_params["D"], dtype=jnp.float64)
+    model.layers[0].out.kernel.value = jnp.asarray(ls_init_params["out_kernel"], dtype=jnp.float64)
+    model.layers[0].out.bias.value = jnp.asarray(ls_init_params["out_bias"], dtype=jnp.float64)
+    model.decoder.kernel.value = jnp.asarray(ls_init_params["decoder_kernel"], dtype=jnp.float64)
+    model.decoder.bias.value = jnp.asarray(ls_init_params["decoder_bias"], dtype=jnp.float64)
+
+    # self-check: forward pass must actually COMPUTE in float64
+    pred_dtype = _d_only_forward(model, inputs).dtype
+    if pred_dtype != jnp.float64:
+        raise RuntimeError(f"[{label}] forward pass is not float64 (got {pred_dtype}) - not trusting this run")
 
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
     ls_init_flat, unravel = ravel_pytree(ls_init_params)
@@ -200,19 +213,21 @@ def main() -> None:
     init_loss = float(jnp.mean((_d_only_forward(init_model, inputs) - targets) ** 2))
     print(f"LS-init self-check: init_mse={init_loss:.6e} (should be near the LS floor)")
 
-    ls_init_params64 = jax.tree_util.tree_map(lambda x: jnp.asarray(x, dtype=jnp.float64), ls_init_params)
     inputs64 = jnp.asarray(inputs, dtype=jnp.float64)
-    null_basis, n_params = _null_basis_at(ls_init_params64, inputs64)
+    targets64 = jnp.asarray(targets, dtype=jnp.float64)
+    print(f"ls_init_params dtype: {jax.tree_util.tree_leaves(ls_init_params)[0].dtype}, "
+          f"inputs64 dtype: {inputs64.dtype}")
+    null_basis, n_params = _null_basis_at(ls_init_params, inputs64)
     print(f"null_basis shape={null_basis.shape} (n_params={n_params}, expect null_dim~490)")
 
     print("\n=== Adam ===")
     steps_a, losses_a, null_a, orth_a = _run_trajectory(
-        "Adam", optax.adamw(LR, weight_decay=0.0), ls_init_params, inputs, targets, null_basis
+        "Adam", optax.adamw(LR, weight_decay=0.0), ls_init_params, inputs64, targets64, null_basis
     )
 
     print("\n=== SGD ===")
     steps_s, losses_s, null_s, orth_s = _run_trajectory(
-        "SGD", optax.sgd(LR), ls_init_params, inputs, targets, null_basis
+        "SGD", optax.sgd(LR), ls_init_params, inputs64, targets64, null_basis
     )
 
     monotonic_a = all(losses_a[i] <= losses_a[i + 1] * 1.0001 for i in range(len(losses_a) - 1))  # crude check, printed not asserted
