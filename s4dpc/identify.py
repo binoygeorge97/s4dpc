@@ -86,8 +86,41 @@ def fit_least_squares(
     return ab_hat_t.T, mse  # (d_output, d_input) = [A_hat | B_hat]
 
 
+def _target_param_dtype() -> jnp.dtype:
+    """Follows the global jax_enable_x64 flag (set once, by the entry
+    point - s4dpc.sweep - before any JAX op) rather than a second,
+    separately-threaded flag here: one source of truth, matching
+    CLAUDE.md §8's "one flag" precedent for --wandb."""
+    return jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+
+
+def _cast_params(model: StackedModel, dtype: jnp.dtype) -> None:
+    """nnx.Linear/nnx.LayerNorm (encoder/decoder/out/out2/norm) construct
+    their params at float32 by default regardless of the global
+    jax_enable_x64 flag (docs/DECISIONS.md; tools/diagnose_m3_rank_x64.py
+    first found this) - setting the flag alone leaves those weights at
+    float32 precision even though every subsequent op computes in a
+    float64-wide container. S4LayerEnsemble's own params do NOT need this
+    (tools/probe_s4nnx_dtype.py: confirmed to already follow the global
+    flag, unlike flax's Linear/LayerNorm) - but two of them (`P`, `B`)
+    are genuinely COMPLEX (complex128 under x64), not real - a blanket
+    `.astype(float64)` over the whole param tree would silently discard
+    their imaginary part instead of widening precision. Cast complex and
+    real leaves to their respective same-kind dtype."""
+    if dtype == jnp.float32:
+        return  # already the construction default; skip the no-op tree_map
+    complex_dtype = jnp.complex128 if dtype == jnp.float64 else jnp.complex64
+
+    def _cast_leaf(x: jax.Array) -> jax.Array:
+        return x.astype(complex_dtype if jnp.iscomplexobj(x) else dtype)
+
+    state = nnx.state(model, nnx.Param)
+    state = jax.tree_util.tree_map(_cast_leaf, state)
+    nnx.update(model, state)
+
+
 def _build_model(block_config: BlockConfig, n_layers: int, key: jax.Array) -> StackedModel:
-    return StackedModel(
+    model = StackedModel(
         block_config=block_config,
         d_input=D_INPUT,
         d_output=D_OUTPUT,
@@ -95,6 +128,8 @@ def _build_model(block_config: BlockConfig, n_layers: int, key: jax.Array) -> St
         decode=False,
         rngs=nnx.Rngs(params=key),
     )
+    _cast_params(model, _target_param_dtype())
+    return model
 
 
 def _train_one(
