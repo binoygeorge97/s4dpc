@@ -38,9 +38,14 @@ sys.path.insert(0, str(_REPO_ROOT / "tools"))
 import controller_oracles as co  # noqa: E402
 import controller_surrogates as cs  # noqa: E402
 
-# shrink the scope - same functions/code path, less of it
-co.CASES = [3, 6]
-cs.SEED_SELECTION = {("M3", 3): [0, 1], ("M3", 6): [0, 1]}
+# shrink the scope - same functions/code path, less of it. Overrides
+# cs.CONTROL_CASES directly (not co.CASES): CONTROL_CASES is computed
+# once at controller_surrogates' import time (case 6 excluded,
+# docs/DECISIONS.md's 2026-08-13 entries) and _train_ensemble_learned
+# reads that frozen module-level list, not co.CASES live - cases 3/4
+# rather than 3/6 to match real Task 3's scope (case 6 is gone there too).
+cs.CONTROL_CASES = [3, 4]
+cs.SEED_SELECTION = {("M3", 3): [0, 1], ("M3", 4): [0, 1]}
 co.CURRICULUM = [{"N": 5, "epochs": 100}, {"N": 10, "epochs": 100}]
 co.TOTAL_EPOCHS = sum(p["epochs"] for p in co.CURRICULUM)
 

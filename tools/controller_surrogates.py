@@ -9,6 +9,26 @@ controller_oracles.py's module docstring) - this script assumes that
 gate has already been checked and cleared; it does not re-check it and
 must not be run before that check has been done and reported.
 
+CASE 6 EXCLUDED (docs/DECISIONS.md's 2026-08-13 entries): the kill
+criterion DID trigger on case 6 specifically - the oracle (M0, exact
+true dynamics) fails there at 1.3e7x, so a case-6 surrogate result would
+be uninterpretable (any failure is indistinguishable from "BPTT through
+a kreiss_like=330 plant is just unstable regardless of what's being
+controlled through"). This is a control, not a convenience - the M0
+number is what justifies dropping it, and case 6 stays IN all
+identification-side results elsewhere, where it is informative. See
+CONTROL_CASES below.
+
+Final report is a SINGLE combined table (M0/M1/M3/M6 x case, median
+cost + ratio to oracle) - M0/M1's numbers are NOT re-run here; they are
+read back from docs/controller_oracles_summary.csv (already committed,
+produced by controller_oracles.py's earlier run). Re-running would be
+wasteful and would not change anything: each ensemble member's loss/
+gradient is independent per-member under vmap (jnp.mean(losses)'s
+gradient w.r.t. member i's params depends only on member i's own loss),
+so cases 1/2/3/4/5/7's M0/M1 numbers are identical whether or not case 6
+was included in that training batch.
+
 Checkpoint selection: 3 seeds per (variant, case), lowest-index
 non-diverged seed first (diverged = markov_err_mean > 1e3 in the 10-seed
 sweep, docs/DECISIONS.md's 2026-08-12 10-seed entry, sourced from
@@ -45,6 +65,7 @@ loss is computed through, never updated by the controller's optimizer.
 """
 from __future__ import annotations
 
+import csv
 import pathlib
 import sys
 import time
@@ -78,6 +99,16 @@ from s4dpc.systems import get_discrete_matrices  # noqa: E402
 D_MODEL, STATE_SIZE, N_LAYERS, L_MAX = 16, 32, 1, 100
 
 VARIANTS_TO_RUN = ["M3", "M6"]
+
+# case 6 excluded throughout this script - see module docstring
+CONTROL_CASES = [c for c in co.CASES if c != 6]
+
+ORACLE_CSV = _REPO_ROOT / "docs" / "controller_oracles_summary.csv"  # M0/M1, from controller_oracles.py
+
+# user-supplied M6 kink magnitudes (docs/DECISIONS.md's 10-seed entry),
+# for the "does the M6-vs-M3 cost gap track kink" question - reporting
+# only, not consumed by the training/eval logic above.
+M6_KINK_MAGNITUDE = {1: 7.90, 2: 11.2, 3: 9.56, 4: 15.8, 5: 11.4, 7: 6.62}
 
 # lowest-index non-diverged seed, first 3, per (variant, case) - derived
 # from docs/diagnose_all_cases_10seeds_raw.csv's `diverged` flag
@@ -128,7 +159,7 @@ def _train_ensemble_learned(variant: str) -> tuple[nnx.State, list[tuple[int, in
     rolls its trajectory batch through ITS OWN trained surrogate
     checkpoint (rollout_learned) instead of a shared linear (A, B).
     Returns (trained controller param state, member (case, seed) order)."""
-    members = [(case, seed) for case in co.CASES for seed in SEED_SELECTION[(variant, case)]]
+    members = [(case, seed) for case in CONTROL_CASES for seed in SEED_SELECTION[(variant, case)]]
     print(f"  members ({len(members)}): {members}")
 
     surrogate_models = [_build_surrogate(variant, case, seed) for case, seed in members]
@@ -205,10 +236,12 @@ def main() -> None:
         note = f"  <- excluded {excl} (diverged, markov_err_mean > 1e3)" if excl else ""
         print(f"  {variant} case{case}: {seeds}{note}")
 
+    print(f"\nCONTROL_CASES (case 6 excluded - oracle fails there, see module docstring): {CONTROL_CASES}")
+
     oracle_costs: dict[int, float] = {}
     eval_keys: dict[int, jax.Array] = {}
     true_AB: dict[int, tuple] = {}
-    for case in co.CASES:
+    for case in CONTROL_CASES:
         A_d, B_d = get_discrete_matrices(co.DT, case)
         true_AB[case] = (A_d, B_d)
         eval_key = jax.random.fold_in(jax.random.PRNGKey(123), case)
@@ -254,10 +287,10 @@ def main() -> None:
                           "oracle_lqr_cost": oracle_costs[case]}
             rows.append(result)
 
-    print("\n\n=== SUMMARY: median cost + ratio to oracle LQR, per (variant, case) ===")
+    print("\n\n=== M3/M6 SUMMARY: median cost + ratio to oracle LQR, per (variant, case) ===")
     print(f"{'variant':8s} {'case':5s} {'oracle_lqr':>12s} {'median_cost':>14s} {'median_ratio':>13s} {'n_finite':>9s}")
     for variant in VARIANTS_TO_RUN:
-        for case in co.CASES:
+        for case in CONTROL_CASES:
             these = [r for r in rows if not r.get("failed") and r["oracle"] == variant and r["case"] == case]
             if not these:
                 continue
@@ -274,6 +307,56 @@ def main() -> None:
         DOCS_DIR.mkdir(parents=True, exist_ok=True)
         (DOCS_DIR / "controller_surrogates_summary.csv").write_text("\n".join(lines))
         print(f"\nwrote {DOCS_DIR / 'controller_surrogates_summary.csv'}")
+
+    # ============================================================
+    # Combined M0/M1/M3/M6 table - the one the user actually asked for.
+    # M0/M1 read back from the already-committed oracle run (not
+    # re-trained - see module docstring for why that's valid).
+    # ============================================================
+    if not ORACLE_CSV.exists():
+        print(f"\nWARNING: {ORACLE_CSV} not found - skipping the combined M0/M1/M3/M6 table. "
+              f"(controller_oracles.py must be run and its CSV committed first.)")
+        return
+
+    with open(ORACLE_CSV, newline="") as f:
+        oracle_rows = [r for r in csv.DictReader(f) if int(r["case"]) in CONTROL_CASES]
+
+    print("\n\n=== COMBINED TABLE: M0 / M1 / M3 / M6, median cost + ratio to oracle LQR, per case ===")
+    print(f"{'oracle':8s} {'case':5s} {'oracle_lqr':>12s} {'median_cost':>14s} {'median_ratio':>13s} "
+          f"{'n_finite':>9s} {'m6_kink':>8s}")
+    combined: list[dict] = []
+    for oracle_name in ["M0", "M1", "M3", "M6"]:
+        for case in CONTROL_CASES:
+            if oracle_name in ("M0", "M1"):
+                these_costs = [float(r["cost"]) for r in oracle_rows if r["oracle"] == oracle_name and int(r["case"]) == case]
+                these_ratios = [float(r["cost_ratio_to_oracle"]) for r in oracle_rows if r["oracle"] == oracle_name and int(r["case"]) == case]
+                these_finite = [r["finite"] == "True" for r in oracle_rows if r["oracle"] == oracle_name and int(r["case"]) == case]
+            else:
+                these = [r for r in rows if not r.get("failed") and r["oracle"] == oracle_name and r["case"] == case]
+                these_costs = [r["cost"] for r in these]
+                these_ratios = [r["cost_ratio_to_oracle"] for r in these]
+                these_finite = [r["finite"] for r in these]
+            if not these_costs:
+                continue
+            median_cost = float(np.median(these_costs))
+            median_ratio = float(np.median(these_ratios))
+            n_finite = sum(1 for f in these_finite if f)
+            kink = M6_KINK_MAGNITUDE.get(case, float("nan")) if oracle_name == "M6" else float("nan")
+            kink_str = f"{kink:8.2f}" if np.isfinite(kink) else " " * 8
+            print(f"{oracle_name:8s} {case:5d} {oracle_costs[case]:12.4f} {median_cost:14.4e} "
+                  f"{median_ratio:13.4e} {n_finite:9d}/{len(these_costs)} {kink_str}")
+            combined.append({
+                "oracle": oracle_name, "case": case, "oracle_lqr_cost": oracle_costs[case],
+                "median_cost": median_cost, "median_ratio_to_oracle": median_ratio,
+                "n_finite": n_finite, "n_total": len(these_costs),
+                "m6_kink_magnitude": kink if np.isfinite(kink) else "",
+            })
+
+    if combined:
+        header = sorted({k for r in combined for k in r.keys()})
+        lines = [",".join(header)] + [",".join(str(r.get(h, "")) for h in header) for r in combined]
+        (DOCS_DIR / "controller_comparison_summary.csv").write_text("\n".join(lines))
+        print(f"\nwrote {DOCS_DIR / 'controller_comparison_summary.csv'}")
 
 
 if __name__ == "__main__":

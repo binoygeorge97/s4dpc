@@ -1608,3 +1608,62 @@ itself. Case 4 is unambiguously clear to proceed on. What to do about
 case 6 specifically (exclude it from the Task 3 table with this entry
 as the reason; run it anyway and report the confound explicitly
 alongside the numbers; something else) is left to the user.
+
+---
+
+## 2026-08-13 — User-confirmed corrections from the Task 2 kill criterion: two claims superseded, one distinction stated as the paper's central caveat
+
+Three things to put on record before any further running, per instruction.
+
+**1. Case 4's DPC failure was the unbounded-action bug, not its
+dynamics - SUPERSEDED.** A prior analysis (external to this document -
+not something recorded in DECISIONS.md, so nothing here is being
+retroactively edited) attributed case 4's original DPC failure to
+Jordan-block non-normality and bad input Jacobians. That analysis was
+diagnosing a controller emitting ~1e7 against training inputs in
+[-10,10] (dpc_example's unbounded `StandaloneGRUController`) - i.e. it
+was characterizing the FAILURE MODE of an already-broken controller,
+not a property of case 4's dynamics. With the action bound fixed
+(Task 1, `s4dpc.control.BoundedGRUController`), case 4 stabilizes at
+1.06x oracle cost through the true plant. The Jordan-block/input-
+Jacobian analysis is superseded as an explanation for case 4's DPC
+failure specifically; it may still be a valid description of case 4's
+linear-algebraic structure, just not the cause of the DPC result it was
+invoked to explain.
+
+**2. Case 6's 1.3e7x failure carries no information about surrogate
+quality.** It fails at the same magnitude through the TRUE `(A_d, B_d)`
+as through any surrogate. What it measures is BPTT instability through
+a plant with `kreiss_like=330.3` (two orders of magnitude above every
+other case) - a property of gradient-based optimization through that
+specific transient-amplification profile, not of how well any model
+(learned or exact) approximates the dynamics. Any future case-6 result,
+in this document or the paper, needs this framing attached or it will
+misread as a surrogate-fidelity finding.
+
+**3. Identification difficulty and control difficulty are different
+phenomena - the paper must not conflate them.** The 10-seed
+identification entry found `kreiss_like` orders M6's Markov-parameter
+error (case3 < case4 < case6: 190 / 340 / 4554). The controller run
+just showed `kreiss_like` does NOT order GRU/DPC control difficulty
+under bounded actions: cases 2 and 5 sit at ~41x oracle cost with
+`kreiss_like` 1.01/1.05 (near the lowest of all 7 cases), while case 4
+at `kreiss_like=3.30` (second-highest) is trivial (1.06x). A single
+"transient amplification explains everything" story cannot be true of
+both axes at once with these numbers. Whatever explains cases 2/5 is
+task 2026-08-13's open question (saturation check, in progress) - but
+regardless of that answer, the ordering mismatch itself is real and
+already-established: identification error and control cost respond to
+different properties of the case, and the paper's framing needs to keep
+those two claims separably supported rather than treating one as a
+proxy for the other.
+
+**Next, per instruction:** the saturation check on cases 2/5 (does
+`max_action=50` bind for those two plants specifically?) runs before
+Task 3 is launched, since a bound artifact there would confound the
+M3/M6 surrogate comparison on those cases the same way the missing
+bound confounded case 4 originally. Task 3 itself now excludes case 6
+(the oracle control fails there, so no surrogate result on case 6 would
+be interpretable) while keeping case 6 in all identification-side
+results, where `docs/DECISIONS.md`'s prior entries already show it is
+informative.

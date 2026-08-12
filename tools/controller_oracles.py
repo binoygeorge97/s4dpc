@@ -163,6 +163,9 @@ def _train_ensemble(grid: dict, label: str) -> nnx.State:
     return nnx.state(ensemble, nnx.Param)
 
 
+SATURATION_THRESHOLD_FRAC = 0.95  # |u| >= this fraction of max_action counts as "at saturation"
+
+
 def _evaluate(controller: BoundedGRUController, A: np.ndarray, B: np.ndarray, eval_key: jax.Array) -> dict:
     x0 = jax.random.uniform(eval_key, (EVAL_BATCH, D_X), minval=-EVAL_X0_RANGE, maxval=EVAL_X0_RANGE, dtype=jnp.float64)
     x_hist, u_hist = evaluate_controller_on_true(controller, A, B, x0, EVAL_HORIZON)
@@ -172,10 +175,16 @@ def _evaluate(controller: BoundedGRUController, A: np.ndarray, B: np.ndarray, ev
     max_norm = float(np.max(np.linalg.norm(x_hist, axis=-1)))
     finite = bool(np.isfinite(cost) and np.all(np.isfinite(x_hist)) and np.all(np.isfinite(u_hist)))
     max_abs_u = float(np.max(np.abs(u_hist))) if finite else float("inf")
+    # controller.max_action, NOT the module MAX_ACTION constant - stays
+    # correct when called on a controller trained at a different bound
+    # (tools/controller_saturation.py's max_action=200 rerun).
+    saturation_frac = (
+        float(np.mean(np.abs(u_hist) >= SATURATION_THRESHOLD_FRAC * controller.max_action)) if finite else float("nan")
+    )
     return {
         "cost": cost if finite else float("inf"), "finite": finite,
         "init_norm": init_norm, "final_norm": final_norm, "max_norm": max_norm,
-        "max_abs_u": max_abs_u,
+        "max_abs_u": max_abs_u, "saturation_frac": saturation_frac,
     }
 
 
