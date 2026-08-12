@@ -1103,3 +1103,37 @@ identification run regardless.
 
 GPU cost: first (failed) attempt 1.04 T4-min, corrected re-run 60.93
 T4-min - both logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-12 — Corollary closed: LayerNorm/overparameterization thread ends here, dead
+
+Reviewed the entry above with the actual numbers in front of us rather
+than the direction predicted: M5 vs M3 is 79.5% vs 80.1% redundant at a
+random init; M6 vs M4 is 70.3% vs 70.6%. LayerNorm does not meaningfully
+change overparameterization in either pair - both differences are under
+1 percentage point, and both go slightly the wrong way (LayerNorm's own
+params are generically full-rank, so adding them can only ever nudge %
+redundant down, never up). The premise the corollary needed - "LayerNorm
+makes the parameterization more overcomplete" - is measured and flat.
+There is no need to chase a corrected dynamical (Adam-vs-SGD) test to
+settle the second half of the corollary, because the first half already
+fails on its own terms.
+
+**Verdict: the Adam/overparameterization finding (D-only, generalizes to
+the GLU-gated residual sub-network - both entries above) and the
+LayerNorm/kink hypothesis (CLAUDE.md sec 1's original claim) are two
+separate mechanisms, not one chain.** Nothing links them. The
+Adam-instability work stands on its own as a real, float64-confirmed,
+mechanistically-explained result about optimizer choice under
+overparameterized multiplicative factorizations - worth reporting as
+exactly that, not as a cause of or explanation for whatever LayerNorm
+turns out to be doing to the Jacobian. This thread is closed; the next
+entries return to the original kink hypothesis directly, on trained
+(not LS-init-constructed) checkpoints.
+
+**For the record:** M6_fix's `StaticNorm` never completed a real
+identification run before this session's `nnx.split` fix (entry above)
+- every M6_fix number anywhere before 2026-08-12 is void, not merely
+float32-imprecise. There is no valid pre-fix M6_fix baseline to compare
+anything against.
