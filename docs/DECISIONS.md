@@ -421,6 +421,85 @@ picture is two compounding effects, not one:
    "actively unstable at the optimum" (EXP 3 + EXP 4b).
 Neither alone explains all four results; both together do.
 
+**EXP 1 was a false alarm, and its investigation surfaced a real bug in
+EXP 3's number - both resolved here.** `nnx.Linear(9,6)` under MSE loss
+IS least squares: convex, unique optimum, nothing to tune. Two closed
+-form-adjacent checks (`tools/diagnose_m3_exp1_resolve.py`, standardized,
+Kaggle CPU):
+
+1. `||W_adam - W_LS||_F / ||W_LS||_F`, tracked every 400 steps: `1.322 ->
+   0.994 -> 0.910 -> 0.875 -> 0.851 -> 0.831` at step 2000 - monotonically
+   shrinking, i.e. moving toward the correct unique optimum the whole
+   time, just slowly.
+2. The same convex objective refit with a quasi-Newton method: `optax.
+   lbfgs` triggered a reproducible XLA/LLVM out-of-memory compilation
+   failure on the Kaggle CPU kernel (5 duplicate "Cannot allocate memory"
+   errors from parallel compile workers; not a catchable Python
+   exception, so a try/except around it doesn't help - switched to
+   scipy's L-BFGS-B, same method family, no optax compilation path).
+   Converged in 46 iterations to `loss=2.93e-8` - about 5 orders of
+   magnitude closer to the `2.12e-15` standardized-LS floor than 2000
+   Adam steps (`7.03e-3`), using 43x fewer iterations.
+
+**Verdict: EXP 1 was a false alarm.** The branch rule that treated 2000
+Adam steps as decisive for a convex objective was wrong to do so - a
+convex problem under a slow first-order optimizer at too small a budget
+is not evidence of anything except optimizer choice/speed. No fix
+needed, no harness bug, nothing to learn from tuning Adam further here.
+
+**While investigating EXP 1, a real bug was found in EXP 3's reported
+rank.** D-only's forward pass (encoder -> elementwise D-scale -> out ->
+residual add -> decoder) is a composition of exclusively affine
+operations, so its output is *exactly* `inputs @ W_eff + b_eff` for some
+`W_eff` (9,6) and `b_eff` (6,) - **60 effective degrees of freedom,
+globally, regardless of how the 550 raw parameters vary.** Verified two
+ways (`tools/diagnose_m3_rank_sanity.py`): analytically from the code
+structure, and empirically (`|y(a*u+(1-a)*v) - (a*y(u)+(1-a)*y(v))| =
+4.8e-7`, zero up to float32 noise). Since predictions over any batch are
+a fixed linear embedding of `(W_eff, b_eff)`, the Gauss-Newton Jacobian's
+rank is bounded by 60 everywhere - a hard linear-algebra fact, not an
+approximation. EXP 3 reported rank 518 (null 32). Printing the *full*
+550-value singular spectrum immediately showed why: 60 "genuine" values
+(322.6 down to 0.49) followed by an abrupt ~5-order-of-magnitude drop to
+~8e-6 at index 60 - exactly the predicted cliff - but that band (8e-6
+down to 4.6e-8, indices 60-517) is NOT machine-precision zero, it's
+sitting right where float32 rounding noise would land relative to a
+~322 top singular value (~1e-7 relative precision). EXP 3's Jacobian was
+computed in JAX's default float32 and only cast to float64 *after* the
+fact - the differentiation itself never ran in float64.
+
+**Confirmed by forcing true float64 throughout**
+(`tools/diagnose_m3_rank_x64.py`, `jax.config.update("jax_enable_x64",
+True)` before any JAX op, not just an output cast): index 59 = 0.488,
+index 60 = **1.73e-13** - a genuine machine-epsilon cliff, not a noise
+band. Numerical rank = **60 exactly**. Null dimension = **490**, not 32.
+
+**"32 = 2 x d_model" was a coincidence of where float32 noise happened
+to sit relative to the rank tolerance, not a real mathematical
+signature.** The qualitative finding survives and is if anything
+cleaner: D-only's 550 raw parameters compute a function with only 60
+true degrees of freedom - *exactly* the same effective dimensionality as
+EXP 1's plain `nnx.Linear(9,6)`. D-only and the plain linear layer
+compute the identical function class; D-only just reaches it through 550
+redundant coordinates instead of 60 exact ones. The `D_i -> c*D_i,
+out_kernel[i,:] -> out_kernel[i,:]/c` symmetry derived and verified
+earlier is still exactly correct algebraically (it doesn't depend on
+floating point at all) and is a genuine subset of the true null space -
+it just accounts for 16 of the real 490 dimensions, not 32 of a false
+518. The remaining ~474 dimensions are not yet characterized; the most
+likely source (not yet verified) is generic deep-linear-network
+redundancy from composing several affine layers to represent one small
+affine map (e.g. `out_kernel`/`decoder_kernel` only ever appearing as a
+product in the D-only forward pass, discussed but not yet confirmed
+below), which would make this a generic overparameterization phenomenon
+rather than something specific to S4's `Lambda_re`/`log_step`
+parameterization choices - weakening, not strengthening, the
+S4-specific framing of the original working hypothesis. Every downstream
+Part B/C check below uses the corrected 490-dimensional null space, not
+the earlier 32-dimensional one.
+
+---
+
 **M3-as-control confound, flagged per instruction:** M3 was intended as
 the "capacity is fine" control for the M3/M4/M5/M6 variant ladder - the
 LTI cell the other variants' norm/activation/glu ablations are compared
