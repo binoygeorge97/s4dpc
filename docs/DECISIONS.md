@@ -914,3 +914,75 @@ re-running it.
 teacher_mse (or any number derived from one, e.g. the controller smoke
 test's 895.8/878.7) against a post-flip number without re-running the
 older side in float64 first.
+
+---
+
+## 2026-08-12 — Task 3: `s4dpc/diagnostics.py` built and validated against ground truth
+
+Four functions, operating on an already-constructed `decode=True`
+`StackedModel` with trained params loaded in (identify.py trains
+`decode=False`; deploying/analyzing one input at a time needs
+`decode=True`, same params - `tests/test_control_decode_parity.py`
+already verifies the two modes agree on trained, not just initialized,
+params):
+
+- `markov_parameters`: `G_h = d x_{k+h} / d u_k`, h=1..H, of the
+  linearized AUGMENTED (physical state + S4 hidden state) system.
+  Computed by autodiff (`jacfwd`, cheap - cost scales with `d_u`=3, not H
+  or model size) through an H-step free-running unroll w.r.t. `u_0` (x
+  feeds back as the next step's input, like `control.py`'s
+  `rollout_learned` - NOT the teacher-forced one-step map identify.py
+  trains on). This is *realization-invariant* - the chain rule through
+  the unroll composes each step's local linearization exactly the way
+  hand-linearizing the augmented system would, so it reflects the
+  learned input-output map regardless of the surrogate's own (generally
+  non-`A_d`-shaped) internal realization. A raw one-step `d x_{k+1}/d
+  x_k` Jacobian would NOT have this property - it only sees one step and
+  ignores whatever the hidden state carries forward.
+- `equilibrium_drift`: `|F(0,0,s)|`.
+- `local_linearity_defect`: `E|F(z+d)-F(z)-J(z)d|/|d|`, Monte Carlo over
+  random small `d` - the diagnostic the "kink" hypothesis predicts should
+  be sharply elevated for LayerNorm'd variants near `x=0`.
+- `jacobian_sweep`: `J(t*direction)` for a sweep of `t` through 0 - the
+  diagnostic behind the original kink figure.
+
+**Validated against ground truth before trusting on any real surrogate**
+(`tools/validate_diagnostics.py`, Kaggle CPU): forced an M6 model's
+one-step map to be EXACTLY `x_next = A_d@x + B_d@u` by routing the TRUE
+`[A_d|B_d]` through the skip connection (same block-zeroing construction
+as the variant-redundancy work below - zero `D` and `C_real_imag`
+together, plus `out`/`out2` - generalized from "the fitted LS solution"
+to "the true system" so every diagnostic has a known-exact answer, not
+an approximately-fit one). Chose M6 specifically (not M3) so the
+validation also confirms the zeroing trick survives LayerNorm/GELU/GLU
+being architecturally present, not just architecturally absent as in M3.
+
+```
+self-check (model forward vs A_d@x+B_d@u directly): max abs diff=5.6e-17
+equilibrium_drift: max abs = 0.0e+00                        (expect ~0)
+markov_parameters: max error over h=1..50: 2.1e-17           (expect ~1e-9 or better)
+local_linearity_defect (at x=0,u=0): 0.0e+00                 (expect ~1e-8 or better)
+jacobian_sweep: max|J(t) - A_d| over sweep = 0.0e+00          (expect ~1e-9 or better)
+```
+
+All four land at or near machine precision - `markov_parameters`
+reproduces `A_d^(h-1)@B_d` for every h from 1 to 50, not just small h,
+which is the real test (errors from an autodiff/indexing bug would
+typically compound or drift with h; they don't).
+
+**Sanity control, so the PASS above isn't vacuous:** the same four
+diagnostics run on a fresh, untrained, genuinely nonlinear M6 model
+(block NOT zeroed) give `equilibrium_drift=0` (expected and correct,
+not a bug - zero-initialized biases plus origin-preserving nonlinearities
+[GELU(0)=0, LayerNorm(0)=0 with its epsilon, a zero-signal convolution
+is 0] make x=0 a fixed point of a freshly-initialized network generically,
+independent of the random kernel values), but `local_linearity_defect=
+168.5` and a `jacobian_sweep` that varies with t (norm range 1.8 to
+509) and stays finite throughout - confirming the functions detect real
+curvature when it's actually there, rather than always returning ~0
+regardless of input.
+
+**Not yet done:** running these on an actually-trained surrogate and
+correlating against per-case behavior - blocked on the variant-ladder
+identification run (Task 2/the original variant-ladder work) landing
+first, so there are trained checkpoints worth diagnosing.
