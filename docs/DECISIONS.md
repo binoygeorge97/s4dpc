@@ -828,3 +828,89 @@ than M3, not less - a testable, specific corollary of this entry's
 finding, and a much sharper version of the original LayerNorm hypothesis
 than "LayerNorm distorts the Jacobian" alone. Controller work remains
 on hold pending explicit go-ahead, per standing instruction.
+
+---
+
+## 2026-08-12 — float64 is now the default for identification; ALL prior teacher_mse numbers are superseded
+
+Per the finding above (EXP4(b)'s divergence survives, and is sharper, in
+float64; EXP3's rank number was a float32 artifact), float32 is not
+trustworthy for this project's relevant loss scales. `s4dpc/sweep.py` now
+sets `jax.config.update("jax_enable_x64", True)` before any other JAX
+import or op (peeked from `sys.argv` at module import time, since the
+flag must precede any JAX op and therefore can't wait for argparse to
+run) - default on, `--no-x64` to opt out. Every CSV row now stamps an
+`x64` column.
+
+**Setting the flag alone is not sufficient.** `nnx.Linear`/`nnx.LayerNorm`
+construct their own params at float32 by default *regardless of the
+global flag* (first found in `tools/diagnose_m3_rank_x64.py` - see
+2026-08-07 entries above) - `s4dpc/identify.py._build_model` now casts
+the model's whole trainable param tree to match the global flag
+immediately after construction (`_cast_params`, a no-op when x64 is
+off, so float32 runs are byte-for-byte unaffected).
+
+**That cast has to be complex-aware.** `tools/probe_s4nnx_dtype.py`
+(Kaggle CPU) found S4LayerEnsemble does NOT accept a `param_dtype` kwarg,
+but its own params already follow the global flag correctly on their
+own (unlike Linear/LayerNorm) - *except* `P` and `B`, which are
+genuinely complex (`complex128` under x64, confirmed empirically). A
+blanket `.astype(float64)` over the whole tree would silently discard
+their imaginary part instead of widening precision - `_cast_params`
+casts complex and real leaves to their respective same-kind dtype.
+
+**A second, independent pipeline bug found and fixed while wiring this
+up:** M6_fix's `StaticNorm` holds `mu`/`sigma` as `nnx.Variable`, not
+`nnx.Param` (deliberate - `nnx.Optimizer(..., wrt=nnx.Param)` must never
+touch them, see `s4dpc/blocks.py`). `nnx.split(model, nnx.Param)` with a
+single, non-exhaustive filter raises `ValueError: Non-exhaustive
+filters...` the instant any such leftover state exists - `nnx.state(x,
+nnx.Param)` alone tolerates it silently, which is why this went
+unnoticed until the variant-redundancy work below became the first
+script in this repo to call `nnx.split` (not just `nnx.state`) on a
+model that can be M6_fix. Fixed in `identify.py`'s `_train_ensemble`
+(`nnx.split(model, nnx.Param, ...)`, threading the resulting `rest`
+state back through `nnx.merge`) - this would have broken the real
+M6_fix identification run the first time anyone tried it, independent
+of anything else in this entry. **M6_fix has never successfully
+completed an identification run before this fix landed** - treat any
+number for it from before this date as untrustworthy/nonexistent, not
+merely float32.
+
+**M3/M6 smoke test, re-run paired float32-vs-float64** (`launch/kaggle-
+smoke-x64`, CLAUDE.md's own quick-start config: case 3, 1 seed, 2000
+epochs, d_model=16, N=32, n_layers=1, wd=0 - four separate `python -m
+s4dpc.sweep` process invocations, since `jax_enable_x64` is decided once
+per process and can't be toggled mid-run):
+
+```
+variant  x64    teacher_mse
+M3       False  4.822968e-03
+M3       True   4.385848e-03   (ratio 0.909)
+M6       False  3.144979e-03
+M6       True   2.927023e-03   (ratio 0.931)
+```
+
+**The numbers moved (~7-9%), but don't read this as "float64 identifies
+more accurately" at this budget.** Every entry above establishes that
+2000 Adam steps at lr=1e-3 leaves M3 (and, by the corollary below, every
+variant) nowhere near its own least-squares floor - EXP2's 50k-step
+D-only run oscillated non-monotonically in a noisy attractor band for
+40k of those steps, never converging closer to the floor regardless of
+budget. A 2000-step run in either precision is sampling a point inside
+that same kind of noisy, non-convergent regime, not approaching a
+floor - float32 vs float64 arithmetic produces a different rounding
+trajectory through that regime, which plausibly explains a ~10% shift
+with no implication that either number is "more correct" in an
+absolute sense. The float64 value that DOES matter is the one already
+established above: EXP4(b)'s instability is real, not float32 noise,
+and is *sharper* in float64. Every teacher_mse number reported anywhere
+above this line (all of it float32) is superseded by this flag flip and
+should not be compared against any post-2026-08-12 number without
+re-running it.
+
+**How to apply:** any new identification run is float64 unless
+`--no-x64` is passed explicitly. Do not compare a pre-2026-08-12
+teacher_mse (or any number derived from one, e.g. the controller smoke
+test's 895.8/878.7) against a post-flip number without re-running the
+older side in float64 first.
