@@ -158,9 +158,20 @@ def _train_one(
         pred, _ = m(inputs, states)
         return jnp.mean((pred - targets) ** 2)
 
+    @nnx.jit
+    def train_step(m, opt):
+        loss, grads = nnx.value_and_grad(loss_fn)(m)
+        opt.update(m, grads)
+        return loss
+
+    # jitted per-step update: eager (unjitted) dispatch is fine for the
+    # small epoch counts every prior use of this function ran (<=2000),
+    # but becomes prohibitive at the tens-of-thousands-of-epochs scale
+    # docs/DECISIONS.md's train-to-convergence work needs - flagged since
+    # tools/smoke_control.py's controller run ("add jit back before any
+    # larger run").
     for _ in range(epochs):
-        _, grads = nnx.value_and_grad(loss_fn)(model)
-        optimizer.update(model, grads)
+        train_step(model, optimizer)
 
     final_mse = loss_fn(model)
     return nnx.state(model, nnx.Param), final_mse
@@ -211,9 +222,18 @@ def _train_ensemble(
         losses = jax.vmap(single_member)(params, rest, inputs_grid, targets_grid)
         return jnp.mean(losses), losses
 
+    @nnx.jit
+    def train_step(ens, opt):
+        (_, per_member), grads = nnx.value_and_grad(loss_fn, has_aux=True)(ens)
+        opt.update(ens, grads)
+        return per_member
+
+    # jitted per-step update - see _train_one's comment above; matters
+    # even more here since every step is ALSO fusing an n_ensemble-way
+    # vmap, and eager dispatch of that every epoch is the more expensive
+    # case to leave un-jitted.
     for _ in range(epochs):
-        (_, per_member), grads = nnx.value_and_grad(loss_fn, has_aux=True)(ensemble)
-        optimizer.update(ensemble, grads)
+        train_step(ensemble, optimizer)
 
     # recompute AFTER the loop: per_member from inside the loop reflects the
     # loss BEFORE that iteration's update, which is off by one epoch.
