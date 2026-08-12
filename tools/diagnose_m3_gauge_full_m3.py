@@ -41,12 +41,14 @@ from jax.flatten_util import ravel_pytree
 from s4_nnx import S4LayerEnsemble, causal_convolution, kernel_dplr
 
 from s4dpc.blocks import BlockConfig, VARIANTS
+from s4dpc.data import generate_microgrid_trajectory
 from s4dpc.identify import D_INPUT, D_OUTPUT, case_data
 from s4dpc.model import StackedModel
 
 CASE = 3
 D_MODEL, STATE_SIZE, N_LAYERS, L_MAX = 16, 32, 1, 100
 SEED = 0
+N_TRAJECTORIES = 8  # independent trajectories stacked so output samples (N_TRAJ*L*d_output) exceed n_params
 
 
 def _extract_full_params(model: StackedModel) -> dict:
@@ -127,24 +129,43 @@ def main() -> None:
     n_params = flat_params.shape[0]
     print(f"full M3 (conv path active): n_params={n_params}  (D-only alone was 550)")
 
-    def predict_flat(flat_p):
-        return _predict_raw(unravel(flat_p), inputs64, L_MAX).reshape(-1)
+    # a single L=100 trajectory gives only 600 output samples (100*d_output),
+    # far fewer than n_params - the Jacobian's rank would then be trivially
+    # capped at 600 regardless of any genuine parameter redundancy, which is
+    # exactly what crashed the first version of this script (rank came back
+    # essentially saturated at the 600 ceiling). Stack N_TRAJECTORIES
+    # independent trajectories' Jacobians instead, so the output-sample count
+    # (N_TRAJECTORIES*600) comfortably exceeds n_params and the TRUE
+    # parameter-space redundancy (if any) has room to reveal itself.
+    traj_inputs, _ = generate_microgrid_trajectory(
+        batch_size=N_TRAJECTORIES, length=L_MAX, seed=123, system_case=CASE, dt=0.01,
+        aprbs_low=-10.0, aprbs_high=10.0,
+    )
+    j_blocks = []
+    for t in range(N_TRAJECTORIES):
+        inputs_t = jnp.asarray(traj_inputs[t], dtype=jnp.float64)
 
-    j = np.asarray(jax.jacfwd(predict_flat)(flat_params), dtype=np.float64)
+        def predict_flat(flat_p, inputs_t=inputs_t):
+            return _predict_raw(unravel(flat_p), inputs_t, L_MAX).reshape(-1)
+
+        j_blocks.append(np.asarray(jax.jacfwd(predict_flat)(flat_params), dtype=np.float64))
+    j = np.concatenate(j_blocks, axis=0)
+    print(f"stacked J shape={j.shape} ({N_TRAJECTORIES} trajectories x 600 output samples each)")
+
     singular_values = np.sort(np.linalg.svd(j, compute_uv=False))[::-1]
+    n_sv = singular_values.shape[0]
     eps = np.finfo(np.float64).eps
     sv_tol = singular_values.max() * max(j.shape) * eps
     rank = int(np.sum(singular_values > sv_tol))
     null_dim = n_params - rank
 
-    print(f"\nJ shape={j.shape}")
-    print(f"top 10 singular values: {singular_values[:10]}")
-    print(f"around any cliff (idx max(0,rank-10) to rank+10):")
-    lo, hi = max(0, rank - 10), min(n_params, rank + 10)
+    print(f"\ntop 10 singular values: {singular_values[:10]}")
+    print(f"around any cliff (idx max(0,rank-10) to min({n_sv},rank+10)):")
+    lo, hi = max(0, rank - 10), min(n_sv, rank + 10)
     for i in range(lo, hi):
         print(f"  idx {i:4d}: {singular_values[i]:.6e}")
     print(f"bottom 10 singular values: {singular_values[-10:]}")
-    print(f"\nnumerical rank (x64): {rank} / {n_params}")
+    print(f"\nnumerical rank (x64, stacked): {rank} / {n_params}  (n_sv={n_sv})")
     print(f"null dimension: {null_dim}")
     print(f"\ncomparison: D-only had rank=60, null=490 (out of 550 params, 89.1% redundant)")
     print(f"full M3:    rank={rank}, null={null_dim} (out of {n_params} params, "
