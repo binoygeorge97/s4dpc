@@ -55,3 +55,29 @@ strengthen this either way, flagged as the natural next step.
 GPU: 110.98s (M3 training) + 125.56s (M6 training) + diagnostics,
 18.23 T4-min total for this kernel; 1.77 T4-min for the jit pilot that
 gated it. Both logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Controller Task 2: M0/M1 oracle GRU/DPC, all 7 cases x 3 seeds, full curriculum
+
+sha: 1cb6ada | wandb: off | docs/controller_oracles_summary.csv
+
+`python tools/controller_oracles.py` (M0: true `(A_d, B_d)`; M1:
+least-squares `(A_hat, B_hat)` from `fit_least_squares`) - both trained
+as one `nnx.vmap`'d 21-member ensemble per oracle, full dpc_example
+curriculum (5->10->20->50->100->200, 9000 epochs), evaluated by the
+honest transfer test (closed-loop LQR cost on the TRUE plant). First
+real exercise of `s4dpc/control.py`'s bounded-action GRU
+(`s4dpc.control.BoundedGRUController`) at scale.
+
+**KILL CRITERION TRIGGERED on case 6** (median cost_ratio_to_oracle
+1.303e7 under both M0 and M1, threshold 1e6) - **NOT triggered on case
+4** (ratio 1.06, both oracles - stabilizes essentially at oracle-optimal
+cost). Full reasoning in `docs/DECISIONS.md`'s 2026-08-13 entry; per
+instruction, stopped and reported to the user before building Task 3
+(M3/M6 surrogates), which stays unrun pending their read on what this
+means for the paper's framing.
+
+GPU: 3023.2s (50.39 T4-min) for both oracles' full ensembles + eval;
+0.22 T4-min lost to a first-push notebook-metadata bug (fixed, no
+compute reached). Logged in `gpu_ledger.csv`.

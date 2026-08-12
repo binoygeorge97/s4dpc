@@ -1508,3 +1508,103 @@ property of the case" from "divergence is a property of specific
 unlucky initializations") - the 5/10 and 6/10 rates already answer the
 weaker "how often" question the way more seeds would, so this is a
 refinement, not a gap that blocks any claim made above.
+
+---
+
+## 2026-08-13 — Controller Task 2 (M0/M1 oracles): KILL CRITERION TRIGGERED on case 6, not on case 4. Stopped before Task 3 per instruction.
+
+`tools/controller_oracles.py`, sha 1cb6ada: `BoundedGRUController`
+(bounded action, `u = max_action * tanh(head(h))`, `max_action=50`)
+trained via the full dpc_example curriculum (9000 epochs,
+5->10->20->50->100->200) through M0 (true `(A_d, B_d)`) and M1
+(least-squares `(A_hat, B_hat)`), all 7 cases x 3 seeds, evaluated by
+closed-loop LQR cost on the TRUE plant. Full table
+(`docs/controller_oracles_summary.csv`), median cost ratio to oracle
+LQR:
+
+```
+case   oracle_lqr    M0 ratio      M1 ratio
+1        18.5034    1.0047e+00    1.0047e+00
+2       739.3073    4.1171e+01    4.1171e+01
+3        63.1015    1.0215e+00    1.0215e+00
+4        50.5102    1.0633e+00    1.0633e+00
+5       343.6217    4.1740e+01    4.1740e+01
+6       158.3335    1.3030e+07    1.3030e+07
+7        28.8276    1.0041e+00    1.0041e+00
+```
+
+**Case 6 fails catastrophically (~7 orders of magnitude over oracle)
+through BOTH M0 and M1 - i.e. through the exact TRUE dynamics, no
+surrogate involved at all.** Per the kill criterion as specified
+("if the GRU fails to stabilize cases 4 and 6 through the TRUE (A_d,
+B_d) with bounded actions, then the failure is BPTT through unstable
+dynamics, not the S4 surrogate"): case 6 alone satisfies exactly the
+mechanism that criterion was checking for. `controller_oracles.py`'s
+kill-criterion check ORs case 4 and case 6 together, so it prints
+"TRIGGERED" - noted here explicitly because the literal wording
+("cases 4 AND 6") is ambiguous between "the specific pattern of both
+failing together" and "either one failing." Reported both readings
+rather than picking one: the conjunctive pattern (both fail) did NOT
+reproduce; the disjunctive check (either fails) did.
+
+**Case 4 is NOT a kill-criterion case: it stabilizes at essentially
+oracle-optimal cost (ratio 1.06) through the TRUE plant, under both
+M0 and M1.** This directly contradicts the previous entry's read of
+the identification-side evidence ("case 4 genuinely reads as
+intermediate-difficulty, consistent with it being a DPC failure case
+alongside case 6") - that entry is not being edited (append-only), but
+this result supersedes its speculation about case 4's role. The
+straightforward explanation: the user's ORIGINAL DPC failures on case
+4 (pre-Task-1) were produced by dpc_example's UNBOUNDED action bug
+(controls reaching ~1e7) - Task 1's entire reason for existing - not by
+any inherent difficulty of case 4's dynamics under BPTT. With the
+action correctly bounded, case 4 is easy. Case 6 is not, and was never
+explained by the action bug (its failure reproduces even with bounded
+actions, through the exact true dynamics).
+
+**M0 and M1 agree to ~10 significant figures on every case, including
+case 6** (e.g. case 6/seed 0: cost 2063014778.68 vs 2063014778.05).
+This is not a bug (`_build_member_grid`'s M1 branch does call
+`fit_least_squares`, verified by reading the code, not assumed) - it is
+the expected consequence of `identify.py.fit_least_squares`'s own
+docstring claim that the LS floor is ~1e-14-level for these noiseless,
+persistently-excited linear systems. Consequence for THIS entry's
+argument: M0 and M1 are not two independent confirmations of the case-6
+failure, they are one confirmation measured twice against
+near-identical targets - stated plainly so the table above isn't
+mistaken for double evidence.
+
+**Secondary observation, not part of the kill criterion, reported at
+exactly the strength shown and no further:** cases 2 and 5 both show a
+~41x cost ratio (41.17 / 41.74 - suspiciously close to each other) that
+clears neither "trivial" (~1.0x, cases 1/3/4/7) nor "catastrophic"
+(1.3e7, case 6). Cross-referenced against
+`docs/case_predictors_full.csv` (unchanged from the 10-seed
+identification entry): case 2 and case 5 have IDENTICAL `rho`
+(1.0408163265306123) and both have LOW `kreiss_like` (1.007 and 1.049 -
+among the lowest of all 7 cases, far below case 4's 3.30). So on the
+control side, `kreiss_like` does not order difficulty the way it (partly)
+did on the identification side for M6: case 4 has the second-highest
+`kreiss_like` of all 7 cases yet controls trivially; cases 2/5 have
+near-lowest `kreiss_like` yet show real (40x) inflation; only case 6 is
+both a `kreiss_like` extreme AND a control catastrophe. Not investigated
+further this entry (no re-running, no new correlation pass - the
+standing instruction against pushing statistics past what the sample
+supports applies here too); flagged for whoever decides what Task 3
+looks like next, since it suggests transient amplification is at best a
+partial explanation for control-side difficulty, not the same clean
+single predictor it was (with caveats) for M6's identification error.
+
+**Decision, per explicit instruction ("Stop and tell me immediately if
+that happens"): Task 3 (M3/M6 surrogate controllers) is NOT launched.**
+It was fully prepared in parallel while this job ran (checkpoint
+selection, Kaggle dataset upload, `tools/controller_surrogates.py`,
+pilot script - all committed) but stays gated. Training a controller
+through the M3/M6 case-6 checkpoint would be uninterpretable right now:
+any case-6 failure there could not be distinguished from "case 6 is
+just hard for BPTT regardless of what's being controlled through,"
+which this entry now shows is independently true of the TRUE plant
+itself. Case 4 is unambiguously clear to proceed on. What to do about
+case 6 specifically (exclude it from the Task 3 table with this entry
+as the reason; run it anyway and report the confound explicitly
+alongside the numbers; something else) is left to the user.
