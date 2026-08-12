@@ -11,12 +11,17 @@ dynamics, not the S4 surrogate, and Task 3 (the surrogates) should NOT
 be built - this script only trains and reports; the calling agent
 decides whether to proceed based on what's printed here.
 
-Shares one @nnx.jit-compiled train_step PER DISTINCT CURRICULUM HORIZON
-(6 total, cached - not per (case, seed, oracle) combination, which would
-be 42x6=252 separate compilations for no reason: horizon_N controls a
-Python-level loop-unroll count inside rollout_linear, so it must be
-static/closed-over, but A/B/x0_batch are ordinary jit arguments and
-differ freely across the 42 runs that reuse each cached compile).
+Trains all 21 (case, seed) members of a given oracle (M0 or M1) as ONE
+nnx.vmap'd ensemble (mirrors s4dpc/identify.py's _train_ensemble
+pattern exactly - construction via nnx.vmap, per-member forward/loss via
+nnx.split + jax.vmap, one shared nnx.Optimizer over the whole batched
+ensemble), NOT 21 sequential single-controller runs: a first pilot of
+the sequential version measured 361.5s for ONE (case, seed) run at the
+full 9000-epoch curriculum, projecting ~4.2 hours for all 42 runs (both
+oracles) - the vmapped version pays 2x6=12 total @nnx.jit compilations
+(one per curriculum phase per oracle) instead of 42x6=252, and lets the
+GPU parallelize across members that a single controller + 1000-sample
+batch does not come close to saturating.
 
     python tools/controller_oracles.py
 """
@@ -52,6 +57,7 @@ from s4dpc.systems import get_discrete_matrices
 CASES = list(range(1, 8))
 SEEDS = [0, 1, 2]
 DT = 0.01
+D_X, D_U = 6, 3
 
 # dpc_example's exact values, kept per instruction
 Q_X, R_U, Q_F = 5.0, 0.1, 50.0
@@ -82,58 +88,83 @@ DIVERGED_COST_RATIO = 1e6  # cost / oracle_lqr_cost beyond this = failed to stab
 
 DOCS_DIR = _REPO_ROOT / "docs"
 
-_TRAIN_STEP_CACHE: dict[int, callable] = {}
+
+def _build_member_grid(oracle_name: str) -> dict:
+    """Returns per-member A/B/x0/init_key stacks (leading axis = 21,
+    order = [(case, seed) for case in CASES for seed in SEEDS]) for one
+    oracle - A_batch/B_batch are the TRUE (A_d, B_d) for M0, or the
+    least-squares (A_hat, B_hat) for M1; eval always happens against the
+    TRUE plant regardless (see main()), so this only controls what the
+    controller is TRAINED through."""
+    member_cases, member_seeds = [], []
+    A_list, B_list, x0_list, key_list = [], [], [], []
+    for case in CASES:
+        A_d, B_d = get_discrete_matrices(DT, case)
+        if oracle_name == "M0":
+            A_train, B_train = A_d, B_d
+        else:
+            ab_hat, _ = fit_least_squares(case, l_max=100, aprbs_low=-APRBS_RANGE, aprbs_high=APRBS_RANGE)
+            A_train, B_train = ab_hat[:, :D_X], ab_hat[:, D_X:]
+        for seed in SEEDS:
+            init_key = jax.random.fold_in(jax.random.PRNGKey(seed), case)
+            x0_key = jax.random.fold_in(init_key, 999)
+            x0 = jax.random.uniform(
+                x0_key, (TRAIN_X0_BATCH, D_X), minval=-TRAIN_X0_RANGE, maxval=TRAIN_X0_RANGE, dtype=jnp.float64
+            )
+            member_cases.append(case)
+            member_seeds.append(seed)
+            A_list.append(jnp.asarray(A_train, dtype=jnp.float64))
+            B_list.append(jnp.asarray(B_train, dtype=jnp.float64))
+            x0_list.append(x0)
+            key_list.append(init_key)
+    return {
+        "cases": member_cases, "seeds": member_seeds,
+        "A_batch": jnp.stack(A_list), "B_batch": jnp.stack(B_list),
+        "x0_batch": jnp.stack(x0_list), "keys": jnp.stack(key_list),
+    }
 
 
-def _get_train_step(horizon_n: int):
-    if horizon_n not in _TRAIN_STEP_CACHE:
-        @nnx.jit
-        def train_step(controller, optimizer, x0_batch, A, B):
-            def loss_fn(c):
-                return rollout_linear(c, x0_batch, A, B, Q_X, R_U, Q_F, horizon_n)
+def _train_ensemble(grid: dict, label: str) -> nnx.State:
+    A_batch, B_batch, x0_batch, keys = grid["A_batch"], grid["B_batch"], grid["x0_batch"], grid["keys"]
 
-            loss, grads = nnx.value_and_grad(loss_fn)(controller)
-            optimizer.update(controller, grads)
-            return loss
+    @nnx.vmap(in_axes=0, out_axes=0)
+    def init_ensemble(key):
+        return BoundedGRUController(D_X, HIDDEN_DIM, D_U, MAX_ACTION, rngs=nnx.Rngs(key))
 
-        _TRAIN_STEP_CACHE[horizon_n] = train_step
-        print(f"  (compiled train_step for horizon_n={horizon_n})")
-    return _TRAIN_STEP_CACHE[horizon_n]
-
-
-def _train_one_controller(A: np.ndarray, B: np.ndarray, case: int, seed: int, label: str) -> BoundedGRUController:
-    """Controller init key is fold_in(seed, case), not a bare seed -
-    matching this session's established per-(case,seed) key derivation
-    (s4dpc/identify.py etc) so "seed 0" doesn't mean the identical
-    controller initialization reused across all 7 cases and both oracle
-    types, which would confound controller-init variance with genuine
-    case-difficulty variance."""
-    d_x, d_u = A.shape[0], B.shape[1]
-    init_key = jax.random.fold_in(jax.random.PRNGKey(seed), case)
-    controller = BoundedGRUController(d_x, HIDDEN_DIM, d_u, MAX_ACTION, rngs=nnx.Rngs(init_key))
-    optimizer = make_controller_optimizer(controller, CTRL_LR, 0.0, TOTAL_EPOCHS)
-
-    x0_key = jax.random.fold_in(init_key, 999)
-    x0_batch = jax.random.uniform(
-        x0_key, (TRAIN_X0_BATCH, d_x), minval=-TRAIN_X0_RANGE, maxval=TRAIN_X0_RANGE, dtype=jnp.float64
-    )
-    A_j = jnp.asarray(A, dtype=jnp.float64)
-    B_j = jnp.asarray(B, dtype=jnp.float64)
+    ensemble = init_ensemble(keys)
+    optimizer = make_controller_optimizer(ensemble, CTRL_LR, 0.0, TOTAL_EPOCHS)
 
     for pi, phase in enumerate(CURRICULUM):
         N = phase["N"]
-        train_step = _get_train_step(N)
+
+        @nnx.jit
+        def train_step(ens, opt, N=N):
+            def loss_fn(e):
+                graphdef, params = nnx.split(e, nnx.Param)
+
+                def single_member(p, A, B, x0):
+                    c = nnx.merge(graphdef, p)
+                    return rollout_linear(c, x0, A, B, Q_X, R_U, Q_F, N)
+
+                losses = jax.vmap(single_member)(params, A_batch, B_batch, x0_batch)
+                return jnp.mean(losses), losses
+
+            (loss, per_member), grads = nnx.value_and_grad(loss_fn, has_aux=True)(ens)
+            opt.update(ens, grads)
+            return loss, per_member
+
         for epoch in range(phase["epochs"]):
-            loss = train_step(controller, optimizer, x0_batch, A_j, B_j)
+            loss, per_member = train_step(ensemble, optimizer)
             if epoch % max(1, phase["epochs"] // 3) == 0 or epoch == phase["epochs"] - 1:
-                print(f"    [{label}] phase {pi + 1}/{len(CURRICULUM)} (N={N}) epoch {epoch:4d} | "
-                      f"DPC loss: {float(loss):.4f}")
-    return controller
+                print(f"  [{label}] phase {pi + 1}/{len(CURRICULUM)} (N={N}) epoch {epoch:4d} | "
+                      f"mean DPC loss: {float(loss):.4f}  per-member range: "
+                      f"[{float(jnp.min(per_member)):.3f}, {float(jnp.max(per_member)):.3f}]")
+
+    return nnx.state(ensemble, nnx.Param)
 
 
 def _evaluate(controller: BoundedGRUController, A: np.ndarray, B: np.ndarray, eval_key: jax.Array) -> dict:
-    d_x = A.shape[0]
-    x0 = jax.random.uniform(eval_key, (EVAL_BATCH, d_x), minval=-EVAL_X0_RANGE, maxval=EVAL_X0_RANGE, dtype=jnp.float64)
+    x0 = jax.random.uniform(eval_key, (EVAL_BATCH, D_X), minval=-EVAL_X0_RANGE, maxval=EVAL_X0_RANGE, dtype=jnp.float64)
     x_hist, u_hist = evaluate_controller_on_true(controller, A, B, x0, EVAL_HORIZON)
     cost = true_quadratic_cost(x_hist, u_hist, Q_X, R_U, Q_F)
     init_norm = float(np.mean(np.linalg.norm(x_hist[0], axis=-1)))
@@ -152,51 +183,54 @@ def main() -> None:
     print(f"jax_enable_x64 = {jax.config.jax_enable_x64}")
     print(f"MAX_ACTION={MAX_ACTION}  TOTAL_EPOCHS={TOTAL_EPOCHS}  curriculum={[p['N'] for p in CURRICULUM]}")
 
-    rows: list[dict] = []
     oracle_costs: dict[int, float] = {}
-
+    eval_keys: dict[int, jax.Array] = {}
+    true_AB: dict[int, tuple] = {}
     for case in CASES:
-        print(f"\n{'=' * 20} case {case} {'=' * 20}")
         A_d, B_d = get_discrete_matrices(DT, case)
-
+        true_AB[case] = (A_d, B_d)
         Q = Q_X * np.eye(A_d.shape[0])
         R = R_U * np.eye(B_d.shape[1])
         K = solve_dlqr(A_d, B_d, Q, R)
         eval_key = jax.random.fold_in(jax.random.PRNGKey(123), case)
+        eval_keys[case] = eval_key
         x0_eval_np = np.asarray(
             jax.random.uniform(eval_key, (EVAL_BATCH, A_d.shape[0]), minval=-EVAL_X0_RANGE, maxval=EVAL_X0_RANGE)
         )
         x_hist_lqr, u_hist_lqr = rollout_lqr_true(A_d, B_d, K, x0_eval_np, EVAL_HORIZON)
         cost_lqr = true_quadratic_cost(x_hist_lqr, u_hist_lqr, Q_X, R_U, Q_F)
         oracle_costs[case] = cost_lqr
-        print(f"  [oracle LQR] case{case} TRUE-plant cost: {cost_lqr:.4f}")
+        print(f"[oracle LQR] case{case} TRUE-plant cost: {cost_lqr:.4f}")
 
-        ab_hat, ls_mse = fit_least_squares(case, l_max=100, aprbs_low=-APRBS_RANGE, aprbs_high=APRBS_RANGE)
-        A_hat, B_hat = ab_hat[:, :6], ab_hat[:, 6:]
-        print(f"  [M1 fit] case{case} LS mse={ls_mse:.4e}  "
-              f"||A_hat-A_d||/||A_d||={np.linalg.norm(A_hat - A_d) / np.linalg.norm(A_d):.4e}  "
-              f"||B_hat-B_d||/||B_d||={np.linalg.norm(B_hat - B_d) / np.linalg.norm(B_d):.4e}")
+    rows: list[dict] = []
+    for oracle_name in ["M0", "M1"]:
+        print(f"\n{'=' * 20} {oracle_name} ensemble (21 members: 7 cases x 3 seeds) {'=' * 20}")
+        grid = _build_member_grid(oracle_name)
+        ensemble_state = _train_ensemble(grid, oracle_name)
 
-        for oracle_name, A_train, B_train in [("M0", A_d, B_d), ("M1", A_hat, B_hat)]:
-            for seed in SEEDS:
-                label = f"{oracle_name}/case{case}/seed{seed}"
-                try:
-                    controller = _train_one_controller(A_train, B_train, case, seed, label)
-                    result = _evaluate(controller, A_d, B_d, eval_key)
-                    ratio = result["cost"] / cost_lqr if cost_lqr > 0 else float("inf")
-                    result.update(oracle=oracle_name, case=case, seed=seed,
-                                  oracle_lqr_cost=cost_lqr, cost_ratio_to_oracle=ratio)
-                    print(f"  [{label}] cost={result['cost']:.4e}  ratio_to_oracle={ratio:.4e}  "
-                          f"init_norm={result['init_norm']:.3e}  final_norm={result['final_norm']:.3e}  "
-                          f"max_norm={result['max_norm']:.3e}  max|u|={result['max_abs_u']:.3e}  "
-                          f"finite={result['finite']}")
-                except Exception as e:
-                    import traceback
-                    print(f"  [{label}] FAILED: {e}")
-                    traceback.print_exc()
-                    result = {"oracle": oracle_name, "case": case, "seed": seed, "failed": True,
-                              "oracle_lqr_cost": cost_lqr}
-                rows.append(result)
+        for i, (case, seed) in enumerate(zip(grid["cases"], grid["seeds"])):
+            label = f"{oracle_name}/case{case}/seed{seed}"
+            try:
+                member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ensemble_state)
+                controller = BoundedGRUController(D_X, HIDDEN_DIM, D_U, MAX_ACTION, rngs=nnx.Rngs(0))
+                nnx.update(controller, member_state)
+                A_d, B_d = true_AB[case]
+                result = _evaluate(controller, A_d, B_d, eval_keys[case])
+                cost_lqr = oracle_costs[case]
+                ratio = result["cost"] / cost_lqr if cost_lqr > 0 else float("inf")
+                result.update(oracle=oracle_name, case=case, seed=seed,
+                              oracle_lqr_cost=cost_lqr, cost_ratio_to_oracle=ratio)
+                print(f"  [{label}] cost={result['cost']:.4e}  ratio_to_oracle={ratio:.4e}  "
+                      f"init_norm={result['init_norm']:.3e}  final_norm={result['final_norm']:.3e}  "
+                      f"max_norm={result['max_norm']:.3e}  max|u|={result['max_abs_u']:.3e}  "
+                      f"finite={result['finite']}")
+            except Exception as e:
+                import traceback
+                print(f"  [{label}] FAILED: {e}")
+                traceback.print_exc()
+                result = {"oracle": oracle_name, "case": case, "seed": seed, "failed": True,
+                          "oracle_lqr_cost": oracle_costs[case]}
+            rows.append(result)
 
     # ============================================================
     # Summary table + KILL CRITERION check
