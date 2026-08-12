@@ -92,10 +92,23 @@ def _build(variant: str, decode: bool, key: jax.Array) -> StackedModel:
     return model
 
 
+def _stringify_keys(x):
+    """nnx's pure-dict form represents list indices (e.g. self.layers[0])
+    as literal int keys - msgpack_serialize writes them fine, but
+    msgpack_restore's strict_map_key rejects non-string map keys on the
+    way back in ("int is not allowed for map key when strict_map_key=
+    True"). identify.py's save_checkpoint already does this; duplicated
+    here rather than imported, per this repo's standalone-tools-script
+    convention."""
+    if isinstance(x, dict):
+        return {str(k): _stringify_keys(v) for k, v in x.items()}
+    return x
+
+
 def _save_checkpoint(model: StackedModel, variant: str) -> pathlib.Path:
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     path = CKPT_DIR / f"{variant}_case{CASE}.msgpack"
-    pure_dict = nnx.state(model, nnx.Param).to_pure_dict()
+    pure_dict = _stringify_keys(nnx.state(model, nnx.Param).to_pure_dict())
     path.write_bytes(serialization.msgpack_serialize(pure_dict))
     return path
 
