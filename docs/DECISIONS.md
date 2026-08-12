@@ -1137,3 +1137,105 @@ identification run before this session's `nnx.split` fix (entry above)
 - every M6_fix number anywhere before 2026-08-12 is void, not merely
 float32-imprecise. There is no valid pre-fix M6_fix baseline to compare
 anything against.
+
+---
+
+## 2026-08-12 — First real result: M3 trained on real data shows EXACTLY zero kink; M6 shows a real one. The hypothesis survives on case 3.
+
+Every prior number in this document came from either an under-converged
+smoke test or an LS-init-constructed model built to sit exactly at (or
+displaced from) a known optimum. Neither answers the actual question:
+train M3 and M6 for real, on case 3, and look at the Jacobian.
+
+**`tools/train_to_convergence.py`** (case 3, float64, wd=0, `@nnx.jit`
+per-step - eager dispatch was fine at previous epoch counts but not at
+this scale): trained until the loss curve is visibly flat (two
+consecutive 5000-step chunks with <0.05 log10-unit change), not to a
+fixed budget, capped at 200k. Both variants flattened at the SAME step
+count:
+
+```
+variant  steps   teacher_mse   nmse       ratio_to_LS_floor   free_run_rmse(100 steps)
+M3       35000   2.487e-05     3.906e-06  3.245e+24           5.245
+M6       35000   7.639e-06     1.200e-06  9.966e+23           5.123
+```
+
+LS floor recomputed fresh: `7.665364e-30` (differs from an earlier
+CPU-kernel recompute of the same deterministic quantity, `4.746674e-30`,
+from the EXP4-x64 entry above - both are consistent with "float64
+noise-floor territory" for a system this exactly-representable; read as
+LAPACK-backend-dependent rounding at the ~1e-30 level, not a real
+discrepancy, since `fit_least_squares` is pure numpy and its inputs are
+bit-fixed).
+
+**"Flat" is not "converged."** Both variants look good by nmse alone
+(~1e-6) but sit **24 orders of magnitude** above the true LS floor -
+direct, quantified confirmation of the whole chain above (Adam settles
+into a noisy attractor band, not the optimum, regardless of how flat
+the curve looks by a step-to-step criterion). Free-run RMSE (~5.2,
+recursive rollout feeding the model's own prediction back, NOT
+teacher-forced) is large relative to case 3's state scale (mean 1.8,
+std 1.8) for BOTH variants roughly equally - caveat noted before reading
+too much into this: case 3 is open-loop unstable, so some growth over
+100 free-running steps is expected of any imperfect model, not
+necessarily a discriminating signal between M3 and M6 on its own (their
+free-run numbers are close: 5.245 vs 5.123).
+
+**`tools/diagnose_trained_variants.py`** loaded both checkpoints and ran
+all four `s4dpc/diagnostics.py` functions against case 3's true `(A_d,
+B_d)`. (First attempt crashed on load - `nnx`'s pure-dict form encodes
+list indices like `self.layers[0]` as literal int keys, which
+`msgpack_serialize` writes fine but `msgpack_restore`'s
+`strict_map_key` rejects on the way back in; `identify.py`'s own
+`save_checkpoint` already guards against this with `_stringify_keys`,
+`train_to_convergence.py`'s didn't. Fixed, re-ran - training itself had
+already succeeded and was cheap enough that nothing was lost.)
+
+```
+metric                                   M3                M6
+markov rel err (h=1)                  1.7114e-01        3.9700e+02
+markov rel err (h=10)                 1.5114e+00        2.0533e+02
+markov rel err (h=50)                 2.7687e+00        2.3116e+02
+markov rel err (mean, h=1..50)        2.0897e+00        2.3255e+02
+equilibrium_drift |F(0,0,s)|          1.0799e+00        2.9725e+00
+local_linearity_defect (x=0)          1.3517e-14        3.6279e-01
+KINK max||J(t)-J(0)||, dim 0          0.0000e+00        1.2136e+01
+KINK max||J(t)-J(0)||, max over dims  0.0000e+00        1.3055e+01
+```
+
+**M3's kink is not "small" - it is exactly `0.0000e+00`, bit-for-bit,
+across all 6 state dimensions.** This is not a coincidence or a
+threshold call: `jacfwd` of a truly affine map (M3 has no
+norm/activation/glu anywhere) is a mathematical constant independent of
+the evaluation point, so JAX's forward-mode AD must return bit-identical
+matrices regardless of `t` - the same computation graph, evaluated at
+different primal points, for a linear operation whose Jacobian doesn't
+depend on the primal at all. `local_linearity_defect` (1.35e-14, machine
+precision) confirms the same thing a different way. This is as clean a
+validation of `diagnostics.py`'s own correctness as the ground-truth
+check in the entry above, from an entirely independent angle (a
+genuinely-trained model rather than a hand-constructed one).
+
+**M6's kink is real and substantial: ~12-13 in magnitude**, alongside a
+local-linearity defect of 0.36 (vs M3's ~0) and a Markov relative error
+two orders of magnitude worse than M3's (232x vs 2x mean relative
+error). **The hypothesis survives on this case:** M3, which cannot have
+a kink by construction, doesn't have one; M6, which has LayerNorm/GELU/
+GLU, has a clear one.
+
+**Honest caveat on the Markov/equilibrium numbers specifically (the
+kink-strength number does not have this problem):** M6's Markov error
+being worse than M3's is not yet cleanly attributable to nonlinearity
+alone - both variants are, per the ratio-to-LS-floor finding above,
+badly under-converged relative to the true optimum, and M6 has more
+parameters and a harder optimization landscape, so some of its worse
+Markov-parameter fit could reflect convergence quality rather than the
+kink mechanism specifically. The kink-strength metric (`||J(t)-J(0)||`)
+is immune to this confound by construction - it measures how much the
+Jacobian moves away from its OWN value at the origin, independent of
+whether that origin value is close to the true `A_d` - which is exactly
+why it, not the Markov/equilibrium numbers, is the number to lead with.
+
+**Scope, stated plainly:** one case, one seed, one architecture pair.
+Proceeding to Task 3 (all 7 cases, M3/M6, 3 seeds) per instruction, now
+that this has landed cleanly.
