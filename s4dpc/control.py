@@ -43,11 +43,40 @@ from scipy.linalg import solve_discrete_are
 from s4dpc.model import StackedModel
 
 
+def _target_param_dtype() -> jnp.dtype:
+    """Follows the global jax_enable_x64 flag, same reasoning as
+    s4dpc/identify.py's version (duplicated, not imported - both are
+    permanent library modules, this is a two-line helper, and importing
+    a private underscore-prefixed name across modules is worse than a
+    small duplication): one source of truth is the global flag itself,
+    set once by the entry point before any JAX op."""
+    return jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+
+
+def _cast_params(module: nnx.Module, dtype: jnp.dtype) -> None:
+    """nnx.Linear defaults param_dtype=float32 regardless of the global
+    x64 flag (docs/DECISIONS.md) - BoundedGRUController is built entirely
+    from nnx.Linear, so without this it would silently train at float32
+    precision even with jax_enable_x64=True. No complex params here
+    (unlike identify.py's S4LayerEnsemble case), so a flat real cast is
+    sufficient."""
+    if dtype == jnp.float32:
+        return  # already the construction default; skip the no-op tree_map
+    state = nnx.state(module, nnx.Param)
+    state = jax.tree_util.tree_map(lambda x: x.astype(dtype), state)
+    nnx.update(module, state)
+
+
 class BoundedGRUController(nnx.Module):
     """GRU-cell controller: u = max_action * tanh(head(h)).
 
     Bounded, unlike dpc_example's StandaloneGRUController (which stores
-    max_action but never applies it)."""
+    max_action but never applies it - dpc_example's own controls reached
+    ~1e7 against APRBS training inputs in [-10,10], contaminating every
+    result produced with it). Casts its own params to match the global
+    jax_enable_x64 flag after construction (see _cast_params) - this is
+    NOT optional the way it might look, since plain nnx.Linear silently
+    stays float32 otherwise."""
 
     def __init__(self, d_x: int, hidden_dim: int, d_u: int, max_action: float, *, rngs: nnx.Rngs):
         self.hidden_dim = hidden_dim
@@ -56,6 +85,7 @@ class BoundedGRUController(nnx.Module):
         self.W_r = nnx.Linear(d_x + hidden_dim, hidden_dim, rngs=rngs)
         self.W_h = nnx.Linear(d_x + hidden_dim, hidden_dim, rngs=rngs)
         self.head = nnx.Linear(hidden_dim, d_u, rngs=rngs)
+        _cast_params(self, _target_param_dtype())
 
     def __call__(self, h_prev: jax.Array, x_curr: jax.Array) -> tuple[jax.Array, jax.Array]:
         hx = jnp.concatenate([x_curr, h_prev], axis=-1)
@@ -121,7 +151,22 @@ def rollout_learned(
     stepped). model_graphdef/model_params: from nnx.split(model) on a
     StackedModel built with decode=True - params are shared (broadcast,
     closed over) across the batch; only `states` and the per-step model
-    input vary per trajectory via jax.vmap. x0: (batch, d_x)."""
+    input vary per trajectory via jax.vmap. x0: (batch, d_x).
+
+    `states` MUST be real per-trajectory state (e.g. from
+    init_batched_state), never None: StackedModel.__call__'s own
+    `states=None` default silently falls back to a FRESH init_state()
+    every call - inert in decode=False/conv mode (the state is threaded
+    through unchanged there regardless), but fatal here, since it would
+    reset the S4 recurrence to zero every single step instead of
+    carrying it forward, and jax.vmap over a `None` in place of a real
+    batched array fails outright rather than silently doing the wrong
+    thing. Asserted explicitly rather than left as a silent footgun."""
+    assert states is not None, (
+        "rollout_learned: states=None would silently reset the S4 recurrence to zero "
+        "every step (decode=True has no safe default, unlike decode=False's inert one) "
+        "- pass init_batched_state(model, batch_size) or the evolving state from a prior call"
+    )
 
     def apply_one(state, model_in):
         m = nnx.merge(model_graphdef, model_params)
@@ -186,3 +231,34 @@ def true_quadratic_cost(x_hist: np.ndarray, u_hist: np.ndarray, Q_x: float, R_u:
     stage = np.sum(x_hist[:-1] ** 2, axis=-1) * Q_x + np.sum(u_hist**2, axis=-1) * R_u
     term = np.sum(x_hist[-1] ** 2, axis=-1) * Q_f
     return float((stage.sum(axis=0) + term).mean() / x_hist.shape[0])
+
+
+def evaluate_controller_on_true(
+    controller: BoundedGRUController,
+    A: np.ndarray,
+    B: np.ndarray,
+    x0: jax.Array,
+    horizon_N: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The "honest transfer test" (CLAUDE.md sec 1): roll a TRAINED GRU
+    controller (trained through the true plant, an M0/M1 linear
+    surrogate, or a learned M3/M6 surrogate - doesn't matter which)
+    forward on the TRUE (A, B) plant from a batch of initial states,
+    open-loop with respect to training (the controller only ever sees
+    x_curr, never A/B directly). x0: (batch, d_x). Returns (x_hist:
+    (N+1,batch,d_x), u_hist: (N,batch,d_u)) - same shape convention as
+    rollout_lqr_true, so both feed the same true_quadratic_cost - this is
+    dpc_example's rollout_true, generalized to any BoundedGRUController
+    regardless of what it was trained through."""
+    A_j, B_j = jnp.asarray(A, dtype=jnp.float64), jnp.asarray(B, dtype=jnp.float64)
+    h = controller.init_hidden(x0.shape[0])
+    x = x0
+    xs, us = [x], []
+    for _ in range(horizon_N):
+        h, u = controller(h, x)
+        x = x @ A_j.T + u @ B_j.T
+        xs.append(x)
+        us.append(u)
+    x_hist = np.asarray(jnp.stack(xs))
+    u_hist = np.asarray(jnp.stack(us))
+    return x_hist, u_hist
