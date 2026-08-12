@@ -9,3 +9,7 @@ date,kernel_slug,accelerator,minutes
 2026-08-12,s4dpc-gauge-fullm3,T4,1.28
 2026-08-12,s4dpc-variant-redundancy,T4,1.04
 2026-08-12,s4dpc-variant-redundancy,T4,60.93
+2026-08-12,s4dpc-train-diagnose,T4,5.28
+2026-08-12,s4dpc-train-diagnose,T4,6.54
+2026-08-12,s4dpc-jit-pilot,T4,1.77
+2026-08-12,s4dpc-all-cases,T4,18.23

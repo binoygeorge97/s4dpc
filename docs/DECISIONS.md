@@ -1239,3 +1239,121 @@ why it, not the Markov/equilibrium numbers, is the number to lead with.
 **Scope, stated plainly:** one case, one seed, one architecture pair.
 Proceeding to Task 3 (all 7 cases, M3/M6, 3 seeds) per instruction, now
 that this has landed cleanly.
+
+---
+
+## 2026-08-12 — Task 3: the "+1.0000" Markov-error/Kreiss correlation is real for M6, an outlier artifact for M3 - reported both ways, not the headline number alone
+
+All 7 cases, M3 and M6, 3 seeds, real training via the actual
+`sweep.py`/`identify.py` path (not a bespoke script) for the first time
+in this whole investigation: `python -m s4dpc.sweep --variant {M3,M6}
+--cases 1,2,3,4,5,6,7 --n_seeds 3 --epochs 40000 --wandb off --out
+results/all_cases/{variant}.csv`, then `tools/diagnose_all_cases.py`
+against each case's own `(A_d, B_d)`.
+
+**Prerequisite: `@nnx.jit` added to `_train_one`/`_train_ensemble`'s
+per-step update** (eager dispatch was fine at every epoch count used
+before this week; not at 40k epochs x a 21-way vmapped ensemble).
+Changing shared, already-tested code warranted a check before committing
+to an expensive run: `tools/pilot_jit_check.py` (small config, Kaggle
+T4, 1.77 min) compared vmap vs `--no-vmap` final teacher_mse (mirrors
+`tests/test_identify.py`'s own correctness check, which needs a local
+jax install this environment doesn't have) - agreement at 1e-6 to 1e-12
+relative precision for every case/seed tested, on both variants. (The
+pilot's own naive "max_mse should be <1.0" sanity check failed for case
+6 specifically - not a bug: case 6's Kreiss-like amplification is ~330x
+everything else, so its raw, un-normalized state magnitudes over a
+100-step trajectory are naturally huge regardless of fit quality. The
+vmap/no-vmap agreement is the decisive check and it passed cleanly.)
+Training itself: 110.98s (M3) + 125.56s (M6) for 40k epochs x 21
+members each - confirms the jit fix works as intended, not just
+correctly.
+
+**The raw correlation, as first computed, looked like a clean paper
+result:**
+
+```
+        corr(markov_err, rho)   corr(markov_err, kreiss_like)   corr(log,log)
+M3            +0.267                    +1.0000                   +0.975
+M6            +0.267                    +1.0000                   +0.988
+```
+
+**It is not that clean, and reporting only the number above would be
+misleading.** Case 6 (kreiss_like=330.3, ~100x every other case) also
+contains what is unmistakably a diverged training run, not a poorly-fit
+one: M3 case6/seed2's Markov error is `1.178e+11` - eleven orders of
+magnitude beyond every other (case, seed) point in the entire 42-run
+sweep (the next-highest is M6 case6/seed2 at `3.775e+11`, same case,
+different variant - both seed2, both case 6). A single point that is a
+simultaneous extreme outlier on BOTH axes will drive a Pearson
+correlation to ~1.0 almost regardless of what the other 6 points do -
+this is a basic leverage-point problem, not evidence the relationship
+is real across the range that actually varies smoothly.
+
+**Recomputed four ways** (mean vs median across the 3 seeds per case -
+median is far more robust to one diverged seed; all 7 cases vs excluding
+case 6 - to see whether the relationship holds among the cases that
+aren't off-scale outliers):
+
+```
+                                    M3                      M6
+mean,  all 7 cases              +1.0000                  +1.0000
+mean,  excluding case 6          -0.233                   +0.848
+median, all 7 cases             +0.989                    +0.499
+median, excluding case 6         -0.388                   +0.964
+```
+
+**M3: no relationship survives removing the leverage point** (-0.23 to
+-0.39 excluding case 6, by either statistic) - case 4, this ladder's
+second-highest Kreiss case (3.30), has one of M3's LOWEST median Markov
+errors (1.19); case 2, near-lowest Kreiss (1.01), has a comparably-sized
+error (1.74 median, 6.50 mean - itself seed-noisy, case2/seed2=16.8 vs
+seed0/seed1 both <2). M3's fit quality looks dominated by per-run
+optimization noise (consistent with everything established earlier in
+this document about Adam not reliably reaching anywhere near the
+achievable floor) rather than by the plant's own transient-amplification
+structure, except at the true extreme (case 6) where it shows up as
+outright divergence rather than a graded effect.
+
+**M6: a real relationship survives removing the leverage point**
+(median, excluding case 6: **+0.964**) - case 4 (kreiss=3.30, highest of
+the remaining 6) has M6's highest median Markov error among them (461.9);
+case 2 (kreiss=1.01, lowest) has the lowest (40.7). This is not the
+outlier-driven artifact the raw all-cases number is - it holds among
+cases whose Kreiss values differ by only a factor of ~3, not the ~100x
+case 6 introduces.
+
+**Read together with Task 1/2's kink finding, a coherent (not yet
+proven, but internally consistent) picture:** M3's errors look
+optimization-noise-dominated with an outright-divergence tail at the
+extreme; M6's errors track the plant's own transient-amplification
+structure more smoothly, on top of the fact (Task 1/2 above) that M6 has
+a real, substantial kink near the origin that M3 provably cannot have.
+Both threads point the same direction - M6's failures look structural
+(tied to plant dynamics and to the norm/activation-driven Jacobian
+distortion), M3's look like optimization noise - but this entry's
+correlation, on its own, is weaker evidence than the raw number
+suggested, and should not be cited as "+1.0000" without this context.
+
+**Divergence, tagged not deleted (CLAUDE.md sec 3 rule 6):** M3
+case6/seed2 and M6 case6/seed2 are flagged as diverged runs, not
+low-quality fits - both land 8-11 orders of magnitude beyond their own
+case's other two seeds, matching the exact signature (catastrophic,
+single-run, order-of-magnitude blowup) of the Adam/overparameterization
+mechanism characterized earlier in this document, now observed for the
+first time in a real full-scale training sweep rather than a contrived
+LS-init experiment. Milder elevation also visible and worth a second
+look before trusting individual (case, seed) cells at face value: M6
+case4/seed0 (3050 vs case median 462, ~6.6x) and case7/seed2 (2068 vs
+case median 69, ~30x).
+
+**Caveats this entry does not resolve:** 3 seeds is not enough to
+distinguish "M6's correlation is real" from "M6 also got unlucky in a
+way that happens to correlate with Kreiss" with high confidence: more
+seeds, or explicitly re-running the two case-6 outlier seeds fresh to
+see if the divergence is reproducible with a different key, would
+strengthen this either way. Not done here - flagging as the natural next
+step rather than open-ended follow-up.
+
+GPU cost this batch: jit pilot 1.77 min, all-cases sweep+diagnostics
+18.23 min (both logged in `gpu_ledger.csv`).
