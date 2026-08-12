@@ -674,3 +674,157 @@ destabilizes the exact optimum: its adaptive normalization amplifies
 whatever machine-precision noise exists along the null space's flat
 directions into a full-sized step, independent of the nominal learning
 rate.
+
+**Part C - the displacement decomposition, and it is exactly the
+predicted shape** (`tools/diagnose_m3_divergence_figure.py`, corrected
+to use the true 490-dim null space and to actually run in float64 - the
+first version of this script hardcoded `dtype=jnp.float32` when
+constructing the LS-init model despite `jax_enable_x64=True`, the same
+bug the exp4x64 script above had already found and fixed; caught before
+running, not after). `docs/m3_divergence_figure1.png`:
+
+```
+Adam, step 1999: loss=1.008e-07  ||disp_null||=2.965e-3  ||disp_orth||=1.241e-4
+SGD,  step 1999: loss=5.946e-31  ||disp_null||=2.840e-16 ||disp_orth||=1.246e-15
+```
+
+(Adam's final loss, 1.008e-7, matches the independently-run exp4x64
+script's 1.053e-7 to within 5% - good agreement between two separate
+implementations of the same experiment.)
+
+**Is the rise monotonic?** No, and the shape is informative. Loss jumps
+immediately (step 0 to step ~20: floor to ~1e-6), dips back down toward
+~1e-11 by step ~250, then settles into a **noisy, non-decaying
+oscillation** between roughly 1e-9 and 1e-5 for the remaining 1750
+steps - visually identical in character to Experiment 1's 50k-step
+D-only run from the earlier investigation (`docs/m3_d_only_50k_loglog.png`),
+just reached in far fewer steps because this run starts exactly at the
+optimum instead of a random init.
+
+**The displacement decomposition is the clean part.** `||disp_null||`
+grows **steadily and close to monotonically** the entire run (1.8e-3 at
+step 20 -> 2.97e-3 at step 1999 - keeps climbing, no sign of leveling
+off within 2000 steps). `||disp_orth||` does the opposite: it
+**oscillates without a clear trend**, repeatedly returning to small
+values (e.g. 3.4e-5 at step 780, 3.4e-5 at step 1300) and back up again
+(e.g. 5.2e-4 at step 700), tracking the loss's own oscillation almost
+exactly (small `disp_orth` <-> small loss, at matching steps). This is
+*precisely* the predicted mechanism: motion along the null space is (to
+first order) exactly flat, so Adam's normalized per-coordinate updates
+push the parameters along it with no restoring force - an unbounded
+random walk, visible directly in the steadily-climbing solid blue line.
+But the null space is only flat *locally* (it is the tangent space of
+the true, curved level set at the LS-init point) - a large enough
+excursion along it leaks into the orthogonal, function-relevant
+directions via second-order curvature, which is exactly what shows up
+as `disp_orth`'s noisy but bounded fluctuation and the loss's matching
+oscillation. Displacement magnitude, not first-order gradient, is what
+governs how much the function actually changes.
+
+**SGD is the control that makes this a mechanistic claim rather than a
+correlation.** Both displacement components stay 13-15 orders of
+magnitude smaller than Adam's for the entire 2000 steps (`disp_null`:
+2.8e-16 vs 3.0e-3; `disp_orth`: 1.2e-15 vs 1.2e-4), and the loss never
+leaves the ~1e-30 floor. Same nominal step size, same gradients, same
+loss landscape - the only difference is Adam's per-coordinate
+normalization, and removing it removes the entire effect. This is the
+clean, specific claim about Adam requested at the top of this chain.
+
+---
+
+## Full synthesis and read on the paper's central claim
+
+**The chain, in order:** EXP 1 (single linear layer, "should reach
+~1e-12") turned out to be a false alarm - a convex problem under too
+short an Adam budget, resolved by a shrinking-error trajectory and a
+scipy L-BFGS-B refit that closed 5 of the remaining orders of magnitude
+in 46 iterations. Investigating it surfaced a real bug: EXP 3's
+headline "rank 518, null 32 = 2 x d_model" was float32 rounding noise,
+not a mathematical fact - the true, float64-verified split is rank=60,
+null=490, and "60" is exactly D-only's effective degrees of freedom as
+an affine map (matching a plain linear layer's function class exactly).
+Part B then verified this directly rather than trusting the algebra:
+the specific `(D_i, out_kernel row i)` symmetry holds to machine
+precision and its generators span the null space exactly (cos_sim =
+1.000000, all 16 channels); the rank is exactly 60 at every d_model
+tested (8/16/32/64); the full S4 conv path is less redundant in
+relative terms (67.5% vs D-only's 89.1%) but still substantially so,
+with a smoothly-decaying spectrum rather than D-only's sharp cliff.
+Separately, a float64 recheck of EXP 4(b)'s "diverges 8 orders from the
+exact optimum" finding - the most surprising number in the whole
+investigation, and therefore the most important one to re-verify before
+trusting - showed the effect is not a float32 artifact: it is *sharper*
+under float64 (22 orders of magnitude in a single step, from a point 16
+orders closer to the true optimum than float32 could even represent),
+survives a 100x smaller learning rate, and vanishes almost completely
+under plain SGD. Part C's displacement decomposition explains why:
+Adam's per-coordinate normalization drives an unbounded random walk
+along the exact 490-dimensional null space, and large enough excursions
+along that walk leak into real function-space error through second-order
+curvature - visible directly as the correlation between `disp_orth` and
+the loss's own noisy oscillation.
+
+**Does this reframe the paper's central claim?** Partially, and in a
+way that should be reported as a strength, not walked back.
+
+The original working hypothesis (S4's specific parameterization -
+`Lambda_re` clipping, `log_step` range - creates pathological
+conditioning for a near-instantaneous linear map) is **not quite what
+the evidence supports**. EXP 1 showed a plain, unfactored linear layer
+also converges slowly under the same optimizer/budget - so *some*
+generic Adam/data-scale sensitivity is present independent of S4's
+factorization. But the S4-specific part is real and now precisely
+characterized: D-only's parameterization has an exact, verified
+non-identifiability (not merely bad conditioning) that a plain linear
+layer structurally cannot have, and that non-identifiability is what
+turns "slow" into "actively unstable at the exact optimum" - a
+qualitatively different and more interesting failure mode than either
+"Adam is slow" or "S4 is badly conditioned" alone.
+
+**The mechanism, stated as precisely as the evidence now supports:**
+D-only's parameterization is overcomplete (60 true degrees of freedom
+realized through 550 raw parameters, most channel-pairs of which admit
+an exact continuous rescaling symmetry). Adam's per-coordinate adaptive
+normalization does not merely tolerate this redundancy - it actively
+random-walks through it, because normalization by a near-zero gradient's
+own magnitude produces a step of roughly fixed size regardless of how
+small the true (first-order) signal is. That walk is invisible to the
+loss at first order (the null space is exactly flat there) but not at
+second order, once the accumulated displacement is large enough for the
+parameterization's genuine nonlinearity (products like `D_i *
+out_kernel[i,j]`) to leak into the represented function. This is a
+specific, falsifiable, now twice-independently-confirmed (exp4x64 and
+Part C, different scripts, matching final-loss numbers) claim about an
+interaction between adaptive optimizers and overparameterized
+multiplicative factorizations - not a vague "optimization is hard"
+statement, and not specific to S4's long-range-sequence-modelling
+tuning choices the original hypothesis blamed. Full M3 (Part B.4) is
+somewhat less redundant than D-only in relative terms, which is
+consistent with - though does not by itself prove - the S4 recurrence
+providing some genuine escape from this trap as more of the
+parameterization becomes load-bearing; that is a good next question,
+not yet answered.
+
+**Recommendation, updated:** this is a stronger paper result than the
+version reported two entries above, precisely because the chain now
+distinguishes a generic Adam-on-overparameterized-linear-maps effect
+(plausibly known in the deep-linear-network literature, worth a
+citation check before claiming novelty) from what appears genuinely
+tied to this specific class of factorization. Two concrete next steps
+worth prioritizing over further open-ended investigation: (1) check
+whether this exact mechanism (adaptive-optimizer random walk through an
+exact null space, second-order leakage into loss) has prior art in the
+deep linear network / overparameterization literature, since if so the
+contribution is "this happens in S4 specifically and here is why it
+matters for control," not "this happens" per se; (2) the M3-vs-M6
+ladder should still be run with the per-variant floor normalization
+recommended two entries above, but now with an added expectation worth
+testing directly: if M6's LayerNorm makes its own effective
+parameterization *more* overcomplete (plausible, given LayerNorm adds
+scale-invariance on top of whatever redundancy the linear layers
+already have), the same Adam-random-walk mechanism found here for
+D-only predicts M6 should be *more* susceptible to this failure mode
+than M3, not less - a testable, specific corollary of this entry's
+finding, and a much sharper version of the original LayerNorm hypothesis
+than "LayerNorm distorts the Jacobian" alone. Controller work remains
+on hold pending explicit go-ahead, per standing instruction.
