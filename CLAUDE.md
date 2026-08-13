@@ -10,10 +10,31 @@ Research code for a conference paper on **why differentiable predictive control 
 fails when the plant model is a learned S4 surrogate**, even when one-step prediction
 MSE is low.
 
-Core claim under test: *control-relevant derivative fidelity*, not prediction error,
-determines DPC success. Suspected mechanism: LayerNorm (degree-0 homogeneous, so it
-cannot represent a linear map) distorts the learned Jacobian near the regulation
-setpoint — the "kink".
+**Correction, 2026-08-13 (kept, not silently rewritten — see `docs/DECISIONS.md`'s
+"REFUTATION" entry and the 10-seed/kink-magnitude entries around it for the full
+evidence trail):** the paragraph below was this project's original central claim.
+It has been tested directly on control-side data and **refuted**. M3 has exactly
+zero kink by construction (no norm/activation/glu) and still fails DPC by
+2-6 orders of magnitude on every case, including ones where it recovers Markov
+parameters to ~1e-6; Spearman(kink magnitude, M6/M3 cost ratio) = -0.54 at n=6 —
+wrong sign, not just non-significant. **Original claim, kept for the record:**
+*control-relevant derivative fidelity*, not prediction error, determines DPC
+success, via LayerNorm (degree-0 homogeneous, so it cannot represent a linear map)
+distorting the learned Jacobian near the regulation setpoint — the "kink".
+
+**Current working picture (also `docs/DECISIONS.md`, still being actively
+revised — check there before citing a specific mechanism as settled):** both M3
+and M6 get short-horizon/local dynamics approximately right and free-running
+long-horizon dynamics wrong, and this is NOT simply an "only long horizons are
+affected" story — a controller trained with BPTT capped at N=5 through M3 already
+transfers at ~358x oracle cost, where M3's own fidelity is at its best. Realization
+mismatch (M3 is a ~500-state S4 realization of a 6-state plant; least-squares M1,
+with comparable fidelity, controls at ~1x) is the current leading candidate, not
+a single distorted-Jacobian mechanism. Warm-starting the S4 hidden state to fix an
+inconsistent (x0 != 0, s0 = 0) initial condition does NOT help — for M3 it makes
+free-running error monotonically WORSE with more genuine history, arguing against
+IC-inconsistency and toward M3's internal S4 modes being spurious/unmoored from
+the physical state rather than merely mis-initialized.
 
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
@@ -143,7 +164,14 @@ budget looks tight without saying so first.
 
 ---
 
-## 5. Parity testing — the current task
+## 5. Parity testing — DONE (2026-08-08, `docs/DECISIONS.md`); kept as reference
+
+No longer the current task — the refactor passed L1/L2/L3 below and control-side work
+(`s4dpc/control.py`, the M0/M1/M3/M6 DPC comparisons) has been running on top of it since.
+Current focus is the control-failure mechanism itself (§1's correction) — see
+`docs/DECISIONS.md`'s most recent entries for what's actually being worked on. This
+section stays as reference for what to do if a future dependency bump (§7) requires
+re-running parity.
 
 Goal: the refactored code (which calls `s4-nnx` for the SSM core) must reproduce the
 original notebook code **exactly**.
@@ -186,6 +214,23 @@ Set by config, never by branching code:
 parameters to ~1e-6. If it does, capacity is not the problem and the nonlinearities are.
 If it doesn't, the paper pivots to the spurious-memory/realization story — flag this
 immediately.
+
+**Correction, 2026-08-13: this decision rule fired, and the branch it pointed to was
+wrong.** M3 DID recover Markov parameters to ~1e-6 (`docs/DECISIONS.md`'s 10-seed
+identification entry) — by the rule as written, that meant "capacity is not the
+problem, the nonlinearities are," which pointed straight at M5/M6's LayerNorm kink.
+The kink was real (M6 has one, M3 provably can't) and looked like a clean confirmation
+on identification-side data alone. But when actually tested on control-side data (M3
+vs M6 through DPC), M3 fails just as catastrophically as M6 despite its exact
+near-machine-precision Markov fidelity and zero kink — see §1's correction and
+`docs/DECISIONS.md`'s "REFUTATION" entry. **The rule's premise was incomplete: "M3
+recovers Markov parameters" answers whether M3's *local linearization* matches the
+true plant, not whether M3 is *safe to backprop a controller through* — those turned
+out to be different questions, and the ladder as designed had no cell that tested the
+second one directly.** That gap is what the current working picture (§1) and the
+session-by-session entries in `docs/DECISIONS.md` are now closing (M0_S4 — a
+hand-constructed S4 forced to realize the true plant, deployed through the same
+BPTT/control machinery — is the closest thing to a corrected version of this rule).
 
 ---
 
