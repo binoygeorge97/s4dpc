@@ -95,8 +95,16 @@ def _sqrtm_psd(M):
     return (V * np.sqrt(w)) @ V.conj().T
 
 
-def _eig_outside_unit_disk(A):
-    return int(np.sum(np.abs(np.linalg.eigvals(A)) > 1.0))
+def _eig_outside_unit_disk(A, tol: float = 1e-6):
+    """Strict |eig|>1 miscounts a marginal pole (case 1's A_d has an
+    EXACT eigenvalue at z=1, docs/DECISIONS.md 2026-08-07) whenever a
+    fitted comparison system's own copy of that pole lands a hair past
+    1.0 from ordinary numerical noise - a genuine eta_P vs eta_Phat
+    mismatch of 0 vs 1 from floating-point jitter, not a real pole-count
+    difference. A small deadband around the unit circle avoids this
+    false alarm without hiding a genuinely unstable pole (tol is far
+    smaller than any real instability this project's plants exhibit)."""
+    return int(np.sum(np.abs(np.linalg.eigvals(A)) > 1.0 + tol))
 
 
 def nu_gap(P_ss, Phat_ss, n_freq: int = 2000) -> tuple[float, dict]:
@@ -104,7 +112,12 @@ def nu_gap(P_ss, Phat_ss, n_freq: int = 2000) -> tuple[float, dict]:
     (delta_nu, diagnostics)."""
     A, B, C, D = P_ss
     Ah, Bh, Ch, Dh = Phat_ss
-    thetas = np.linspace(0, 2 * np.pi, n_freq, endpoint=False)
+    # half-step offset: some of this project's plants have an eigenvalue at
+    # EXACTLY z=1 (case 1's integrator mode, docs/DECISIONS.md 2026-08-07) -
+    # a grid starting at theta=0 hits that pole exactly (z*I-A singular).
+    # Offsetting avoids z=1 and z=-1 (the two real-axis points a grid
+    # naturally lands on) without materially changing the sup over the grid.
+    thetas = np.linspace(0, 2 * np.pi, n_freq, endpoint=False) + (np.pi / n_freq)
     gaps, arg_vals = [], []
     for th in thetas:
         z = np.exp(1j * th)
