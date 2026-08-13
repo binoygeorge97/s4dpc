@@ -46,6 +46,19 @@ makes M3's free-running prediction monotonically WORSE, not better, arguing agai
 a simpler inconsistent-initial-condition story and toward the internal modes being
 fundamentally unmoored from the physical state rather than merely mis-initialized.
 
+**Sharpened, 2026-08-13 (see `docs/DECISIONS.md`'s CORRECTION entry after Task 2
+Part C):** M0_S4 changes TWO things relative to a real M3 checkpoint at once —
+exact I/O (M3's is ~1e-6) and zero *observable* internal state (M3's `obs_norm`
+is ~10-20, real). M0_S4's result therefore does NOT distinguish which one matters
+— it only rules out the S4/BPTT machinery. Since M3's ~1e-6 Markov error was
+already too small to explain a 300x+ blowup under ordinary error propagation
+(`rho~1.02` over 200 steps compounds 1e-6 to only ~5e-5), realization/observable-
+spurious-modes remains the standing, not-yet-refuted candidate — being tested
+directly via balanced truncation of M3 to 6 states (Hankel-SVD, since the
+augmented operator is marginally unstable so Gramian-based truncation doesn't
+apply): if the truncated (Markov-matched) 6-state M3 controls near oracle, the
+spurious modes are causal; if it still fails, every mode-based story dies.
+
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
 is the entire reason for using linear plants.

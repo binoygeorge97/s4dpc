@@ -2420,6 +2420,62 @@ Logged in `gpu_ledger.csv`.
 
 ---
 
+## 2026-08-13 — CORRECTION to the Task 2 entries above: M0_S4 exonerates the S4/BPTT machinery, NOT realization - the entries above conflated the two
+
+Flagged by the user, correct on inspection - the two entries above (and
+this document's Part C entry) say things like "given a surrogate that
+is merely CLOSE to the true dynamics... something about that residual
+imperfection is catastrophic" and describe the result as being "about
+what identification learns" without distinguishing two different
+things that changed at once. Not silently rewritten (this project's
+own convention) - correction recorded here, original text stays.
+
+**The actual logic.** M0_S4 differs from a real M3 checkpoint in TWO
+ways simultaneously: (1) exact I/O map (`~1e-17` vs M3's own
+`~1e-6` Markov error) and (2) zero OBSERVABLE internal state (Task 4's
+`obs_norm` exactly 0 for M0_S4 by construction, vs `~10-20`, real and
+substantial, for trained M3). Part B/C's result - M0_S4 controls
+identically to the true plant - cannot by itself distinguish which of
+these two changes did the work, because both changed together. What
+resolves the ambiguity is evidence already in this document from
+BEFORE this session: M3's Markov error is already `~1e-6`, and this
+project established early on (the 2026-08-12 "kink" investigation) that
+errors this small, propagated through a system with `rho~1.02`, would
+compound to only `~5e-5` over 200 steps under ordinary error
+propagation - nowhere near enough to explain a 300x-700,000x cost
+blowup on its own. **Wrong I/O content was already a poor explanation
+before Part B ran.** That leaves realization (specifically, the
+observable spurious modes Task 4 measured) as the surviving, not yet
+refuted, candidate - Part B/C confirm the S4/BPTT graph is safe to
+train through GIVEN a correct realization; they say nothing about
+whether M3's specific, incorrect realization is what's causing the
+failure. That question is what the balanced-truncation experiment
+(below) is designed to answer directly, by changing ONLY the
+observability-of-spurious-modes variable while holding M3's own
+(already-established-near-exact) I/O content fixed.
+
+**Precise statement of the M0_S4/M3 structural difference, verified
+directly, not just inferred:** the `~1024` real-dimensional S4 hidden
+state is NOT absent in M0_S4 - `S4LayerEnsemble`'s own recurrence
+(`Lambda`, `B`, `P`, none of which `tools/controller_m0_s4.py` zeroes)
+still runs and still evolves the state every step, driven by
+`norm(skip)`. What's zeroed is every path FROM that state back to the
+output: `out.kernel=0`, `out.bias=0`, `C_real_imag=0` together mean
+`Abar[:6, 6:]` (Task 4's `obs_norm` block exactly) is identically zero
+for M0_S4, not merely small. **The M3-vs-M0_S4 difference is
+observability of a fixed-size (1030-dim augmented) mode set, not the
+presence or absence of that mode set.** M0_S4's internal state is
+present but permanently disconnected from anything that matters;
+M3's is present and, per Task 4, has real (`~10-20`) one-step leverage
+on the physical output.
+
+**How to apply:** do not cite Task 2/Part C as having "refuted" or
+"ruled out" the realization/spurious-modes mechanism - it refutes only
+the S4-architecture-in-the-abstract and BPTT-through-`decode=True`
+mechanisms. CLAUDE.md §1 updated to match.
+
+---
+
 ## 2026-08-13 — Housekeeping resolved: cases 2/4's training-instability is a minority-exploding-member phenomenon (1/5 seeds each), confirming Task 2a's hypothesis directly
 
 `tools/case24_instability_check.py`, sha 3c3563f: fresh M3 identification
