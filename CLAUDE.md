@@ -199,6 +199,44 @@ date,kernel_slug,accelerator,minutes
 00:00 UTC**) and report the running total to the user. Do not push if the remaining
 budget looks tight without saying so first.
 
+### Colab CLI — for INDEPENDENT experiment arms only, when Kaggle's 2 slots are full
+
+The `colab` CLI (`uv tool`-installed, symlinked at `~/.local/bin/colab` — add that to
+`PATH` the same way `kaggle` needs it) provisions and drives real Google Colab VMs
+from the shell: `colab new -s <name> --gpu T4`, then run code on it, then
+`colab stop -s <name>`. Full usage is in `colab skill` / `colab readme`.
+
+**Only for a genuinely separate experiment arm** — never to finish or split an arm
+already started on Kaggle (CLAUDE.md §3 rule 4: XLA lowering differs by backend, and
+BPTT through unstable dynamics amplifies float differences across platforms). If Task
+X is running on Kaggle and Task Y is independent and ready to launch, and both Kaggle
+slots are occupied, Colab is where Y goes — not a shortcut around the 2-slot limit for
+splitting Task X.
+
+**`colab exec` is broken as of CLI 0.6.0** (`AttributeError:
+module 'jupyter_kernel_client' has no attribute 'KernelClient'` — a real bug in the
+installed package, not a usage error; `colab update` reports already-latest).
+Use `colab console -s <name>` instead, piping a full shell command in
+(`echo "cd /content && git clone ... && pip install ... && python script.py" | colab
+console -s <name>`), matching the Kaggle notebook cell pattern
+(`!git clone && !pip install && !python`). Revisit `exec` once the CLI updates.
+
+**Long jobs**: the piped command keeps running in the session's tmux pane even if the
+local `colab console` connection drops (e.g. a Bash tool timeout) — reconnecting later
+with another `colab console -s <name>` finds it still going. Do **not** poll
+`colab status` to check progress on a `console`-launched job — that reflects the
+*Jupyter kernel's* idle/busy state, not the tmux shell's, and reads IDLE the whole
+time regardless of what's running in the pane. Instead have the job write its final
+output to a known path and poll for that file with `colab download <remote> <local>`
+(safe to call while the pane is busy — it's a separate file-transfer channel, not
+console input). Do not pipe a status-check command into a *busy* console — with no
+free shell prompt to run it, the keystrokes just queue silently instead of executing.
+
+**Always `colab stop -s <name>` when the arm is done.** The keep-alive daemon prevents
+idle timeout specifically so a forgotten session does *not* get auto-reclaimed — that
+means a session left running keeps burning compute units indefinitely until someone
+stops it.
+
 ---
 
 ## 5. Parity testing — DONE (2026-08-08, `docs/DECISIONS.md`); kept as reference
