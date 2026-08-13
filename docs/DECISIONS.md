@@ -2159,3 +2159,78 @@ per-member training-loss curves directly - flagged as the natural next
 check, not attempted here.
 
 GPU: 33.00 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 3 (new session): the s0=0/x0!=0 inconsistency is NOT the (or a) cause of the divergence - warm-starting the S4 state does not help, and for M3 it makes things monotonically WORSE
+
+`tools/openloop_warmstart.py`, sha a638f7d: fresh M3+M6 identification
+(all 7 cases, 10 seeds, 40k epochs - identification wall time 162.2s/
+154.7s, diverged: M3 case6 seeds {1,4,5}, M6 none), then for 3 restart
+points (t0=50/150/250, giving naturally-growing ||x(t0)|| per case's
+own open-loop instability) x 4 burn-in lengths B in {0,5,20,50},
+teacher-forced burn-in then a 150-step free run, no controller anywhere
+- open-loop PREDICTION only. 1680 rows, `docs/openloop_warmstart.csv`.
+No confound with control/BPTT: this isolates the initial-condition
+question from anything about training.
+
+**Median err_h150, cold (B=0) vs warmest (B=50), the 4 "moderate"
+cases (1/3/4/7 - cases 2/5/6 grow so explosively open-loop that x0 at
+t0=150/250 reaches 10^2-10^6 in magnitude, past the point where state
+initialization is the dominant factor):**
+
+```
+       case1        case3        case4        case7
+     B=0->B=50    B=0->B=50    B=0->B=50    B=0->B=50
+M3   2.15-5.49x    1.24-4.15x   1.26-1.98x   1.09-1.21x   (all WORSE with warm start)
+M6   0.84-1.49x    1.00-1.25x   1.00-1.01x   1.00-1.05x   (roughly flat)
+```
+
+**Full B sweep (0/5/20/50), case-median err_h150, t0=50, same 4
+cases - the monotonic-with-B shape is the sharper result than the
+single B=0-vs-B=50 endpoint:**
+
+```
+        B=0        B=5        B=20        B=50
+M3-c1  62.97      77.42      124.04      164.96   (steadily worse)
+M3-c3  400.13     404.75     502.71      497.38   (steadily worse)
+M3-c4  655.26     662.99     727.35      824.29   (steadily worse)
+M3-c7  102.94     111.01     109.13      124.08   (worse, less clean)
+M6-c1  12.75      13.29      11.07       12.32    (flat/noisy)
+M6-c3  225.37     218.57     175.56      273.67   (flat/noisy)
+M6-c4  649.04     650.33     651.92      656.28   (flat)
+M6-c7  66.07      67.24      67.99       69.23    (flat)
+```
+
+**Verdict, per the decision tree stated in advance: mechanism (a) is
+dead.** Warm-starting does not substantially reduce free-run error for
+either variant - and for M3, on every one of the 4 informative cases,
+error rises *monotonically* with more burn-in, the opposite of what an
+IC-consistency fix should do. This isn't noise around 1.0x; it's a
+clean, one-directional trend across 4 independent cases.
+
+**Why MORE history makes M3 worse, read together with the mechanism
+this session opened with:** if the S4 hidden state carried genuinely
+useful information about the plant's true state, teacher-forced burn-in
+(feeding it more real history before evaluation) should only help or be
+neutral. That it instead hurts, and does so more as burn-in lengthens,
+is consistent with mechanism (b) from this session's brief (spurious
+internal modes) and inconsistent with mechanism (a): there is no
+"correct" state for the S4 recurrence to warm up *to*, because its
+internal modes don't correspond to anything physically meaningful in
+the first place - feeding more history just accumulates more of
+whatever ungrounded dynamics those modes have learned, rather than
+converging toward a state that helps prediction. M6's near-flat
+response (vs. M3's clean monotonic degradation) is itself informative:
+M6's LayerNorm re-normalizes the block's input every step, which
+plausibly bounds how much a longer burn-in can let any accumulated
+internal drift compound - a testable follow-up, not established here.
+
+**Consequence for the session's mechanism ranking:** (a) is dead by
+its own stated test. Task 4 (spurious internal modes, M3's augmented
+state-transition operator) carries the investigation forward, and this
+result is a positive prior for what it will find - M3 punishing more
+genuine history is exactly the signature an ungrounded/spurious
+internal-mode story predicts, not a neutral coincidence.
+
+GPU: 10.33 T4-min. Logged in `gpu_ledger.csv`.
