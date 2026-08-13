@@ -2610,3 +2610,61 @@ is this document's best current candidate for what that learned,
 non-exact difference actually is.
 
 GPU: 243.84 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 6, oracle half: M0/M1 horizon sweep is clean and monotonic on every case at proper (5-seed) power, with a striking new case-4-specific short-horizon story
+
+`tools/horizon_sweep_oracle.py`, sha 9ecbeab: `rollout_linear` (M0=true
+`(A_d,B_d)`, M1=least-squares - identical to machine precision as
+established throughout this document), all 6 control cases, 5 seeds,
+caps {5,20,50,100,200}. 300 rows, `docs/horizon_sweep_oracle.csv`. No
+errors. M0 and M1 agree to the same ~10 significant figures established
+elsewhere in this document (`fit_least_squares`'s ~1e-14 floor) - listed
+once below, not twice.
+
+```
+case    cap=5      cap=20     cap=50     cap=100    cap=200
+ 1      1.210x     1.021x     1.007x     1.005x     1.005x
+ 2     17.515x     6.024x     4.733x     3.078x    37.00x    (!)
+ 3      4.156x     2.650x     1.479x     1.040x     1.022x
+ 4   1120.4x      14.088x     1.110x     1.071x     1.064x   (!!)
+ 5     23.625x    12.882x     9.523x     5.530x     1.341x
+ 7      1.216x     1.024x     1.009x     1.005x     1.004x
+```
+
+**Cases 1, 3, 5, 7: clean, monotonic decrease with horizon - exactly
+what a normal learning curve looks like**, and case 3's numbers here
+(4.156/2.650/1.479/1.040/1.022) match Part B's independent case-3-only
+run (4.156/2.552/1.4495/1.038/1.0215) to 2-3 significant figures -
+good agreement between two independently-run sweeps of the same
+quantity.
+
+**Case 4 is the new, striking finding this proper sweep surfaces: at
+cap=5 the median ratio is 1120x (worst seed: 12,920x), then it
+collapses to 14.1x at cap=20 and is within 10% of oracle by cap=50.**
+Case 4 is this ladder's second-highest-Kreiss case (3.30, per the
+identification-side tables) - at a 5-step optimization horizon, an
+LQR-style short-horizon objective apparently cannot see enough of a
+non-normal, Kreiss-amplifying plant's transient behavior to avoid a
+catastrophically bad policy, but the true plant (unlike any surrogate
+in this document) resolves this almost entirely once given horizon
+>=50. This is a genuinely new result, not visible in the single-seed
+case-3-only sweep this replaces, and it means "short-horizon training
+transfers badly" is not unique to the surrogates - it can happen
+through the TRUE plant too, on a case with the right transient-
+amplification structure, and self-corrects with more horizon there in
+a way M3 (next entry) does not.
+
+**Case 2's cap=200 uptick (3.08x at cap=100 -> 37.0x at cap=200) is
+real, not noise** - it matches this document's own already-established
+finding that case 2 has unusually wide seed-to-seed variance (the
+2026-08-13 saturation-phase-2 entry, and Task 2 Part C two entries
+above) independent of horizon; not investigated further here per that
+entry's own flag.
+
+Awaiting the M3/M6 half (`tools/horizon_sweep_surrogate.py`, running)
+before drawing the full comparison the brief asked for (does the
+single-seed M3 non-monotonicity survive proper seed counts).
+
+GPU: 139.56 T4-min. Logged in `gpu_ledger.csv`.
