@@ -1,0 +1,13 @@
+{
+  "id": "mlresearch42/s4dpc-controller-m0-s4",
+  "title": "s4dpc controller M0 S4 exact realization",
+  "code_file": "runner.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
