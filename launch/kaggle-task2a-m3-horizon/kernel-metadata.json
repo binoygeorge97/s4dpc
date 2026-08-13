@@ -1,0 +1,13 @@
+{
+  "id": "mlresearch42/s4dpc-task2a-m3-horizon",
+  "title": "s4dpc task2a m3 horizon",
+  "code_file": "runner.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["mlresearch42/s4dpc-controller-task3-ckpt"],
+  "competition_sources": [],
+  "kernel_sources": []
+}
