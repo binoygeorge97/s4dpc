@@ -2234,3 +2234,89 @@ genuine history is exactly the signature an ungrounded/spurious
 internal-mode story predicts, not a neutral coincidence.
 
 GPU: 10.33 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 4: M3's augmented state-transition operator has ~300 spurious near-unit-circle modes (of 1030) where the true system has 3-6, and often wildly excessive transient growth - but neither predicts the per-case DPC ratio
+
+`tools/m3_spurious_modes.py`, sha 3c3563f (script committed at this sha;
+run at f3a9623): M3 has no norm/activation/glu, so its ENTIRE one-step
+map - physical state (6) plus the S4 layer's own hidden state (2x16x32
+= 1024 real-flattened) stacked into one 1030-dim vector - is exactly
+affine, and its Jacobian (`jax.jacfwd` on a real-valued wrapper, evaluated
+at z=0/u=0 - valid everywhere) is the exact augmented linear operator
+`Abar`, not merely a local approximation. All 7 cases, 10 seeds, 70
+members, identification wall time 163.6s.
+
+**Every case, all 10 seeds: `rho(Abar)` sits at 1.02-1.03** (barely past
+1, cases 1/2/3/4/5/7 - only case 6 goes much higher, median 1.25, up to
+2.58 in the worst seed) - a naive spectral-radius read would call these
+systems mildly, comparably unstable to the true plant (`rho(A_d)`
+1.00-1.04 across the same 7 cases per the earlier identification
+entries). **That reading is wrong, and the rest of the numbers show why:**
+
+```
+case   n_near_unit_true(/6)  n_near_unit_abar(/1030,med)  obs_norm(med)  growth_ratio_k200(med)
+1              3                      325.0                  14.6              4.13e+03
+2              6                      325.5                  15.9              3.00e+00
+3              6                      368.5                  15.4              1.01e+03
+4              6                      274.0                  15.8              2.53e+01
+5              6                      291.5                  12.4              1.26e+00
+6              6                      328.5                  19.2              2.77e+23
+7              4                      264.0                  12.5              1.37e+02
+```
+
+**M3 has learned 264-369 (median per case; overall range 121-619) modes
+within 0.01 of the unit circle, out of 1030 augmented state dimensions -
+40-60x more near-marginal modes than the true system has (3-6), on
+EVERY case, not just the hard ones.** `obs_norm` (`||Abar[:6,6:]||_2`,
+the SVD 2-norm of the block mapping S4 state to next PHYSICAL state in
+one step - an eigenvector-free observability proxy, per
+`docs/DECISIONS.md`'s standing ban on eigenvector solves for
+defective/near-defective matrices) is O(10-20) for every case: these
+spurious modes are not inert bystanders sitting in a null space the
+output never sees - they have real, comparable-magnitude one-step
+leverage on the physical state.
+
+**`||Abar^200||_2` vs `||A_d^200||_2` is where "same rho, same I/O
+fidelity" breaks down completely.** Case-median ratios range from 1.26x
+(case 5, barely more than the true system's own growth) to 4128x (case
+1) among the six non-case-6 cases, and the OVERALL range across all 70
+members is 0.06x to 6.4e77x. Two "easy," near-identical-`rho`, similar-
+`kreiss_like` cases (1 and 5, from the identification-side tables
+earlier in this document) sit 3 orders of magnitude apart in transient
+growth here - this is realization-dependent in exactly the way
+`markov_parameters`/Kreiss-on-`A_d` alone cannot see, confirming the
+task's premise: same input-output map (M3's Markov error is ~1e-6
+everywhere) does not imply same transient conditioning.
+
+**Correlation against the recorded per-(case,seed) M3 DPC ratio
+(`docs/controller_surrogates_summary.csv`, 18 matched pairs across 6
+control cases x up to 3 seeds each): null, honestly.** None of
+`rho_abar`, `n_near_unit_abar`, `obs_norm`, `growth_ratio_k200` clears
+significance, Pearson or Spearman, seed-level (n=18) or case-median
+(n=6) - every p-value is >=0.13, most >0.4. Reported at exactly this
+strength, not rounded up: this is a real, structural, universally-
+present abnormality (every one of the 7 cases has 40-60x too many
+near-unit modes and O(10) observability), but it does not explain WHY
+case 1 fails worse than case 5 in the DPC table the way `kreiss_like`
+partially explained M6's identification error two entries ago. Read
+together with the kink finding (also real, also uncorrelated with the
+M6-vs-M3 cost gap): this project now has TWO independently-confirmed,
+architecturally-clean abnormalities in these surrogates - LayerNorm's
+kink for M6, ~300 spurious near-unit modes with wild transient growth
+for M3 - that plausibly explain why backpropagating a DPC controller
+through either surrogate is categorically dangerous, without either one
+explaining the specific case-by-case gradient of how badly it fails.
+That gradient remains open.
+
+**Consistent with, not just adjacent to, Task 3's finding:** Task 3
+found that MORE genuine burned-in history makes M3's free-running
+prediction monotonically worse, which only makes sense if the S4
+state's own dynamics are actively unhelpful once excited - exactly what
+~300 near-unit modes with real one-step leverage on the output (`obs_norm`
+O(10-20), not ~0) and, on several cases, many-orders-of-magnitude
+transient amplification would produce: feeding more history gives those
+modes more room to move away from a useful trajectory, not less.
+
+GPU: 6.37 T4-min. Logged in `gpu_ledger.csv`.
