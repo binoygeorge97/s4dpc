@@ -2417,3 +2417,56 @@ member count, smaller peak memory, no scope reduction. Re-running.
 
 GPU: 90.01 T4-min (Parts A+B complete, Part C OOM'd partway through).
 Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Housekeeping resolved: cases 2/4's training-instability is a minority-exploding-member phenomenon (1/5 seeds each), confirming Task 2a's hypothesis directly
+
+`tools/case24_instability_check.py`, sha 3c3563f: fresh M3 identification
+for cases 2 and 4 alone, 5 seeds each, full standard curriculum,
+PER-SEED (not aggregate) DPC loss recorded at every epoch of the N=200
+phase - the phase where Task 3's original 15-member ensemble saw mean
+loss spike to 6.9e13 (max 1.04e15).
+
+```
+case  seed  first_epoch  max_over_phase  final_epoch  exploded(>1e6)
+ 2     0        66.44          69.95          7.96        False
+ 2     1        29.59          29.59         14.86        False
+ 2     2       384831207802065.5   9214038371972132.0   82608989546421.9   TRUE
+ 2     3       195.46         195.46          9.48        False
+ 2     4        32.97          32.97         11.31        False
+ 4     0     3746785415.08    45457869298.9   29547797.8   TRUE
+ 4     1       315.04         315.04         49.21        False
+ 4     2       296.77        2456.03          28.63        False
+ 4     3      4438.57        4438.57         253.22        False
+ 4     4      5617.76       30117.63          91.26        False
+```
+
+**Confirms Task 2a's hypothesis (sha cf86e51) exactly: 1/5 seeds
+exploded for EACH case (case2/seed2, case4/seed0) - a minority-
+exploding-member phenomenon, not a reproducible property of cases 2/4
+as a whole.** The other 8 of 10 seeds across both cases stay in the
+tens-to-thousands range for the entire N=200 phase, the same order of
+magnitude as the "trivial" cases' DPC loss - completely unremarkable.
+The two that do explode reach truly extreme values (9.2e15, 4.5e10),
+matching this document's long-established Adam/overparameterization
+random-walk signature (D-only null-space work, the 10-seed
+identification sweep's case6 divergences) rather than looking like a
+different mechanism specific to these two cases' dynamics.
+
+**Resolved, per the housekeeping item's own question ("reproducible
+property or one exploding member"): one exploding member, not a
+reproducible property.** Task 3's original aggregate-ensemble read
+("M3 shows training-time BPTT instability... case2/case4 outliers")
+should be understood as: most M3 seeds train stably through control
+BPTT on every case tested so far, including 2 and 4; a small,
+non-zero fraction (here 2/10 = 20%, consistent with though not
+identical in rate to case6's ~50-60% identification-side divergence
+rate) explode catastrophically regardless of which case they're
+trained on. This is now the third independent context (D-only,
+10-seed identification, control BPTT) this exact signature has shown
+up in - it looks like a general property of training this S4
+parameterization with Adam, not something tied to control, DPC, or any
+particular case's dynamics.
+
+GPU: 51.46 T4-min. Logged in `gpu_ledger.csv`.
