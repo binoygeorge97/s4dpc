@@ -24,3 +24,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-13,s4dpc-controller-saturation-phase2,T4,13.34
 2026-08-13,s4dpc-pilot-surrogates,T4,1.32
 2026-08-13,s4dpc-controller-oracles-final,T4,63.64
+2026-08-13,s4dpc-controller-surrogates-m3-m6,T4,188.80

@@ -1800,3 +1800,112 @@ question). `tools/controller_saturation._run_m0` was generalized (an
 `oracle_name` parameter, default "M0" preserving every existing caller)
 so this script can route it through `fit_least_squares` for M1 instead
 of only ever training through the true plant.
+
+---
+
+## 2026-08-13 — Task 3 results: M3 AND M6 both catastrophically fail control transfer on EVERY case - confound checks clean, kink magnitude does NOT track the M6-vs-M3 gap, and two DIFFERENT failure modes are visible in the training loss itself
+
+`tools/controller_surrogates.py`, sha 97585f7 (oracle side) + a9194c7
+(surrogate code) - M3 and M6, cases {1,2,3,4,5,7} at their final
+per-case `max_action` (`controller_oracles.CASE_MAX_ACTION`), 3 seeds,
+full curriculum. Wall time 11327.9s (188.80 T4-min).
+
+**Combined table, median cost ratio to oracle LQR:**
+
+```
+oracle  case  max_action   M0/M1 ratio     M3 ratio      M6 ratio
+M0/M1     1       50         1.00x       323.28x       155.50x
+M0/M1     2       50        41.17x     55903.40x     68293.11x
+M0/M1     3       50         1.02x       310.28x       622.74x
+M0/M1     4       50         1.06x    121941.94x     53978.45x
+M0/M1     5      200         2.28x    466718.19x    361699.72x
+M0/M1     7       50         1.00x       494.42x       734.71x
+```
+
+**Both confound checks are clean.** No surrogate saturates meaningfully
+more than the oracle did at the same case's bound (check 1: every
+case/variant "clean" against a 0.05 threshold); M6 never saturates more
+than M3 anywhere (check 2: every case "clean"). Whatever is driving
+these numbers, it is not the action bound - the full printed checks are
+in the kernel log, `docs/controller_comparison_summary.csv` carries
+`median_saturation_frac`/`median_max_abs_u` for every row.
+
+**The headline, unavoidable observation: both M3 and M6 are 2-6 orders
+of magnitude worse than the oracle on EVERY case, including the ones
+that are trivial for M0/M1** (cases 1, 3, 7 - near-1x for the oracle,
+100x-750x for the surrogates). This holds even for M3, which the
+10-seed identification entry showed recovers Markov parameters to
+~1e-6 and has EXACTLY ZERO kink by construction. Teacher-forced
+identification fidelity, even M3's near-perfect fidelity, does not
+imply the resulting surrogate is safe to optimize a controller through.
+
+**Direct answer to the kink-magnitude question, computed exactly as
+asked:**
+
+```
+case   kink   M3 ratio      M6 ratio     M6/M3   M6 vs M3
+ 7     6.62   4.944e+02    7.347e+02    1.486   WORSE
+ 1     7.90   3.233e+02    1.555e+02    0.481   better
+ 3     9.56   3.103e+02    6.227e+02    2.007   WORSE
+ 2    11.20   5.590e+04    6.829e+04    1.222   WORSE
+ 5    11.40   4.667e+05    3.617e+05    0.775   better
+ 4    15.80   1.219e+05    5.398e+04    0.443   better
+```
+
+**No.** Case 4 has the highest kink magnitude (15.8) of all six cases
+and is the case where M6 does BEST relative to M3 (0.443x - M6 costs
+less than half of M3). Case 7 has the lowest kink (6.62) and is where
+M6 does WORST relative to M3 (1.486x). Spearman(kink, M6/M3 ratio) =
+-0.54 (n=6) - weakly NEGATIVE, i.e. pointing away from the hypothesized
+direction, and nowhere near the ~0.81 threshold this document has
+already established as needed for significance at this sample size.
+Reported at exactly this strength: not evidence for the kink mechanism
+driving the control-side cost gap, and not strong enough (n=6) to be
+evidence against it either - just not the clean tracking relationship
+that would have made this table read as confirmation.
+
+**Not asked for, found while checking the training-loss curves for
+sanity before trusting the table above - two DIFFERENT failure modes,
+not one:**
+
+- **M3 shows training-time BPTT instability.** For the {1,2,3,4,7}@50
+  ensemble, the moment the curriculum reaches N=200 (the final phase),
+  mean DPC loss (measured THROUGH the M3 surrogate, i.e. the actual
+  training objective) jumps to 6.9e13 with a per-member max of 1.04e15,
+  and is still at 1.06e13 (max 1.59e14) after 2000 epochs of that
+  phase - down from where it started, but nowhere near converged, and
+  astronomically larger than the ~1-2 range that "trivial" cases showed
+  under M0/M1. This is the same signature this document has already
+  named for identification (BPTT/Adam through a numerically demanding
+  rollout diverging in some members while others stay small) - here
+  showing up in the CONTROL loop, for cases that were completely clean
+  when the same GRU trained through the TRUE plant.
+- **M6 shows a clean reality gap instead - training loss stays bounded
+  (~10-560 across the same phase, same case group) while the TRUE-plant
+  transfer is just as catastrophic (67x-187,000x).** The M6 controller
+  looks like it converged fine, by the only signal available during
+  training; it just didn't learn to control the real system. This is
+  closer to a sim-to-real / reward-hacking failure than an optimization
+  failure - the controller found a way to look good to the M6 surrogate
+  specifically without that generalizing to `(A_d, B_d)`.
+
+**What this does and doesn't mean, stated carefully:** M3's failure
+mode (training instability) is not obviously kink-related - M3 has no
+norm layer at all. M6's failure mode (bounded training loss, terrible
+transfer) is at least CONSISTENT with a kink-flavored story (a
+distorted local Jacobian near the origin could make it easy for BPTT to
+find a policy that exploits M6's specific behavior there without that
+policy generalizing) but the same evidence is equally consistent with
+generic model-based-RL reality-gap - nothing here isolates the kink
+specifically as the cause versus "any imperfect surrogate gets
+exploited by a long-horizon BPTT controller." Not resolved this entry;
+flagged for the user's read before drawing a paper-level conclusion.
+
+**Not investigated further this entry** (per the standing instruction
+against pushing past what's been checked): per-seed variance within
+each case, whether shortening the curriculum's final horizon changes
+either failure mode, and whether M3's training-loss blowup is
+reproducible with fresh seeds. All three are natural next steps, none
+attempted here.
+
+GPU: 188.80 T4-min for this run. Logged in `gpu_ledger.csv`.
