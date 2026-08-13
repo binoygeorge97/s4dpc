@@ -2470,3 +2470,91 @@ parameterization with Adam, not something tied to control, DPC, or any
 particular case's dynamics.
 
 GPU: 51.46 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 5: k-step free-running identification does NOT fix DPC at any k tested - but this is confounded by k-step training itself getting harder to converge as k grows at the (necessarily reduced) budget used, so it is not the clean "fidelity improves, DPC still fails" negative it could have been
+
+`tools/identify_kstep.py`, sha 3c3563f (bugfixed after an x64/complex64
+dtype crash - see the commit two entries back): M3, all 7 cases, 5
+seeds, k in {1,5,10,20} (k=1 = teacher-forced anchor every step,
+equivalent in spirit to today's baseline but a fresh implementation via
+this script's own decode=True chunked loss, not identify.py's conv-mode
+path - not bit-comparable to the standard 40k-epoch numbers, see
+below), 2000 epochs (fewer than the standard 40k - a chunked
+free-running loss needs a genuinely sequential 100-step-per-epoch
+Python loop, unlike conv mode's one parallel call, so this budget was
+reduced up front to keep 4 k-values' worth of training tractable -
+flagged in the script's own docstring before this run, not discovered
+after). Total wall time 316.4 min.
+
+**DPC control (3 seeds/case, halved curriculum - also reduced in
+advance for the same tractability reason): cost ratio to oracle stays
+in the 1e2-1e6x range at every k, no case shows a clear trend toward
+the oracle as k increases:**
+
+```
+case    k=1        k=5        k=10       k=20
+ 1     117.4x      69.7x     397.5x     563.5x
+ 2   112,600x   127,410x   114,270x   100,710x
+ 3     542.8x     581.1x   2,030.5x   1,677.7x
+ 4   184,890x   160,910x   391,600x   372,620x
+ 5   502,530x 1,080,700x 1,433,900x 1,083,900x
+ 7   3,388.4x   6,519.6x   4,171.9x  11,267.0x
+```
+
+Every k=1 number lands within the same order of magnitude as the
+established M3 baseline for that case (`docs/controller_surrogates_
+summary.csv`: 323x/55903x/310x/121942x/466718x/494x for cases
+1/2/3/4/5/7) - a reasonable, consistent starting point, even though
+this is a different identification run (this script's own chunked
+k=1 loss, not identify.py's standard path) so exact agreement isn't
+expected. **No k value gets meaningfully closer to the oracle than k=1
+on any case - if anything, k=5/10/20 are flat-to-worse more often than
+better** (case 1 dips to 69.7x at k=5 then rises again; every other
+case either stays flat or climbs with k).
+
+**Important caveat, checked before trusting the DPC result at face
+value - and it changes how strongly this negative should be read:**
+`teacher_mse` (the SAME chunked loss being optimized) systematically
+WORSENS as k grows, at this budget, on most cases:
+
+```
+case    k=1        k=5        k=10       k=20
+ 1    4.2e-03     4.9e-02     3.3e+00     7.1e+00
+ 2    8.4e-03     3.7e-02     3.9e-01     8.0e+01
+ 3    5.7e-03     6.7e-02     1.7e+02     9.9e+04
+ 4    1.7e-02     1.2e-01     1.3e+00     1.5e+02
+ 5    1.2e-02     2.4e-02     3.4e-02     8.9e-02
+ 7    5.0e-03     3.7e-02     1.1e-01     2.2e-01
+```
+
+`openloop_rmse` (free-running, cold-start, same trajectory) shows the
+same pattern - WORSE at k=10/20 than at k=1 or k=5 on cases 1/3/4,
+case 3 catastrophically so (rmse 4.8 -> 8690 -> 19187 at k=1/10/20).
+**This is not "free-running loss converges fine and DPC still fails
+regardless" - it is "free-running loss, at a budget necessarily
+reduced for tractability, does not even reliably converge as k grows,
+and DPC fails regardless."** The longer within-chunk free-running
+horizon at higher k is itself a harder BPTT-through-imperfect-dynamics
+problem (exactly this project's own repeatedly-demonstrated fragility,
+now showing up in identification training, not just control training),
+and 2000 epochs - already 20x less than the standard 40k - was not
+enough to converge it, especially past k=10.
+
+**Honest verdict, not overclaimed:** this rules out the WEAKEST version
+of the free-running-loss fix ("as easily achievable as teacher-forced
+training, drop-in", at this budget) but does NOT cleanly rule out the
+STRONGER version the brief was actually asking about (free-running
+loss, properly converged, still fails at DPC) - that would need a
+budget large enough to converge k=10/20 as well as k=1 does, which
+this run's own numbers show it did not reach. Given every k value
+still fails DPC by 2-6 orders of magnitude regardless, and given this
+session's Task 2 result already answers the higher-order question
+this fix candidate was aimed at (the S4/BPTT machinery is innocent;
+Task 4 already shows WHY teacher-forced M3 has hundreds of spurious
+modes) - re-running k-step at the full 40k-epoch budget is not
+prioritized further this session; flagged as the natural next step if
+this fix candidate needs a truly decisive answer.
+
+GPU: 316.38 T4-min. Logged in `gpu_ledger.csv`.
