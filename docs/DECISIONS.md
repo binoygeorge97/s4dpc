@@ -1667,3 +1667,72 @@ bound confounded case 4 originally. Task 3 itself now excludes case 6
 be interpretable) while keeping case 6 in all identification-side
 results, where `docs/DECISIONS.md`'s prior entries already show it is
 informative.
+
+---
+
+## 2026-08-13 — Saturation check result: case 5's ~41x IS a bound artifact, case 2's is NOT. Split verdict, no single max_action fix for both.
+
+`tools/controller_saturation.py` (all 7 cases, `max_action=50`, same
+PRNGKeys as `controller_oracles.py`'s original M0 run - reproduces
+rather than re-experiments) then `tools/controller_saturation_phase2.py`
+(cases 2/5 re-trained at `max_action=200`).
+
+**Phase 1** - median saturation_frac (fraction of timesteps with
+`|u| >= 0.95*max_action`) and median max|u|, all 7 cases:
+
+```
+case   median_max|u|   median_sat_frac   median_ratio
+1        3.444e+01          0.0000         1.0047e+00
+2        5.000e+01          0.0698         4.1171e+01
+3        4.854e+01          0.0002         1.0215e+00
+4        4.992e+01          0.0030         1.0633e+00
+5        5.000e+01          0.0448         4.1740e+01
+6        5.000e+01          0.1632         1.3030e+07
+7        3.610e+01          0.0000         1.0041e+00
+```
+
+Cases 2 and 5 both sit clearly apart from cases 1/3/4/7 (near-zero
+saturation, max|u| meaningfully below 50) - both hit `|u|~50.000`
+(pegged) and saturate 4.5-7.0% of timesteps. The script's own automated
+trigger (both cases above a flat 5% threshold) technically did not fire
+- case 5 measured 4.48%, just under the cutoff - but that cutoff was an
+arbitrary round number, not a feature of the data, and the qualitative
+pattern (2 and 5 both meaningfully saturating, 1/3/4/7 essentially
+never) clearly holds. Ran phase 2 directly rather than trusting the
+literal threshold miss. (Case 6, excluded from Task 3, saturates
+hardest of all - 16-18% - consistent with a controller fighting a
+plant its own BPTT already can't stabilize, not a separate finding.)
+
+**Phase 2** - re-trained at `max_action=200`:
+
+```
+case      ratio@50    ratio@200   sat_frac@50  sat_frac@200   max|u|@50  max|u|@200
+2      4.1171e+01   3.0268e+01        0.0698        0.0000   5.000e+01   1.841e+02
+5      4.1740e+01   2.2800e+00        0.0448        0.0000   5.000e+01   1.437e+02
+```
+
+**Case 5: BOUND ARTIFACT CONFIRMED.** 41.74x -> 2.28x (18.3x reduction),
+saturation drops to 0.0000, `max|u|` settles at 143.7 - well under the
+new 200 bound, i.e. it stopped needing the bound at all once given room.
+`max_action=50` was a genuine controller-capacity limit for case 5, not
+a dynamics property.
+
+**Case 2: NOT explained by the bound.** 41.17x -> 30.27x (only a 1.36x
+reduction) despite saturation ALSO dropping to 0.0000 and `max|u|`
+reaching up to 188.4 (still under 200, so it isn't hitting the new bound
+either). Whatever makes case 2 hard for a bounded GRU, it is not
+controller capacity - the cost stays ~30x oracle even with 4x more
+authority and zero saturation. Also notable, flagged rather than
+explained: case 2's per-seed spread exploded at the higher bound (ratios
+1.92 / 30.27 / 128.05 - a ~67x range across 3 seeds, vs phase 1's tight
+36.8-52.2 range). A larger action range plausibly makes this
+particular optimization landscape harder to hit consistently, but this
+is a hypothesis, not tested here - flagged for whoever looks at case 2
+next, not investigated further this entry.
+
+**Consequence for Task 1: no single max_action serves both cases
+cleanly**, and this is being handed to the user rather than decided
+unilaterally - which bound(s) to use for the M0/M1/M3/M6 comparison
+table changes what the table means, not just its numbers. Task 3
+(`tools/controller_surrogates.py`) is built, committed, mount-path-fixed
+and pilot-validated, but not yet launched pending that call.
