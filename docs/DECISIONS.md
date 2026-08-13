@@ -2723,4 +2723,18 @@ Awaiting the M3/M6 half (`tools/horizon_sweep_surrogate.py`, running)
 before drawing the full comparison the brief asked for (does the
 single-seed M3 non-monotonicity survive proper seed counts).
 
+**EXCLUSION RULE, flagged before the surrogate half lands so it's
+applied consistently, not decided post-hoc:** case 4 at cap=5 fails
+through the TRUE plant (1120x median, worst seed 12,920x) by the exact
+same logic that excludes case 6 from control comparisons entirely
+(CLAUDE.md/this document, 2026-08-13 Task 2 kill-criterion entries) -
+if the ORACLE cannot stabilize a case at a given horizon, a surrogate's
+number at that same (case, horizon) carries no information about the
+surrogate, only about BPTT-through-that-horizon-through-any-model.
+Unlike case 6 (excluded at every horizon), case 4 resolves to
+near-oracle by cap>=50, so the exclusion is scoped to cap=5 only for
+case 4, not the whole case. Any M3/M6-vs-oracle ratio at case4/cap5
+must be marked as uninterpretable, not averaged into a headline
+number, when the surrogate half's results are written up.
+
 GPU: 139.56 T4-min. Logged in `gpu_ledger.csv`.
