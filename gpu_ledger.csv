@@ -36,3 +36,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-13,s4dpc-controller-m0-s4-partc-v2,T4,243.84
 2026-08-13,s4dpc-horizon-sweep-oracle,T4,139.56
 2026-08-13,s4dpc-horizon-sweep-surrogate,T4,132.71
+2026-08-13,s4dpc-balanced-truncation,T4,43.46

@@ -2738,3 +2738,124 @@ must be marked as uninterpretable, not averaged into a headline
 number, when the surrogate half's results are written up.
 
 GPU: 139.56 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 6 surrogate half: first attempt OOM'd exactly as predicted, fixed, rerunning
+
+`tools/horizon_sweep_surrogate.py` (pre-fix version, sha 9ecbeab) was
+built before Task 2 Part C's OOM fix existed and carried the same risk
+(grouping cases sharing a `max_action` bound into one batch, up to 5
+cases x 5 seeds = 25 members). It ran cleanly through M3's caps
+5/20/50/100 (all 6 control cases, 5 seeds), then hit the identical
+`RESOURCE_EXHAUSTED` (16.6GB requested) at M3's cap=200 N=200 phase -
+M6 never started. 132.71 T4-min spent before the crash. Fixed (sha
+9ecbeab, same per-case-batching pattern as Task 2's fix) and relaunched
+on a fresh kernel slug (`s4dpc-horizon-sweep-surrogate-v2` - re-pushing
+the same slug 409'd, same as Task 2 Part C's rerun; worked around the
+same way). Results in the next Task 6 entry once that run completes.
+
+GPU: 132.71 T4-min (crashed run). Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — The deciding experiment: truncated M3 is WORSE than full M3 on every case, not better - but the truncation itself introduces a real ~1e4x fidelity loss M3's own realization apparently cannot avoid, so this does NOT cleanly settle the mode-based story either way
+
+`tools/balanced_truncation.py`, sha b9ca367: self-check on the TRUE
+`(A_d,B_d)` (all 6 control cases) reconstructs it via Hankel-SVD/ERA at
+machine precision (1.9e-16 to 8.2e-15) with an EXACT rank-6 cliff in
+the Hankel singular values (7th/8th singular values exactly 0) -
+already confirmed locally before this run, reproduced here on GPU.
+Fresh M3 identification (6 control cases, 5 seeds, 40k epochs, 85.9s,
+zero divergence). No errors, 43.5 min total.
+
+**M0_S4 observability, confirmed exactly as stated in the correction
+two entries above:** `max|Abar[:6,6:]|` = exactly 0.0 for M0_S4 on
+every case checked - not merely small.
+
+**Lambda_re-clip check: partially an initialization artifact, but
+training roughly doubles it - not purely either story.** Fresh,
+UNTRAINED M3 (3 seeds, cases 1/3) already shows 122-182 near-unit
+modes (of 1030) before a single gradient step - so the S4
+parameterization's own init (via `Lambda_re`'s `<=-1e-4` clip) already
+produces a substantial population of near-marginal modes, not
+something training invents from nothing. But Task 4's TRAINED numbers
+(264-369 median per case) are consistently ~1.5-2x higher than these
+untrained figures, and untrained `rho(Abar)` is wildly noisy across
+just 3 seeds (1.01 to 1.91) - training also clearly adds to and
+reshapes the population, it does not merely inherit it unchanged. Both
+things are true at once; neither the "pure artifact" nor "purely
+learned" framing survives contact with the numbers.
+
+**The truncation itself does NOT recover M3's own ~1e-6 fidelity - it
+lands at ~1e-2, four orders of magnitude worse, and the Hankel
+singular values explain exactly why:**
+
+```
+        M3's median HSV, indices 0-14 (all cases/seeds pooled):
+idx:     0      1      2      3      4      5      6      7      8      9     10     11     12     13     14
+HSV:  0.561  0.263  0.156  0.121  0.088  0.061  0.049  0.033  0.026  0.020  0.015  0.012  0.009  0.008  0.006
+```
+
+Unlike the true system's EXACT cliff to 0 at index 6, **M3's spectrum
+decays smoothly with no cliff anywhere** - index 6 (0.049) is barely
+smaller than index 5 (0.061), and meaningful energy (hsv[14]=0.006, ~1%
+of hsv[0]) remains far past index 6. Per-case median reconstruction
+error at r=6: `err_vs_m3_markov` 1.3e-2 to 3.3e-2 (vs M3's own
+teacher-forced Markov error, ~1e-6, established in the 10-seed
+identification entries), `err_vs_true_markov` 2.6e-2 to 5.6e-2 -
+consistently worse than `err_vs_m3_markov`, as expected (ERA
+reconstructs from M3's own data, not the true plant's). `cond(Cr)`
+(the output-normal-form transform) ranges 13-377, usable but not
+uniformly clean.
+
+**DPC through the truncated system: catastrophic, and WORSE than full
+M3 on every one of the 6 control cases, not better:**
+
+```
+case   full M3 (established)   truncated M3 (median, 5 seeds)   ratio (trunc/full)
+  1          323x                     2340x                          7.2x
+  2       55,903x                   173,360x                         3.1x
+  3          310x                     3,107x                        10.0x
+  4      121,942x                 1,563,200x                        12.8x
+  5      466,718x                 5,903,800x                        12.7x
+  7          494x                    20,214x                        40.9x
+```
+
+**Verdict, stated as precisely as the confound allows: the optimistic
+branch is cleanly falsified - truncated M3 does NOT land near oracle,
+not on any case, by a wide margin. But this experiment cannot cleanly
+distinguish "spurious modes are innocent" from "the truncation's own
+~1e4x fidelity loss is itself sufficient to explain even-worse DPC
+failure," because both changed at once.** M1's fidelity (~1e-14) gives
+~1x; M3's own teacher-forced fidelity (~1e-6) gives 300x-700,000x;
+truncated-M3's fidelity (~1e-2, an unavoidable side effect of the
+truncation itself, not a choice) gives 2,340x-5,900,000x - worse
+fidelity tracking worse DPC outcome across this three-point comparison
+is at least as consistent with "fidelity still matters, non-linearly"
+as with "spurious modes are what's really driving this." The mode-
+count story is NOT rescued by this result, but it is not cleanly killed
+either - what IS killed, unambiguously, is the simple "remove the junk,
+get the good realization back" picture, because **M3's own realization
+does not have a clean 6-good-dimensions-plus-junk decomposition to
+recover in the first place.** The smooth (uncliffed) Hankel spectrum is
+itself the finding: M3's learned dynamics are genuinely spread across
+far more than 6 directions, not concentrated in 6 good ones sitting
+next to ~300 separable spurious ones. Task 4's spurious-mode count and
+this entry's smooth-HSV-spectrum finding are both real, both
+architecturally clean measurements, and both point at the same
+underlying picture - M3's realization is diffuse, not neatly
+decomposable - without either one, on its own, causally explaining the
+DPC failure.
+
+**What would cleanly separate the two explanations, not attempted
+here:** a truncation-quality-matched control - e.g., truncate to a
+LARGER r (the smallest r at which `err_vs_m3_markov` reaches ~1e-6,
+whatever that turns out to be) and check whether DPC improves as r
+grows toward full M3's own fidelity floor, or fails just as badly even
+once fidelity is matched. If it fails just as badly at matched
+fidelity, that would be a much cleaner argument for realization/
+structure over raw Markov error than anything in this document so far.
+Flagged as the natural next step, not run this session.
+
+GPU: 43.46 T4-min. Logged in `gpu_ledger.csv`.
