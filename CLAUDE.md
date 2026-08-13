@@ -22,19 +22,29 @@ wrong sign, not just non-significant. **Original claim, kept for the record:**
 success, via LayerNorm (degree-0 homogeneous, so it cannot represent a linear map)
 distorting the learned Jacobian near the regulation setpoint — the "kink".
 
-**Current working picture (also `docs/DECISIONS.md`, still being actively
-revised — check there before citing a specific mechanism as settled):** both M3
-and M6 get short-horizon/local dynamics approximately right and free-running
-long-horizon dynamics wrong, and this is NOT simply an "only long horizons are
-affected" story — a controller trained with BPTT capped at N=5 through M3 already
-transfers at ~358x oracle cost, where M3's own fidelity is at its best. Realization
-mismatch (M3 is a ~500-state S4 realization of a 6-state plant; least-squares M1,
-with comparable fidelity, controls at ~1x) is the current leading candidate, not
-a single distorted-Jacobian mechanism. Warm-starting the S4 hidden state to fix an
-inconsistent (x0 != 0, s0 = 0) initial condition does NOT help — for M3 it makes
-free-running error monotonically WORSE with more genuine history, arguing against
-IC-inconsistency and toward M3's internal S4 modes being spurious/unmoored from
-the physical state rather than merely mis-initialized.
+**Current working picture, updated 2026-08-13 with a decisive result (also
+`docs/DECISIONS.md` — check there before citing a specific mechanism as settled,
+since this remains under active investigation):** the S4/BPTT/`decode=True` control
+machinery itself is innocent. "M0_S4" — an S4 hand-constructed (block-zeroed) to
+realize the exact true `(A_d, B_d)` to ~1e-17, then deployed through the identical
+`rollout_learned`/`jax.lax.scan` machinery M3/M6 controllers train through — matches
+the true-plant training baseline essentially exactly, at every curriculum horizon
+tested (5 to 200) and on every one of the 6 control cases (>=5 seeds each, most
+agreeing to 3-4 decimal places). So the 300x-700,000x M3/M6 failure has nothing to
+do with being an S4 surrogate, with BPTT through the stepped/scan machinery, or with
+any training-mechanics candidate — it is entirely about what identification LEARNS
+when fit to data instead of being handed exactly. The current best candidate for
+what that learned difference is: M3's augmented state-transition operator (physical
+state + S4 hidden state) has ~300 near-unit-circle modes (of 1030 dims) where the
+true system has only 3-6, with real one-step leverage on the output and often
+orders-of-magnitude-excess transient growth — present in every real M3 checkpoint,
+absent by construction in M0_S4 (which was never asked to LEARN a realization).
+This does not yet explain the case-by-case severity gradient (no tested spectral
+quantity correlates with the per-case DPC ratio) or why the same spurious-mode
+signature shows up: warm-starting the S4 hidden state on genuine burned-in history
+makes M3's free-running prediction monotonically WORSE, not better, arguing against
+a simpler inconsistent-initial-condition story and toward the internal modes being
+fundamentally unmoored from the physical state rather than merely mis-initialized.
 
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
