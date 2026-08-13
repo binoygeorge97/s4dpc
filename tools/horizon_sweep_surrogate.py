@@ -133,10 +133,6 @@ def main() -> None:
         x_hist_lqr, u_hist_lqr = co.rollout_lqr_true(A_d, B_d, K, x0_eval_np, co.EVAL_HORIZON)
         oracle_costs[case] = co.true_quadratic_cost(x_hist_lqr, u_hist_lqr, co.Q_X, co.R_U, co.Q_F)
 
-    by_bound: dict[float, list[int]] = {}
-    for case in CONTROL_CASES:
-        by_bound.setdefault(co.CASE_MAX_ACTION[case], []).append(case)
-
     rows = []
     for variant in VARIANTS_TO_RUN:
         print(f"\n{'=' * 20} identifying {variant}, cases {CONTROL_CASES} x {N_SEEDS} seeds, {EPOCHS_ID} epochs {'=' * 20}")
@@ -156,7 +152,14 @@ def main() -> None:
         by_case_seed = {(r["case"], r["seed"]): r["param_state"] for r in id_rows if (r["case"], r["seed"]) not in diverged}
 
         for cap in CAPS:
-            for max_action, cases in by_bound.items():
+            # ONE CASE AT A TIME (<=5 members), not grouped by max_action
+            # bound: docs/DECISIONS.md's Task 2 Part C entry hit
+            # RESOURCE_EXHAUSTED on a T4 batching 25 members (5 cases x 5
+            # seeds sharing a bound) at the N=200 phase - same risk here
+            # since this reuses the same cases-share-a-bound grouping.
+            for case in CONTROL_CASES:
+                max_action = co.CASE_MAX_ACTION[case]
+                cases = [case]
                 members = [(c, s) for c in cases for s in range(N_SEEDS) if (c, s) in by_case_seed]
                 if not members:
                     continue
