@@ -110,7 +110,14 @@ def _kstep_loss_single(model: StackedModel, inputs: jax.Array, targets: jax.Arra
     L = inputs.shape[0]
     x_true = inputs[:, :D_OUTPUT]
     u = inputs[:, D_OUTPUT:]
-    states = model.init_state(N=STATE_SIZE)
+    # model.init_state() hardcodes complex64 regardless of jax_enable_x64
+    # (s4dpc/model.py docstring; s4dpc.diagnostics.zero_states and
+    # s4dpc.control.init_batched_state exist specifically to work around
+    # this) - under x64 every param and the SSM's own state update are
+    # complex128, so seeding at complex64 makes jax.lax.scan's carry
+    # dtype mismatch between input and output (caught the hard way: a
+    # first version of this script hit exactly this on Kaggle).
+    states = [jnp.zeros((D_MODEL, STATE_SIZE), dtype=jnp.complex128) for _ in range(N_LAYERS)]
 
     total = 0.0
     count = 0
@@ -205,7 +212,14 @@ def _openloop_rmse(model: StackedModel, inputs: jax.Array, targets: jax.Array) -
     which is one-step (true x handed in at every step)."""
     x_true = inputs[:, :D_OUTPUT]
     u = inputs[:, D_OUTPUT:]
-    states = model.init_state(N=STATE_SIZE)
+    # model.init_state() hardcodes complex64 regardless of jax_enable_x64
+    # (s4dpc/model.py docstring; s4dpc.diagnostics.zero_states and
+    # s4dpc.control.init_batched_state exist specifically to work around
+    # this) - under x64 every param and the SSM's own state update are
+    # complex128, so seeding at complex64 makes jax.lax.scan's carry
+    # dtype mismatch between input and output (caught the hard way: a
+    # first version of this script hit exactly this on Kaggle).
+    states = [jnp.zeros((D_MODEL, STATE_SIZE), dtype=jnp.complex128) for _ in range(N_LAYERS)]
     x = x_true[0]
     errs = []
     for t in range(inputs.shape[0]):
