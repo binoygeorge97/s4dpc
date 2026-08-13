@@ -53,11 +53,23 @@ is ~10-20, real). M0_S4's result therefore does NOT distinguish which one matter
 — it only rules out the S4/BPTT machinery. Since M3's ~1e-6 Markov error was
 already too small to explain a 300x+ blowup under ordinary error propagation
 (`rho~1.02` over 200 steps compounds 1e-6 to only ~5e-5), realization/observable-
-spurious-modes remains the standing, not-yet-refuted candidate — being tested
-directly via balanced truncation of M3 to 6 states (Hankel-SVD, since the
-augmented operator is marginally unstable so Gramian-based truncation doesn't
-apply): if the truncated (Markov-matched) 6-state M3 controls near oracle, the
-spurious modes are causal; if it still fails, every mode-based story dies.
+spurious-modes remains the standing, not-yet-refuted candidate.
+
+**Tested directly via balanced truncation (Hankel-SVD/ERA, since the augmented
+operator is marginally unstable so Gramian-based truncation doesn't apply) —
+result is a genuine complication, not a clean answer either way.** Truncating
+M3 to 6 states does NOT recover M3's own ~1e-6 fidelity (lands at ~1e-2 instead)
+because M3's Hankel singular values have no cliff at rank 6 the way the true
+system's do (verified: self-check on the true system gives an EXACT cliff to 0
+past index 6; M3's spectrum decays smoothly, with real energy remaining past
+index 14) — M3 has no clean 6-good-dims-plus-junk decomposition to recover in
+the first place. Truncated M3 then fails DPC 3-41x WORSE than full M3 on every
+one of 6 control cases, cleanly falsifying the optimistic "truncate and get
+oracle-level control back" branch — but because the truncation confounds
+"remove spurious modes" with "introduce a new ~1e4x fidelity loss," this does
+NOT cleanly kill the mode-based story either. A fidelity-matched truncation
+(larger r, chosen so err_vs_m3_markov reaches M3's own ~1e-6 floor) is the
+natural next step to separate the two explanations - not yet run.
 
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
