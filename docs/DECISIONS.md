@@ -2094,3 +2094,68 @@ finding, but single-member Task 2 reruns should not be read as
 bit-exact reproductions of Task 3's ensemble-batched numbers.
 
 GPU: 17.98 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 2a: M3 does NOT break at N=200 - it never worked, from N=5 onward. This forces a correction to the "two failure modes" framing.
+
+`tools/task2a_m3_horizon_ablation.py`, case3/seed0, curriculum capped at
+N=5/20/50/100/200, true plant vs M3, all evaluated on the true plant
+(`docs/task2a_m3_horizon_ablation.csv`):
+
+```
+cap    true ratio    M3 ratio
+  5       4.16x       357.75x
+ 20       2.55x       303.83x
+ 50       1.45x       281.40x
+100       1.04x       156.19x
+200       1.02x       282.12x
+```
+
+**True plant: smooth, monotonic improvement with more horizon** -
+exactly what a normal learning curve looks like. **M3: never close to
+usable at ANY cap, including the shortest (N=5, 1000 epochs) - and NOT
+monotonic.** The premise in the task instruction ("if M3 breaks at
+N=50 while true is fine at N=200") does not hold - M3 does not break
+at a threshold, because it never worked. A controller that only ever
+saw 5-step BPTT through M3 already transfers at 358x oracle cost on
+the true plant. More training horizon does not make it worse, but it
+also does not fix it (156x at cap=100, back up to 282x at cap=200 -
+single seed, not a reliable trend, but certainly not monotonic decay
+either). The bottleneck is not how well the controller is optimized
+against M3 - by every indication (the SMOOTH, bounded training loss at
+N=200 shown below) the controller optimizes against M3 just fine. The
+bottleneck is that M3 itself does not match the true system, and no
+amount of additional controller training against a fixed, wrong
+surrogate can close that gap - explaining directly why longer horizon
+doesn't help: BPTT only ever updates the controller, never M3.
+
+**Correction to the Task 3 "two failure modes" framing, found by
+checking the training-loss curve for this run's cap=200 phase before
+trusting the table:** cap=200's M3 training loss is completely calm -
+262.9 -> 38.8 -> 37.5 -> 37.3, smooth and convergent, nothing like the
+6.9e13-to-1e15 blowup Task 3 recorded for the M3 {1,2,3,4,7}@50
+ensemble at the same N=200 phase. Since this run trains case3/seed0
+ALONE and reproduces neither the blowup nor (per the Task 3 per-member
+table) case3's own eval numbers were never the extreme ones in that
+batch (case3's worst seed there was 1981.7x; case2 and case4 reached
+131,980x and 486,120x) - **the training-instability signature belongs
+to specific OTHER cases in that ensemble (most likely case 2 and/or
+case 4, going by their eval-ratio outliers), not to case 3, and
+probably not to "M3" as a variant uniformly.** Case 3's M3 failure is
+the SAME bounded-training-loss/bad-transfer signature this document
+attributed to M6 specifically in the Task 3 entry. That entry's clean
+M3-trains-unstably/M6-has-a-reality-gap dichotomy is not supported by
+this case - it was read off aggregate ensemble loss statistics (a
+15-member mean and range), which can't distinguish "one member
+exploded" from "the variant is uniformly unstable." **Reality-gap
+(bounded loss, bad transfer) looks like it may be the dominant pattern
+across both variants and most cases; training-time instability may be
+a separate, case-specific (not variant-specific) phenomenon layered on
+top for a minority of cases.** This is an inference from the evidence
+assembled so far (the per-case eval-ratio outliers in Task 3's table),
+not independently re-verified by looking at case 2 or case 4's own
+per-member training-loss curves directly - flagged as the natural next
+check, not attempted here.
+
+GPU: 33.00 T4-min. Logged in `gpu_ledger.csv`.
