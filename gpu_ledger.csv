@@ -33,3 +33,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-13,s4dpc-controller-m0-s4-exact-realization,T4,90.01
 2026-08-13,s4dpc-case24-instability-check,T4,51.46
 2026-08-13,s4dpc-identify-kstep,T4,316.38
+2026-08-13,s4dpc-controller-m0-s4-partc-v2,T4,243.84

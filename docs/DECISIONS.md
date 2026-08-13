@@ -2558,3 +2558,55 @@ prioritized further this session; flagged as the natural next step if
 this fix candidate needs a truly decisive answer.
 
 GPU: 316.38 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 2 Part C: the full 6-case x 5-seed confirmation lands - M0_S4 matches the M0/M1 oracle baseline almost exactly on every single case, not just case 3
+
+`tools/controller_m0_s4.py` rerun on a fresh kernel slug (sha 5ebb37e;
+Kaggle 409'd on re-pushing the same slug immediately after the Part A/B
+run completed - worked around, not investigated further) after the
+per-case-batching OOM fix. All 30 members (6 cases x 5 seeds) completed
+with no errors. `docs/controller_m0_s4_summary.csv`.
+
+```
+case   M0/M1 median   M0_S4 median   M0_S4 range
+  1       1.0047         1.0047      [1.0042, 1.0052]
+  2      41.1714        36.9993      [32.10, 52.23]
+  3       1.0215         1.0215      [1.0215, 1.0225]
+  4       1.0633         1.0638      [1.0628, 1.0648]
+  5       2.2800         2.2800      [1.0802, 13.8001]
+  7       1.0041         1.0038      [1.0036, 1.0044]
+```
+
+**Identical to 4 decimal places on cases 1, 3, 5; identical to 3 on
+case 4; case 7 differs only in the 4th decimal; case 2 is the sole case
+with a visible gap (37.0x vs 41.2x), and it is well inside case 2's own
+already-documented seed-to-seed variance** (this document's 2026-08-13
+saturation entries: case 2's per-seed spread was already flagged as
+unusually wide even before this session, "1.92x/30.27x/128.05x - a
+~67x range" at a wider action bound; M0_S4's own 5-seed range here,
+32.10-52.23x, is the same qualitative pattern at a milder scale, not a
+new discrepancy this run introduced). No confound: saturation stayed
+at or near zero for every case except 2 (max 7.3%, matching M0/M1's
+own known saturation profile there, not something M0_S4 introduces).
+
+**This is no longer a single-case result - it holds across every one
+of the 6 control cases, each at >= 5 seeds, matching the M0/M1 oracle
+essentially exactly. Combined with Part B's cap-by-cap agreement on
+case 3, the verdict from two entries ago is now fully confirmed at the
+statistical power the session brief asked for, not just suggested by
+one case:** training a BoundedGRUController via BPTT through an S4
+realizing the exact true dynamics, deployed through the identical
+decode=True/`jax.lax.scan`/`rollout_learned` machinery M3 and M6 use,
+is indistinguishable from training directly through `(A_d, B_d)`. The
+300x-700,000x M3/M6 failure is not a property of "being an S4
+surrogate," of BPTT through S4, or of the control/training machinery in
+any form tested. It is entirely a property of what identification
+LEARNS when it has to fit the dynamics from data rather than being
+handed them exactly - and Task 4's ~300 spurious near-unit modes
+(present in every real M3 checkpoint, absent by construction in M0_S4)
+is this document's best current candidate for what that learned,
+non-exact difference actually is.
+
+GPU: 243.84 T4-min. Logged in `gpu_ledger.csv`.
