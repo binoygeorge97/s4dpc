@@ -1909,3 +1909,51 @@ reproducible with fresh seeds. All three are natural next steps, none
 attempted here.
 
 GPU: 188.80 T4-min for this run. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — REFUTATION: the kink does not cause DPC failure
+
+Stated plainly, per instruction, not softened: the central hypothesis
+this project was built to test - that LayerNorm's degree-0-homogeneous
+kink near the regulation setpoint is why DPC fails through a learned S4
+surrogate - is refuted by this project's own control-side data.
+
+M3 has EXACTLY ZERO kink by construction (0.000e+00 bit-for-bit across
+all 7 cases, the 10-seed identification entry) and recovers Markov
+parameters to ~1e-6. If the kink were the mechanism, M3 should control
+close to the oracle. It does not: 310x-466,000x oracle cost across
+every case tested, the same order of magnitude of failure as M6 (which
+has substantial kink everywhere). Spearman(kink magnitude, M6/M3 cost
+ratio) = -0.54 at n=6 - not just non-significant, INVERTED from the
+predicted direction: case 4, the highest-kink case (15.8), is the one
+case where M6 controls BETTER than M3 (0.443x), and case 7, the
+lowest-kink case (6.62), is where M6 is worst relative to M3 (1.486x).
+A mechanism whose signature is most absent exactly where the mechanism
+is strongest is not a surviving hypothesis.
+
+This does not erase the identification-side results - M3's zero kink
+vs M6's universal nonzero kink, and the Kreiss-like correlation with
+M6's Markov error, are still real, still correctly measured, and still
+in this document. What's refuted is specifically the causal claim that
+this identification-side property (the kink) is what breaks DPC. It
+isolates cleanly on the identification side and does not transfer to
+the control side - the two are different phenomena, matching the
+2026-08-13 entry that first named this distinction from the saturation
+work (kreiss_like ordering M6's identification error but not control
+difficulty).
+
+**What survives, and is the bigger finding:** BOTH surrogates fail
+catastrophically on cases where the oracle controls near-perfectly
+(1.00-1.02x) - including M3, whose one-step and multistep-Markov
+fidelity are essentially exact. Near-exact teacher-forced prediction is
+not sufficient for a surrogate to be safe to optimize a DPC controller
+through. The hypothesis document's requirements for DPC success
+(J_x ~ A_d, J_u ~ B_d, F(0,0,s) ~ 0, correct multistep composition) are
+essentially satisfied by M3 and it still fails - that list is
+incomplete. Finding what property is missing (candidates raised by the
+same entry: BPTT-through-the-surrogate numerical stability at long
+horizon for M3; a reality-gap/exploitable-imperfection mechanism for
+M6) is the open question the project now turns on. Verification of
+these numbers (docs/DECISIONS.md, next entry) is in progress before
+either candidate is investigated further.
