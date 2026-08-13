@@ -1957,3 +1957,65 @@ horizon for M3; a reality-gap/exploitable-imperfection mechanism for
 M6) is the open question the project now turns on. Verification of
 these numbers (docs/DECISIONS.md, next entry) is in progress before
 either candidate is investigated further.
+
+---
+
+## 2026-08-13 — Task 1 verification: the 310x M3/case3 number is real, not a bug. M3's own free-running dynamics diverge from the true plant, even open-loop with no controller involved.
+
+`tools/verify_m3_case3.py`, one controller (M3/case3/seed0, an easy
+case: oracle 1.02x, M3 measured at 310x in the Task 3 sweep), one
+shared x0. Checkpoint, raw trajectories, and both plots saved
+(`docs/verify_m3_case3/`).
+
+**Closed-loop, same controller, true plant vs the M3 surrogate it
+trained through:**
+
+```
+                cost      ||x(0)||   ||x(200)||   max||x||   max|u|
+true plant    1.749e+04     6.635      138.6        138.6     46.5
+M3 surrogate  7.734e+01     6.635        1.58         7.5     16.5
+```
+
+The plot (`closed_loop.png`) makes this unambiguous: `||x(t)||` on the
+M3 surrogate oscillates in a bounded 1-8 band, looking like ordinary,
+if imperfect, regulation. On the true plant, `||x(t)||` climbs smoothly
+and monotonically from 7 to 139 over 200 steps, with `||u(t)||` growing
+in step - a controller correctly fighting a divergence it cannot win
+against, not noise or an artifact.
+
+**Open-loop, no controller at all - the cleaner check, run because the
+closed-loop result alone can't separate "bad surrogate" from "bug in
+the rollout":** the oracle LQR's own closed-loop control sequence on
+case 3 (which drives the TRUE plant from `||x||=6.6` to `||x||=5.0e-4`
+by step 200 - LQR doing exactly what it should) was replayed blind
+through M3, no feedback, nothing controller-related in the loop at all.
+M3 predicts `||x(200)||=96.7` under the EXACT sequence that in reality
+converges the system almost to machine zero. Tracking error
+(`open_loop.png`, bottom panel) grows to ~12 by step 15, briefly
+recovers to ~4 near step 30, then grows again to a peak of 205 at step
+176. M3 gets the short-horizon behavior approximately right and then
+diverges - consistent with (though not proof of) the identification-
+side finding that M3 matches Markov parameters (a LOCAL linearization
+at u=0) to ~1e-6: that check tests infinitesimal, near-origin behavior,
+not what happens under a sustained, realistically-large control
+sequence over 200 steps.
+
+**Verdict, per the decision tree specified: genuine reality gap, not a
+bug.** Reasoning: (1) the M3-surrogate trajectory is smooth and bounded,
+not NaN/exploding/frozen - not the signature decode=True or
+state-threading bugs produce; (2) the open-loop check has NO controller
+or BPTT in it at all, isolating the surrogate's own free-running
+dynamics from anything about how it was optimized against; (3) the
+rollout mechanics themselves (`model_in = concat([x,u])`, same step
+function as `rollout_learned`) are the same code already exercised
+across every Task 3 pilot without incident, and structurally match
+`diagnostics.markov_parameters`, independently validated to machine
+precision in `tools/validate_diagnostics.py`. Nothing here points at
+the harness; everything points at M3's learned realization having
+long-horizon/large-input dynamics that diverge from the true system's,
+despite matching its short-horizon linearization almost exactly.
+
+**Results stand. Proceeding to Task 2** (characterizing the M3
+training-instability and M6 reality-gap mechanisms) on this basis.
+
+GPU: 14.90 T4-min. Logged in `gpu_ledger.csv`.
