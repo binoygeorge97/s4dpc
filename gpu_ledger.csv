@@ -30,3 +30,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-13,s4dpc-task2a-m3-horizon,T4,33.00
 2026-08-13,s4dpc-openloop-warmstart,T4,10.33
 2026-08-13,s4dpc-m3-spurious-modes,T4,6.37
+2026-08-13,s4dpc-controller-m0-s4-exact-realization,T4,90.01

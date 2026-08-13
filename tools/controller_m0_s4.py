@@ -374,16 +374,20 @@ def run_full_ensemble() -> None:
         x_hist_lqr, u_hist_lqr = co.rollout_lqr_true(A_d, B_d, K, x0_eval_np, co.EVAL_HORIZON)
         oracle_costs[case] = co.true_quadratic_cost(x_hist_lqr, u_hist_lqr, co.Q_X, co.R_U, co.Q_F)
 
-    by_bound: dict[float, list[int]] = {}
-    for case in CONTROL_CASES:
-        by_bound.setdefault(co.CASE_MAX_ACTION[case], []).append(case)
-
+    # ONE CASE AT A TIME (5 members), not grouped by max_action bound: a
+    # 25-member batch (5 cases x 5 seeds sharing a bound) hit
+    # RESOURCE_EXHAUSTED on a T4 at the N=200 phase (BPTT through 200
+    # sequential float64 steps for 25 members at once needed >15GB) -
+    # controller_surrogates.py's own batches never exceeded ~21 members
+    # AND used only 3 seeds; 5 members/case is comfortably inside that
+    # established-safe range.
     rows = []
-    for max_action, cases in by_bound.items():
-        n_members = len(cases) * N_SEEDS
-        print(f"\n{'=' * 10} M0_S4 ensemble, cases {cases} @ max_action={max_action} ({n_members} members) {'=' * 10}")
+    for case in CONTROL_CASES:
+        max_action = co.CASE_MAX_ACTION[case]
+        n_members = N_SEEDS
+        print(f"\n{'=' * 10} M0_S4 ensemble, case {case} @ max_action={max_action} ({n_members} members) {'=' * 10}")
         t0 = time.time()
-        ensemble_state, members = _train_ensemble_m0s4(cases, seeds, max_action)
+        ensemble_state, members = _train_ensemble_m0s4([case], seeds, max_action)
         print(f"  ensemble training wall time: {time.time() - t0:.1f}s")
 
         for i, (case, seed) in enumerate(members):
