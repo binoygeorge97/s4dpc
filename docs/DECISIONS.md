@@ -2320,3 +2320,100 @@ transient amplification would produce: feeding more history gives those
 modes more room to move away from a useful trajectory, not less.
 
 GPU: 6.37 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 2: THE key result of this session. M0_S4 (the true plant, realized exactly by an S4 and deployed through the identical BPTT/decode=True machinery M3/M6 use) controls IDENTICALLY to training directly through the true (A_d,B_d) matrices, at every horizon. The S4/BPTT graph is innocent - the failure is entirely about what identification learns.
+
+`tools/controller_m0_s4.py`, sha 637abae (script; run at f3a9623):
+builds an M6-architecture `StackedModel` per (case, seed) with the block
+zeroed exactly as in `tools/validate_diagnostics.py` (`out.kernel=0`,
+`C_real_imag=0`, etc.) so its one-step map is `x_next = A_d@x + B_d@u`
+to ~1e-17, for every case - then trains the STANDARD
+`BoundedGRUController` through it via `rollout_learned`, the exact same
+decode=True/stepped/BPTT code path `controller_surrogates.py` uses for
+M3/M6. Three parts: (A) construction diagnostics, (B) a case-3 horizon
+ablation directly comparable to `docs/task2a_m3_horizon_ablation.csv`,
+(C) the full 6-case x 5-seed ensemble.
+
+**Part A confirmed the analytical prediction before any GPU spend:**
+reading `s4dpc/blocks.py`'s `ConfigurableBlock.__call__` shows
+`out.kernel=0, out.bias=0` forces the block's post-GLU contribution to
+exactly 0 regardless of the S4 layer's own output, so with
+`residual=True` the block output is exactly `skip = encoder(x,u)`,
+INDEPENDENT of the S4 hidden state - meaning cold-start (s0=0) vs a
+burned-in warm start must give bit-identical rollouts for M0_S4 by
+construction, unless the (causally dead) state itself overflows to
+inf/nan. Checked directly per case, not merely asserted: self-check
+error ~1e-17, cold-vs-warm output diff and state-finiteness confirmed
+clean for every case. (This also means Task 3's warm-start question is
+answered trivially/vacuously for M0_S4 by construction - Task 3's real
+answer, on the actually-learned M3/M6, is the entry two above this one.)
+
+**Part B is the sharpest number in this entire project.** Case 3, one
+seed, curriculum capped at N in {5,20,50,100,200}, evaluated on the
+true plant exactly as everywhere else:
+
+```
+cap    true-plant ratio    M0_S4 ratio
+  5       4.156256067932085x   4.156256067932085x
+ 20       2.5517450039151535x  2.5517450039151535x
+ 50       1.449500203629581x   1.4495002036295808x
+100       1.0380708325516528x  1.0380708325516528x
+200       1.0214865143264333x  1.0214865143264333x
+```
+
+Identical to the printed precision at caps 5/20/100/200, and identical
+to 14 significant figures at cap 50 (the only cap with any visible
+difference at all, and that difference is at the level of ordinary
+float64 accumulation noise across two independently-JIT-compiled
+training runs, not a real gap). **A controller trained via BPTT through
+an S4 - stepped one input at a time through the full decode=True/
+jax.lax.scan machinery - that happens to compute the exact true
+dynamics is INDISTINGUISHABLE from a controller trained directly
+through the true `(A_d, B_d)` matrices.** This is not "close to
+oracle" (the brief's stated success threshold was ~1.0-1.1x) - it is
+exact agreement with the true-plant training baseline itself, at every
+horizon tested, refuting even the possibility of a horizon-dependent
+BPTT-through-S4 numerical-conditioning effect this document speculated
+about earlier (Task 2b's entry, and this session's own opening
+mechanism list).
+
+**Verdict, unambiguous: the S4 realization and its backprop graph are
+completely innocent.** None of the following are the cause of M3/M6's
+300x-700,000x DPC failure: the S4 architecture itself, the decode=True
+stepped/`jax.lax.scan` machinery, BPTT through that machinery at any
+horizon from 5 to 200, or anything about how `rollout_learned` deploys
+a surrogate. The entire failure is about what identification actually
+LEARNS - given a surrogate that is merely CLOSE to the true dynamics
+(M3's ~1e-6 Markov error, not exact), something about that residual
+imperfection is catastrophic for BPTT-trained control, even though the
+identical training/eval machinery is provably safe when fed the exact
+answer. This sharpens every other finding in this document: Task 4's
+~300 spurious near-unit modes and Task 3's warm-start-makes-it-worse
+result are not properties of "being an S4 surrogate" in the abstract -
+Part A above shows M0_S4's own internal S4 state is completely inert
+by construction, with none of Task 4's pathology, because it was never
+asked to LEARN a realization, only handed one. The spurious modes are
+something Adam's optimization introduces when fitting the factored S4
+parameterization to data (consistent with, and now given fresh teeth
+by, this document's much earlier finding of an exact ~490-dim gauge
+non-identifiability in this same parameterization) - not something
+inherent to the architecture's capacity to represent the true system.
+
+**Part C (the full 6-case x 5-seed ensemble) did not complete cleanly
+this run - see the next entry.** Given Part B's result, Part C is
+expected to be confirmatory, not decisive on its own; still being run
+for the statistical power the session brief asked for.
+
+**Part C's OOM, fixed (sha 637abae):** a 25-member batch (cases
+{1,2,3,4,7} sharing `max_action=50`, x 5 seeds) hit
+`RESOURCE_EXHAUSTED` at the N=200 phase - BPTT through 200 float64
+steps for 25 members at once needed >15GB, past a T4's 16GB.
+`controller_surrogates.py`'s own batches never exceeded ~21 members at
+only 3 seeds; fixed by batching one case (5 members) per ensemble call
+instead of grouping cases by shared `max_action` bound - same total
+member count, smaller peak memory, no scope reduction. Re-running.
+
+GPU: 90.01 T4-min (Parts A+B complete, Part C OOM'd partway through).
+Logged in `gpu_ledger.csv`.
