@@ -2910,3 +2910,74 @@ reaches M3's own ~1e-6 floor, and see whether DPC improves as r grows
 while most spurious modes stay excluded. Until that runs, this
 document has no experiment that speaks to the spurious-mode causal
 question one way or the other, and should not be cited as if it does.
+
+---
+
+## 2026-08-13 — k-step at matched budget: even 5x the epochs does NOT rescue convergence - 46% of seeds diverge outright, and DPC improves only marginally (still catastrophic). This makes Task 5's original negative MORE robust, not less.
+
+`tools/identify_kstep_matched.py`, sha 46fae0c: k=10, all 7 cases, 5
+seeds, 10,000 epochs (5x Task 5's original 2000). No errors, 142.05
+T4-min (2.37hr - faster than the ~6.6hr estimate).
+
+**Divergence rate at k=10@10k epochs: 16/35 members (46%) have
+`teacher_mse > 1.0`, several catastrophically** (`teacher_mse` up to
+2.8e9, `openloop_rmse` up to 7.4e20, `rho(Abar)` up to 1.66 - a
+genuinely unstable augmented operator, not just a slow one):
+
+```
+case   median_teacher_mse   k=1 baseline (40k epochs)   n_diverged(>1.0)
+  1        5.44e-02              2.77e-06                    2/5
+  2        7.18e-03              8.11e-06                    2/5
+  3        4.59e+01              2.76e-06                    3/5
+  4        2.73e-02              1.12e-05                    2/5
+  5        6.28e-04              3.36e-06                    1/5
+  7        9.51e-04              3.11e-06                    1/5
+```
+
+**Even the non-diverged majority never gets close to the k=1
+baseline's floor** - best case-level medians land at ~1e-3 to ~1e-4,
+still 2-3 orders of magnitude above the standard teacher-forced
+path's ~1e-6, despite 5x the gradient steps. This is not "slow
+convergence that more steps would eventually fix" - a near-half
+divergence rate combined with a floor that doesn't move much even
+where it doesn't diverge is the same qualitative signature this
+document has repeatedly identified for Adam-on-overparameterized-S4
+(the D-only gauge-symmetry work, the case-6 identification
+divergence, the cases-2/4 control-training explosions) - chaining k
+free-running steps before re-anchoring appears to make this MORE
+likely to trigger, not merely slower to escape.
+
+**DPC control (halved curriculum, 3 seeds, unchanged from Task 5 -
+this rerun targeted the identification budget specifically): ratios
+improve modestly but stay catastrophic:**
+
+```
+case   k=10@2000epochs (Task 5)   k=10@10000epochs   improvement
+  1          397.5x                    103.5x             3.8x
+  2       114,270x                  65,903x               1.7x
+  3        2,030.5x                  1,323.2x              1.5x
+  4      391,600x                 232,620x                 1.7x
+  5     1,433,900x                473,540x                 3.0x
+  7        4,171.9x                 3,211.4x                1.3x
+```
+
+**Verdict: this makes Task 5's original negative result MORE robust,
+not less.** A 5x budget increase produced a 1.3-3.8x improvement in an
+already-catastrophic DPC ratio while identification itself became, if
+anything, a more visibly unstable optimization problem (46% outright
+divergence). Extrapolating the trend, closing the remaining 2-6 orders
+of magnitude to oracle would need a budget increase far beyond what
+any further single-session Kaggle run could supply - and there is no
+evidence in this data that more budget would even get there, given
+divergence rate did not visibly improve with more steps. The honest
+reading: k-step free-running identification, as implemented, is not
+merely under-provisioned at low budgets - it appears to be a
+genuinely harder, more divergence-prone optimization problem than
+teacher-forced training, and DPC fails by a similar order of
+magnitude regardless of how much of that harder problem gets solved.
+Combined with Task 2's result (the S4/BPTT machinery is innocent when
+fed exact dynamics) and Task 4's finding (spurious modes are real and
+substantial even at M3's OWN near-exact teacher-forced fidelity), this
+fix candidate does not look like it is chasing the right variable.
+
+GPU: 142.05 T4-min. Logged in `gpu_ledger.csv`.
