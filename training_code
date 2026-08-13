@@ -1,0 +1,203 @@
+# 1. VMAP RUNNERS (The "BatchStackedModel" replacement)
+ 
+batched_reg_runner = nnx.vmap(
+    lambda m, x, k, is_train: m(x, states=None, rngs=nnx.Rngs(dropout=k), training=is_train),
+    in_axes=(nnx.StateAxes({nnx.Param: None}), 0, 0, None),
+    out_axes=0
+)
+ 
+# 2. UTILITIES
+# ==============================================================================
+ 
+def create_optimizer(model, base_lr, weight_decay, total_steps, lr_layer_multipliers=None):
+    """
+    Creates an NNX Optimizer.
+    """
+    if total_steps > 0:
+        schedule_fn = lambda lr: optax.cosine_onecycle_schedule(
+            peak_value=lr,
+            transition_steps=total_steps,
+            pct_start=0.1,
+        )
+    else:
+        schedule_fn = lambda lr: optax.constant_schedule(lr)
+ 
+    tx = optax.adamw(
+        learning_rate=schedule_fn(base_lr),
+        weight_decay=weight_decay
+    )
+ 
+    # Explicitly specify that we are optimizing nnx.Param variables
+    return nnx.Optimizer(model, tx, wrt=nnx.Param)
+ 
+ 
+@nnx.jit
+def train_step(model, optimizer, x_batch, y_batch, dropout_keys):
+    """
+    NNX Train Step for REGRESSION (MSE Loss) using optimizer.update.
+    """
+    def loss_fn(model):
+        predictions, _ = batched_reg_runner(model, x_batch, dropout_keys, True)
+        loss = jnp.mean((predictions - y_batch) ** 2)
+        return loss, predictions
+ 
+    # Get loss and gradients
+    (loss, preds), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
+ 
+    # Apply updates using the optimizer
+    optimizer.update(model, grads)
+ 
+    return loss
+ 
+@nnx.jit
+def eval_step(model, x_batch, y_batch):
+    B = x_batch.shape[0]
+    dummy_keys = jax.random.split(jax.random.PRNGKey(0), B)
+    predictions, _ = batched_reg_runner(model, x_batch, dummy_keys, False)
+    loss = jnp.mean((predictions - y_batch) ** 2)
+    return loss
+ 
+def validate(model, testloader):
+    losses = []
+    for batch in testloader:
+        inputs, targets = batch
+        inputs = jnp.array(inputs)
+        targets = jnp.array(targets)
+        loss = eval_step(model, inputs, targets)
+        losses.append(loss)
+    return np.mean(losses)
+ 
+def train_epoch(rng, model, optimizer, trainloader):
+    batch_losses = []
+    for batch in tqdm(trainloader, desc="Training"):
+        inputs, targets = batch
+        inputs = jnp.array(inputs)
+        targets = jnp.array(targets)
+ 
+        rng, drop_rng = jax.random.split(rng)
+        batch_keys = jax.random.split(drop_rng, inputs.shape[0])
+ 
+        loss = train_step(model, optimizer, inputs, targets, batch_keys)
+        batch_losses.append(loss)
+ 
+    return rng, np.mean(batch_losses)
+ 
+ 
+import torch
+import optax
+from functools import partial
+from tqdm import tqdm
+import os
+import shutil
+ 
+def example_train_regression(dataset: str, layer: str, seed: int, model_cfg: dict, train_cfg: dict):
+    print("[*] Setting Randomness...")
+    torch.manual_seed(seed)
+    key = jax.random.PRNGKey(seed)
+    key, model_rng, train_rng = jax.random.split(key, 3)
+ 
+    create_dataset_fn = Datasets[dataset]
+    trainloader, testloader, d_input, d_output = create_dataset_fn(
+        bsz=train_cfg['bsz'], L=model_cfg.get('l_max', 100),
+        system_case=config.get('system_case', 1), dt=config['dt']
+    )
+ 
+    print(f"[*] Starting Regression Training on `{dataset}`")
+ 
+    # 2. Initialize Model
+    rngs = nnx.Rngs(params=model_rng, dropout=0)
+ 
+    stacked_args = model_cfg.copy()
+    s4_N = stacked_args.pop('N')
+    l_max = stacked_args.pop('l_max')
+    if 'embedding' in stacked_args:
+        stacked_args.pop('embedding')
+ 
+    model = StackedModelRegression(
+        layer_cls=S4LayerEnsemble,
+        layer_args={'N': s4_N, 'l_max': l_max},
+        d_input=d_input,
+        d_output=d_output,
+        decode=False,
+        rngs=rngs,
+        **stacked_args
+    )
+ 
+    # 3. Initialize Optimizer
+    optimizer = create_optimizer(
+        model,
+        base_lr=train_cfg['lr'],
+        weight_decay=train_cfg['weight_decay'],
+        total_steps=len(trainloader) * train_cfg['epochs']
+    )
+ 
+    # 4. Training Loop
+    best_loss = 1e9
+ 
+    for epoch in range(train_cfg['epochs']):
+        train_rng, train_loss = train_epoch(train_rng, model, optimizer, trainloader)
+        test_loss = validate(model, testloader)
+ 
+        print(f"Epoch {epoch+1} | Train MSE: {train_loss:.6f} | Test MSE: {test_loss:.6f}")
+ 
+        if test_loss < best_loss:
+            best_loss = test_loss
+            import os
+            os.makedirs(f"checkpoints/{dataset}", exist_ok=True)
+            save_path = f"checkpoints/{dataset}/{layer}_best_model.msgpack"
+ 
+            full_config = {
+                'dataset': dataset, 'layer': layer,
+                'model': model_cfg, 'train': train_cfg
+            }
+            save_model(model, full_config, save_path)
+            print(f"    🌟 New Best MSE: {best_loss:.6f}")
+ 
+    return model
+ 
+ 
+from flax import serialization
+ 
+def save_model(model, config, filename="s4_model.msgpack"):
+    # 1. Extract the parameters
+    # FIX: Convert the NNX State object to a standard Python dictionary
+    model_state = nnx.state(model, nnx.Param).to_pure_dict()
+    
+    # 2. Bundle with config
+    checkpoint_data = {
+        'model_state': model_state,
+        'config': config
+    }
+    
+    # 3. Serialize to bytes
+    byte_data = serialization.to_bytes(checkpoint_data)
+    
+    # 4. Write to file
+    with open(filename, 'wb') as f:
+        f.write(byte_data)
+    
+    print(f"✅ Model saved to {filename}")
+ 
+ 
+import jax.numpy as jnp
+import traceback
+ 
+# Initialize WandB (Optional)
+if config.get('wandb') is not None:
+    import wandb
+    wandb.init(config=config, **config['wandb'])
+ 
+# Run Training
+# FIX: Use the regression training function, wrapped in try-except to catch truncated errors
+try:
+    trained_model = example_train_regression(
+        dataset=config['dataset'],
+        layer=config['layer'],
+        seed=config['seed'],
+        model_cfg=config['model'],
+        train_cfg=config['train']
+    )
+except Exception as e:
+    print(f"\n❌ ERROR ENCOUNTERED: {type(e).__name__}")
+    print(f"Error Message: {str(e)}\n")
+    traceback.print_exc()
