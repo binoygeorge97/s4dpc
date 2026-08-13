@@ -57,19 +57,21 @@ spurious-modes remains the standing, not-yet-refuted candidate.
 
 **Tested directly via balanced truncation (Hankel-SVD/ERA, since the augmented
 operator is marginally unstable so Gramian-based truncation doesn't apply) —
-result is a genuine complication, not a clean answer either way.** Truncating
-M3 to 6 states does NOT recover M3's own ~1e-6 fidelity (lands at ~1e-2 instead)
-because M3's Hankel singular values have no cliff at rank 6 the way the true
-system's do (verified: self-check on the true system gives an EXACT cliff to 0
-past index 6; M3's spectrum decays smoothly, with real energy remaining past
-index 14) — M3 has no clean 6-good-dims-plus-junk decomposition to recover in
-the first place. Truncated M3 then fails DPC 3-41x WORSE than full M3 on every
-one of 6 control cases, cleanly falsifying the optimistic "truncate and get
-oracle-level control back" branch — but because the truncation confounds
-"remove spurious modes" with "introduce a new ~1e4x fidelity loss," this does
-NOT cleanly kill the mode-based story either. A fidelity-matched truncation
-(larger r, chosen so err_vs_m3_markov reaches M3's own ~1e-6 floor) is the
-natural next step to separate the two explanations - not yet run.
+result decided NOTHING about the spurious-mode hypothesis (corrected
+2026-08-13 in `docs/DECISIONS.md` — an earlier write-up called this "cleanly
+falsified," which overstated it).** Truncating M3 to 6 states does NOT recover
+M3's own ~1e-6 fidelity (lands at ~1e-2 instead) because M3's Hankel singular
+values have no cliff at rank 6 the way the true system's do (verified:
+self-check on the true system gives an EXACT cliff to 0 past index 6; M3's
+spectrum decays smoothly) — a real, unconfounded finding about M3's own
+realization. But truncated M3 then failing DPC 3-41x worse than full M3 is
+NOT informative about spurious modes specifically: a ~1e-2-fidelity system
+was already expected to fail badly given this project's own established
+M1(~1e-14→~1x)-vs-M3(~1e-6→300x+) relationship, independent of any mode-based
+story. The experiment never isolated the variable it needed to. A
+fidelity-matched truncation (larger r, chosen so `err_vs_m3_markov` reaches
+M3's own ~1e-6 floor) is the only experiment that would actually test the
+hypothesis — not yet run.
 
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which

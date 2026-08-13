@@ -2859,3 +2859,54 @@ structure over raw Markov error than anything in this document so far.
 Flagged as the natural next step, not run this session.
 
 GPU: 43.46 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — CORRECTION: "the optimistic branch is cleanly falsified" overstated what this experiment can support - it decided nothing about the spurious-mode hypothesis, and should not be read as having tested it
+
+Flagged by the user, correct on inspection. Not silently rewritten
+(this project's convention) - the entry above stands as written; this
+is the correction.
+
+**The problem, stated plainly:** the confound isn't a minor caveat on
+an otherwise-decisive result - it removes the result's evidentiary
+value for the question the experiment was built to answer. Truncated
+M3 has ~1e-2 Markov fidelity, four orders of magnitude worse than
+M3's own ~1e-6. This project already established, before this
+experiment ever ran, that fidelity and DPC outcome move together
+somehow: M1 (~1e-14) gives ~1x, M3 (~1e-6) gives 300x-700,000x. A
+system at ~1e-2 - worse than M3 by as much as M3 is worse than M1 -
+failing DPC even more badly is close to the DEFAULT PREDICTION from
+data already on record, not new evidence about whether spurious modes
+specifically are causal. **Calling the optimistic branch "cleanly
+falsified" - even hedged in the same paragraph - overstates what a
+confounded measurement can support, because "truncated M3 fails" was
+already the likely outcome for a reason that has nothing to do with
+spurious modes.** The word "falsified" implies the experiment
+discriminated between hypotheses; it did not, because it never
+isolated the variable it was designed to isolate.
+
+**What survives this correction, unconfounded, because it is a
+measurement of M3's OWN Hankel spectrum, not of the truncated system's
+downstream DPC performance:** M3's Hankel singular values decay
+smoothly with no cliff at (or near) rank 6, unlike the true system's
+exact cliff. This is real, was measured directly, and does not depend
+on how the truncated system subsequently performed. It says M3 has no
+clean 6-good-dimensions-plus-junk decomposition available to recover -
+a fact about M3's realization, standing on its own.
+
+**What does NOT survive:** any claim that this experiment tested,
+weighed in favor of, or weighed against "spurious modes are causal."
+It did neither. The DPC numbers in the entry above are accurately
+reported and worth keeping on record, but they answer "does an
+uncontrolled-fidelity-loss truncation control well" (answer: no,
+unsurprisingly), not "are the spurious modes themselves the cause of
+M3's DPC failure" (answer: still open).
+
+**The only experiment that would actually answer the intended
+question is the fidelity-matched truncation already flagged at the end
+of the entry above** - find the smallest r where `err_vs_m3_markov`
+reaches M3's own ~1e-6 floor, and see whether DPC improves as r grows
+while most spurious modes stay excluded. Until that runs, this
+document has no experiment that speaks to the spurious-mode causal
+question one way or the other, and should not be cited as if it does.
