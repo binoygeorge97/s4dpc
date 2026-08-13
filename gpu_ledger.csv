@@ -26,3 +26,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-13,s4dpc-controller-oracles-final,T4,63.64
 2026-08-13,s4dpc-controller-surrogates-m3-m6,T4,188.80
 2026-08-13,s4dpc-verify-m3-case3,T4,14.90
+2026-08-13,s4dpc-task2b-m6-gap,T4,17.98

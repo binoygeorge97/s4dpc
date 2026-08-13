@@ -2019,3 +2019,78 @@ despite matching its short-horizon linearization almost exactly.
 training-instability and M6 reality-gap mechanisms) on this basis.
 
 GPU: 14.90 T4-min. Logged in `gpu_ledger.csv`.
+
+---
+
+## 2026-08-13 — Task 2b: M6's reality gap does NOT primarily come from exiting the identification support - disagreeing with the predicted mechanism
+
+`tools/task2b_m6_reality_gap.py`, one M6/case3/seed0 controller (freshly
+trained - Task 3 never saved controller checkpoints, so this is a new
+instance, not a re-load; see the note on non-determinism below), rolled
+out on both the M6 surrogate and the true plant from 100 x0s.
+
+**Cost: 68.8 on the M6 surrogate (looks converged) vs 1.681e4 on the
+true plant** - same qualitative pattern Task 3 found for this case
+group (bounded training loss, catastrophic transfer), reproduced
+independently.
+
+**The predicted mechanism - "it exits the identification support" -
+is only partially right, and the plot (`support_comparison.png`) points
+at something more specific:**
+
+```
+                          state outside envelope   control outside envelope
+M6-surrogate-driven              42.05%                    6.86%
+true-plant (same controller)     99.80%                    96.92%
+```
+
+Raw numbers alone would read as confirmation. The plot doesn't. The
+identification envelope (gray band) sits at `||x||`~3-10 and `||u||`~5-14.
+**The M6-surrogate-driven trajectory's mean stays inside or right at the
+edge of that band for essentially the entire 200 steps** - it looks
+like an ordinary, in-distribution trajectory. **The true-plant
+trajectory, same controller, same x0s, leaves the band almost
+immediately and climbs smoothly away from it, reaching ~100+ by step
+200.** The controller was not driving M6 into some exotic corner of its
+input space to exploit a blind spot there - by M6's own accounting, it
+mostly stayed home. The state-support-violation number (42%) is
+inflated by a baseline effect that applies to every variant equally:
+`EVAL_X0_RANGE=5.0` is already wider than the identification
+trajectory's own natural excursion (several state dimensions have
+identification ranges narrower than 5 units), so many x0s start outside
+the envelope before any dynamics run at all - M0/M1/M3-driven
+trajectories share this same starting condition and still return
+toward the origin; only the true-plant-under-M6 trajectory diverges
+away from it.
+
+**Disagreeing with the predicted mechanism, stated plainly as asked:**
+this looks less like "the controller found and exploited an
+out-of-support region of M6" and more like **M6 is simply wrong about
+how the true system responds to sustained control, even within the
+region it was trained on** - the same character as Task 1's open-loop
+finding for M3 (accurate near the origin / on short horizons, wrong
+over a sustained 200-step rollout), not a distinct "found a blind spot"
+mechanism. BPTT did not need to push M6 out of distribution to find a
+policy M6 rates as good; M6's own in-distribution long-horizon
+predictions were already wrong enough. This is a more parsimonious
+explanation than the identification-support-exit hypothesis, and it
+unifies with M3's failure mode rather than requiring two unrelated
+mechanisms - both surrogates get local/short-horizon behavior right and
+global/long-horizon free-running behavior wrong, and DPC's cost
+function only ever looks at the surrogate's own (wrong) long-horizon
+prediction during training.
+
+**Caveat on the cost number specifically:** this controller was trained
+as a SINGLE-member ensemble (batch size 1), not as part of Task 3's
+original 15-member vmapped batch. The result (1.681e4) is the same
+order of magnitude and qualitative pattern as Task 3's original
+M6/case3/seed0 (1.058e4) but not bit-identical, despite identical
+PRNGKeys - plausibly the same class of effect CLAUDE.md already warns
+about for cross-platform runs (BPTT through sensitive dynamics
+amplifies small floating-point differences), here triggered by batch
+size changing XLA's fusion/reduction order rather than by hardware.
+Flagged, not investigated further - doesn't change the qualitative
+finding, but single-member Task 2 reruns should not be read as
+bit-exact reproductions of Task 3's ensemble-batched numbers.
+
+GPU: 17.98 T4-min. Logged in `gpu_ledger.csv`.
