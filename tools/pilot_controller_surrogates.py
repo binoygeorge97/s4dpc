@@ -38,13 +38,18 @@ sys.path.insert(0, str(_REPO_ROOT / "tools"))
 import controller_oracles as co  # noqa: E402
 import controller_surrogates as cs  # noqa: E402
 
-# shrink the scope - same functions/code path, less of it. Overrides
-# cs.CONTROL_CASES directly (not co.CASES): CONTROL_CASES is computed
-# once at controller_surrogates' import time (case 6 excluded,
-# docs/DECISIONS.md's 2026-08-13 entries) and _train_ensemble_learned
-# reads that frozen module-level list, not co.CASES live - cases 3/4
-# rather than 3/6 to match real Task 3's scope (case 6 is gone there too).
-cs.CONTROL_CASES = [3, 4]
+# shrink the scope - same functions/code path, less of it. cases/
+# max_action are now passed explicitly to _train_ensemble_learned (no
+# longer read from module globals - docs/DECISIONS.md's 2026-08-13
+# per-case-max_action entry), so no CONTROL_CASES/MAX_ACTION monkeypatch
+# is needed here anymore, just the call arguments below. Cases 3/4
+# rather than 3/6 to match real Task 3's scope (case 6 is excluded
+# there too); max_action=50 matches both cases' real assignment
+# (controller_oracles.CASE_MAX_ACTION), so this pilot exercises the
+# common (non-200) path - the 200 path is architecturally identical,
+# just a different constructor argument, not separately piloted.
+PILOT_CASES = [3, 4]
+PILOT_MAX_ACTION = 50.0
 cs.SEED_SELECTION = {("M3", 3): [0, 1], ("M3", 4): [0, 1]}
 co.CURRICULUM = [{"N": 5, "epochs": 100}, {"N": 10, "epochs": 100}]
 co.TOTAL_EPOCHS = sum(p["epochs"] for p in co.CURRICULUM)
@@ -52,11 +57,11 @@ co.TOTAL_EPOCHS = sum(p["epochs"] for p in co.CURRICULUM)
 
 def main() -> None:
     print(f"jax_enable_x64 = {jax.config.jax_enable_x64}")
-    print(f"PILOT scope: variant=M3 members={list(cs.SEED_SELECTION.items())} "
-          f"curriculum={[p['N'] for p in co.CURRICULUM]}")
+    print(f"PILOT scope: variant=M3 cases={PILOT_CASES} max_action={PILOT_MAX_ACTION} "
+          f"members={list(cs.SEED_SELECTION.items())} curriculum={[p['N'] for p in co.CURRICULUM]}")
 
     t0 = time.time()
-    ensemble_state, members = cs._train_ensemble_learned("M3")
+    ensemble_state, members = cs._train_ensemble_learned("M3", PILOT_CASES, PILOT_MAX_ACTION)
     elapsed = time.time() - t0
     print(f"\nensemble training wall time: {elapsed:.1f}s for {len(members)} members x {co.TOTAL_EPOCHS} epochs")
 
@@ -66,7 +71,7 @@ def main() -> None:
         try:
             import jax.numpy as jnp
             member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ensemble_state)
-            controller = co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, co.MAX_ACTION, rngs=nnx.Rngs(0))
+            controller = co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, PILOT_MAX_ACTION, rngs=nnx.Rngs(0))
             nnx.update(controller, member_state)
             A_d, B_d = co.get_discrete_matrices(co.DT, case)
             eval_key = jax.random.fold_in(jax.random.PRNGKey(123), case)

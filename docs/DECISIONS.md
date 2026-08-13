@@ -1736,3 +1736,67 @@ unilaterally - which bound(s) to use for the M0/M1/M3/M6 comparison
 table changes what the table means, not just its numbers. Task 3
 (`tools/controller_surrogates.py`) is built, committed, mount-path-fixed
 and pilot-validated, but not yet launched pending that call.
+
+---
+
+## 2026-08-13 — max_action rule for Task 1, fixed in advance (methods-section wording)
+
+Per-case max_action for Task 1's M0/M1/M3/M6 comparison, decided by the
+user, stated here as the rule the paper's methods section should use:
+
+> max_action is the smallest value in {50, 200} at which the ORACLE
+> controller (M0, true A_d/B_d) does not saturate. The rule references
+> only the true plant and the oracle, never M3 or M6, so it cannot
+> favour either surrogate.
+
+Applied to `docs/controller_saturation_summary.csv`'s phase-1 numbers
+(fraction of timesteps at `|u| >= 0.95*max_action`), this criterion
+alone says cases 2 and 5 both saturate at 50 (6.98% and 4.48%) while
+1/3/4/7 don't (0-0.3%) - i.e. by saturation alone it points at 200 for
+two cases, 50 for four.
+
+**Documented exception, still oracle-only evidence:** case 2 stays at
+50. Phase 2 (previous entry) showed that moving case 2 to 200 does not
+serve the rule's underlying purpose - M0's own cost ratio barely
+improves (41.17x -> 30.27x, an 18x weaker effect than case 5's
+41.74x -> 2.28x) and per-seed variance explodes (1.92x/30.27x/128.05x
+at 200 vs a tight 36.8-52.2x at 50). Saturation alone said "raise it";
+cost-and-stability together, measured on the oracle alone, said case
+2's ~30-41x difficulty isn't the bound - raising it just trades one
+confound (saturation) for another (seed instability) without buying
+interpretability. This keeps the exception grounded entirely in M0
+evidence, never in how M3 or M6 happen to perform, so it still cannot
+favour either surrogate.
+
+**Final assignment, `controller_oracles.CASE_MAX_ACTION`:** 50 for
+cases {1, 2, 3, 4, 7}, 200 for case {5} only.
+
+**Why not uniform 200 for every case (rejected):** a looser bound gives
+every controller more room to emit actions further outside the
+identification range - and M6 (the LayerNorm/kink variant) is the one
+whose failure mode is exactly emitting distorted, potentially
+out-of-range actions. A bound that lets M6 range further than M3 would
+inflate M6's cost for a reason unrelated to the kink hypothesis, i.e.
+it would be a confound pointing toward the paper's own hypothesis -
+the worst kind to have sitting unexamined in a headline result.
+
+**Built into `tools/controller_surrogates.py` (not left as an
+after-the-fact caveat):** the combined table carries a `max_action`
+column and, for every (oracle, case) row including M3 and M6, a
+`median_saturation_frac` / `median_max_abs_u` pair. Two explicit checks
+run after the table: (1) does any surrogate saturate meaningfully more
+than the oracle did at that case's same bound, and (2) does M6 saturate
+where M3 doesn't. Either prints a flagged confound, not a silent
+number - see the script's own printed "CONFOUND CHECK" sections when
+Task 1 runs.
+
+**Oracle-side rebuild:** `tools/controller_oracles_final.py` re-trains
+M0 and M1 for all 6 control cases at these final per-case bounds (a
+single, complete, consistent source - `docs/controller_oracles_summary.
+csv` predates the saturation_frac field this table needs for every row,
+so it is not reused for Task 1's table; it remains the record of Task
+2's kill-criterion check, which is a separate, already-settled
+question). `tools/controller_saturation._run_m0` was generalized (an
+`oracle_name` parameter, default "M0" preserving every existing caller)
+so this script can route it through `fit_least_squares` for M1 instead
+of only ever training through the true plant.

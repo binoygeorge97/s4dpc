@@ -51,17 +51,21 @@ RERUN_MAX_ACTION = 200.0
 DOCS_DIR = _REPO_ROOT / "docs"
 
 
-def _run_m0(cases: list[int], max_action: float, label: str) -> list[dict]:
-    """One M0 ensemble train+eval pass at the given max_action, restricted
-    to `cases` x co.SEEDS. Mutates co.CASES/co.MAX_ACTION for the duration
-    of the call (module-level, read by _build_member_grid/_train_ensemble/
-    init_ensemble) and restores them afterward - same monkeypatch pattern
-    tools/pilot_controller_ensemble.py already uses, just scoped to one
-    function instead of a whole script."""
+def _run_m0(cases: list[int], max_action: float, label: str, oracle_name: str = "M0") -> list[dict]:
+    """One ensemble train+eval pass at the given max_action, restricted to
+    `cases` x co.SEEDS. Name/default kept as _run_m0/"M0" since every
+    existing caller (this module's phase 1/2) is M0-only and relies on
+    that default; oracle_name="M1" (controller_oracles_final.py) routes
+    through the least-squares (A_hat, B_hat) plant instead via
+    _build_member_grid's own M0-vs-else branch. Mutates co.CASES/
+    co.MAX_ACTION for the duration of the call (module-level, read by
+    _build_member_grid/_train_ensemble/init_ensemble) and restores them
+    afterward - same monkeypatch pattern tools/pilot_controller_ensemble.py
+    already uses, just scoped to one function instead of a whole script."""
     orig_cases, orig_max_action = co.CASES, co.MAX_ACTION
     co.CASES, co.MAX_ACTION = cases, max_action
     try:
-        grid = co._build_member_grid("M0")
+        grid = co._build_member_grid(oracle_name)
         ensemble_state = co._train_ensemble(grid, label)
 
         rows = []

@@ -86,6 +86,27 @@ EVAL_HORIZON = 200  # dpc_example's config['N'], the full horizon
 KILL_CASES = (4, 6)
 DIVERGED_COST_RATIO = 1e6  # cost / oracle_lqr_cost beyond this = failed to stabilize
 
+# Per-case max_action for Task 1 (docs/DECISIONS.md, 2026-08-13 saturation
+# entries). RULE, fixed in advance and referencing only the true plant and
+# the oracle (M0) - never M3 or M6, so it cannot favour either surrogate:
+# max_action is the smallest value in {50, 200} at which the ORACLE
+# controller (M0, true A_d/B_d) does not saturate
+# (docs/controller_saturation_summary.csv: fraction of timesteps with
+# |u| >= 0.95*max_action).
+#
+# By that criterion alone, cases 2 and 5 both saturate at 50 (6.98% and
+# 4.48%) while 1/3/4/7 don't (0-0.3%). EXCEPTION, still oracle-only
+# evidence, never surrogate-referenced: case 2 stays at 50 anyway,
+# because moving it to 200 does not serve the rule's purpose - M0's cost
+# ratio barely improves (41.17x -> 30.27x, vs case 5's 41.74x -> 2.28x)
+# and per-seed variance explodes (1.92x/30.27x/128.05x at 200, vs a tight
+# 36.8-52.2x at 50) - see docs/DECISIONS.md's phase-2 entry. Saturation
+# alone said "raise it"; cost-and-stability together said case 2's
+# difficulty isn't the bound, so raising it just trades one confound for
+# another without buying interpretability. Case 5 is the only case this
+# script trains at 200.
+CASE_MAX_ACTION: dict[int, float] = {1: 50.0, 2: 50.0, 3: 50.0, 4: 50.0, 5: 200.0, 6: 50.0, 7: 50.0}
+
 DOCS_DIR = _REPO_ROOT / "docs"
 
 

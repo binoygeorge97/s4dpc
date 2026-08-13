@@ -19,15 +19,34 @@ number is what justifies dropping it, and case 6 stays IN all
 identification-side results elsewhere, where it is informative. See
 CONTROL_CASES below.
 
+PER-CASE max_action (docs/DECISIONS.md, 2026-08-13 saturation entries;
+controller_oracles.CASE_MAX_ACTION): every case trains/evaluates at 50
+except case 5, which trains/evaluates at 200 - the smallest value in
+{50, 200} at which the ORACLE (M0) does not saturate, referencing only
+the true plant, never M3/M6, with one documented exception (case 2
+stays at 50 - see CASE_MAX_ACTION's docstring for why). Each surrogate
+member is trained AND evaluated at its own case's assigned bound
+(BoundedGRUController's max_action is architectural, baked into the
+controller at construction - a case-5 controller literally cannot emit
+|u|>50 unless built with max_action=200 from the start).
+
 Final report is a SINGLE combined table (M0/M1/M3/M6 x case, median
-cost + ratio to oracle) - M0/M1's numbers are NOT re-run here; they are
-read back from docs/controller_oracles_summary.csv (already committed,
-produced by controller_oracles.py's earlier run). Re-running would be
-wasteful and would not change anything: each ensemble member's loss/
-gradient is independent per-member under vmap (jnp.mean(losses)'s
-gradient w.r.t. member i's params depends only on member i's own loss),
-so cases 1/2/3/4/5/7's M0/M1 numbers are identical whether or not case 6
-was included in that training batch.
+cost + ratio to oracle, plus max_action/saturation_frac/max|u| for every
+row) - M0/M1's numbers are NOT re-run here; they are read back from
+docs/controller_oracles_final_summary.csv (controller_oracles_final.py,
+already committed) - the unified, per-case-bound oracle run built
+specifically for this table (controller_oracles.py's ORIGINAL
+docs/controller_oracles_summary.csv stays on record for its own purpose,
+the Task 2 kill-criterion check, and predates the saturation_frac field
+this table needs for every row).
+
+CONFOUND CHECK, not just reporting: any case where a surrogate (M3/M6)
+saturates meaningfully more than the oracle did at that case's SAME
+bound is flagged explicitly, and M6-saturates-but-M3-doesn't is flagged
+separately - M6's LayerNorm/kink mechanism could plausibly make it MORE
+prone to driving the action bound than M3, which would inflate M6's
+cost for a reason unrelated to the kink hypothesis itself and needs to
+be visible, not silently baked into the headline cost-gap number.
 
 Checkpoint selection: 3 seeds per (variant, case), lowest-index
 non-diverged seed first (diverged = markov_err_mean > 1e3 in the 10-seed
@@ -103,7 +122,17 @@ VARIANTS_TO_RUN = ["M3", "M6"]
 # case 6 excluded throughout this script - see module docstring
 CONTROL_CASES = [c for c in co.CASES if c != 6]
 
-ORACLE_CSV = _REPO_ROOT / "docs" / "controller_oracles_summary.csv"  # M0/M1, from controller_oracles.py
+# ORACLE_CSV: the unified, per-case-bound M0/M1 run built for this table
+# (controller_oracles_final.py) - NOT controller_oracles.py's original
+# docs/controller_oracles_summary.csv, which predates saturation_frac
+# and is uniformly bound=50 (wrong bound for case 5). See module docstring.
+ORACLE_CSV = _REPO_ROOT / "docs" / "controller_oracles_final_summary.csv"
+
+# fraction of timesteps at/above the action bound beyond which a
+# surrogate's saturation is flagged as a likely confound, relative to
+# the oracle's own (near-zero, by CASE_MAX_ACTION's construction)
+# saturation at the same case's bound.
+SATURATION_CONFOUND_THRESHOLD = 0.05
 
 # user-supplied M6 kink magnitudes (docs/DECISIONS.md's 10-seed entry),
 # for the "does the M6-vs-M3 cost gap track kink" question - reporting
@@ -154,13 +183,19 @@ def _build_surrogate(variant: str, case: int, seed: int) -> StackedModel:
     return model
 
 
-def _train_ensemble_learned(variant: str) -> tuple[nnx.State, list[tuple[int, int]]]:
+def _train_ensemble_learned(
+    variant: str, cases: list[int], max_action: float
+) -> tuple[nnx.State, list[tuple[int, int]]]:
     """Same shape as controller_oracles._train_ensemble, but each member
     rolls its trajectory batch through ITS OWN trained surrogate
     checkpoint (rollout_learned) instead of a shared linear (A, B).
+    `cases`/`max_action` explicit (not read from module globals) so
+    main() can call this once per (variant, bound-group) - every case in
+    one call shares the SAME max_action, since CASE_MAX_ACTION only ever
+    splits CONTROL_CASES into two groups (all-50 and case-5-at-200).
     Returns (trained controller param state, member (case, seed) order)."""
-    members = [(case, seed) for case in CONTROL_CASES for seed in SEED_SELECTION[(variant, case)]]
-    print(f"  members ({len(members)}): {members}")
+    members = [(case, seed) for case in cases for seed in SEED_SELECTION[(variant, case)]]
+    print(f"  members ({len(members)}) @ max_action={max_action}: {members}")
 
     surrogate_models = [_build_surrogate(variant, case, seed) for case, seed in members]
     surrogate_graphdef, _ = nnx.split(surrogate_models[0], nnx.Param)
@@ -183,7 +218,7 @@ def _train_ensemble_learned(variant: str) -> tuple[nnx.State, list[tuple[int, in
 
     @nnx.vmap(in_axes=0, out_axes=0)
     def init_ensemble(key):
-        return co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, co.MAX_ACTION, rngs=nnx.Rngs(key))
+        return co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, max_action, rngs=nnx.Rngs(key))
 
     ensemble = init_ensemble(keys)
     optimizer = co.make_controller_optimizer(ensemble, co.CTRL_LR, 0.0, co.TOTAL_EPOCHS)
@@ -228,8 +263,8 @@ def _train_ensemble_learned(variant: str) -> tuple[nnx.State, list[tuple[int, in
 
 def main() -> None:
     print(f"jax_enable_x64 = {jax.config.jax_enable_x64}")
-    print(f"MAX_ACTION={co.MAX_ACTION}  TOTAL_EPOCHS={co.TOTAL_EPOCHS}  "
-          f"curriculum={[p['N'] for p in co.CURRICULUM]}")
+    print(f"per-case max_action: { {c: co.CASE_MAX_ACTION[c] for c in CONTROL_CASES} }")
+    print(f"TOTAL_EPOCHS={co.TOTAL_EPOCHS}  curriculum={[p['N'] for p in co.CURRICULUM]}")
     print("\nSeed selection (lowest-index non-diverged, first 3 per (variant, case)):")
     for (variant, case), seeds in SEED_SELECTION.items():
         excl = EXCLUDED_SEEDS.get((variant, case))
@@ -255,40 +290,49 @@ def main() -> None:
         x_hist_lqr, u_hist_lqr = co.rollout_lqr_true(A_d, B_d, K, x0_eval_np, co.EVAL_HORIZON)
         oracle_costs[case] = co.true_quadratic_cost(x_hist_lqr, u_hist_lqr, co.Q_X, co.R_U, co.Q_F)
 
+    # group CONTROL_CASES by their assigned max_action - one ensemble
+    # train call per (variant, bound-group), same pattern
+    # controller_oracles_final.py uses for M0/M1.
+    by_bound: dict[float, list[int]] = {}
+    for case in CONTROL_CASES:
+        by_bound.setdefault(co.CASE_MAX_ACTION[case], []).append(case)
+
     rows: list[dict] = []
     for variant in VARIANTS_TO_RUN:
-        print(f"\n{'=' * 20} {variant} surrogate ensemble "
-              f"({sum(len(v) for k, v in SEED_SELECTION.items() if k[0] == variant)} members) {'=' * 20}")
-        t0 = time.time()
-        ensemble_state, members = _train_ensemble_learned(variant)
-        print(f"  [{variant}] ensemble training wall time: {time.time() - t0:.1f}s")
+        for max_action, cases in by_bound.items():
+            n_members = sum(len(SEED_SELECTION[(variant, c)]) for c in cases)
+            print(f"\n{'=' * 20} {variant} surrogate ensemble, cases {cases} @ max_action={max_action} "
+                  f"({n_members} members) {'=' * 20}")
+            t0 = time.time()
+            ensemble_state, members = _train_ensemble_learned(variant, cases, max_action)
+            print(f"  [{variant}@{max_action:.0f}] ensemble training wall time: {time.time() - t0:.1f}s")
 
-        for i, (case, seed) in enumerate(members):
-            label = f"{variant}/case{case}/seed{seed}"
-            try:
-                member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ensemble_state)
-                controller = co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, co.MAX_ACTION, rngs=nnx.Rngs(0))
-                nnx.update(controller, member_state)
-                A_d, B_d = true_AB[case]
-                result = co._evaluate(controller, A_d, B_d, eval_keys[case])
-                cost_lqr = oracle_costs[case]
-                ratio = result["cost"] / cost_lqr if cost_lqr > 0 else float("inf")
-                result.update(oracle=variant, case=case, seed=seed,
-                              oracle_lqr_cost=cost_lqr, cost_ratio_to_oracle=ratio)
-                print(f"  [{label}] cost={result['cost']:.4e}  ratio_to_oracle={ratio:.4e}  "
-                      f"init_norm={result['init_norm']:.3e}  final_norm={result['final_norm']:.3e}  "
-                      f"max_norm={result['max_norm']:.3e}  max|u|={result['max_abs_u']:.3e}  "
-                      f"finite={result['finite']}")
-            except Exception as e:
-                import traceback
-                print(f"  [{label}] FAILED: {e}")
-                traceback.print_exc()
-                result = {"oracle": variant, "case": case, "seed": seed, "failed": True,
-                          "oracle_lqr_cost": oracle_costs[case]}
-            rows.append(result)
+            for i, (case, seed) in enumerate(members):
+                label = f"{variant}/case{case}/seed{seed}"
+                try:
+                    member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ensemble_state)
+                    controller = co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, max_action, rngs=nnx.Rngs(0))
+                    nnx.update(controller, member_state)
+                    A_d, B_d = true_AB[case]
+                    result = co._evaluate(controller, A_d, B_d, eval_keys[case])
+                    cost_lqr = oracle_costs[case]
+                    ratio = result["cost"] / cost_lqr if cost_lqr > 0 else float("inf")
+                    result.update(oracle=variant, case=case, seed=seed, max_action=max_action,
+                                  oracle_lqr_cost=cost_lqr, cost_ratio_to_oracle=ratio)
+                    print(f"  [{label}] cost={result['cost']:.4e}  ratio_to_oracle={ratio:.4e}  "
+                          f"max|u|={result['max_abs_u']:.3e}  saturation_frac={result['saturation_frac']:.4f}  "
+                          f"finite={result['finite']}")
+                except Exception as e:
+                    import traceback
+                    print(f"  [{label}] FAILED: {e}")
+                    traceback.print_exc()
+                    result = {"oracle": variant, "case": case, "seed": seed, "max_action": max_action,
+                              "failed": True, "oracle_lqr_cost": oracle_costs[case]}
+                rows.append(result)
 
     print("\n\n=== M3/M6 SUMMARY: median cost + ratio to oracle LQR, per (variant, case) ===")
-    print(f"{'variant':8s} {'case':5s} {'oracle_lqr':>12s} {'median_cost':>14s} {'median_ratio':>13s} {'n_finite':>9s}")
+    print(f"{'variant':8s} {'case':5s} {'max_action':>10s} {'oracle_lqr':>12s} {'median_cost':>14s} "
+          f"{'median_ratio':>13s} {'n_finite':>9s}")
     for variant in VARIANTS_TO_RUN:
         for case in CONTROL_CASES:
             these = [r for r in rows if not r.get("failed") and r["oracle"] == variant and r["case"] == case]
@@ -297,8 +341,8 @@ def main() -> None:
             n_finite = sum(1 for r in these if r["finite"])
             median_cost = float(np.median([r["cost"] for r in these]))
             median_ratio = float(np.median([r["cost_ratio_to_oracle"] for r in these]))
-            print(f"{variant:8s} {case:5d} {oracle_costs[case]:12.4f} {median_cost:14.4e} "
-                  f"{median_ratio:13.4e} {n_finite:9d}/{len(these)}")
+            print(f"{variant:8s} {case:5d} {co.CASE_MAX_ACTION[case]:10.1f} {oracle_costs[case]:12.4f} "
+                  f"{median_cost:14.4e} {median_ratio:13.4e} {n_finite:9d}/{len(these)}")
 
     ok_rows = [r for r in rows if not r.get("failed")]
     if ok_rows:
@@ -310,45 +354,56 @@ def main() -> None:
 
     # ============================================================
     # Combined M0/M1/M3/M6 table - the one the user actually asked for.
-    # M0/M1 read back from the already-committed oracle run (not
-    # re-trained - see module docstring for why that's valid).
+    # M0/M1 read back from controller_oracles_final.py's per-case-bound
+    # run (not re-trained here - see module docstring).
     # ============================================================
     if not ORACLE_CSV.exists():
         print(f"\nWARNING: {ORACLE_CSV} not found - skipping the combined M0/M1/M3/M6 table. "
-              f"(controller_oracles.py must be run and its CSV committed first.)")
+              f"(controller_oracles_final.py must be run and its CSV committed first.)")
         return
 
     with open(ORACLE_CSV, newline="") as f:
         oracle_rows = [r for r in csv.DictReader(f) if int(r["case"]) in CONTROL_CASES]
 
     print("\n\n=== COMBINED TABLE: M0 / M1 / M3 / M6, median cost + ratio to oracle LQR, per case ===")
-    print(f"{'oracle':8s} {'case':5s} {'oracle_lqr':>12s} {'median_cost':>14s} {'median_ratio':>13s} "
-          f"{'n_finite':>9s} {'m6_kink':>8s}")
+    print(f"{'oracle':8s} {'case':5s} {'max_action':>10s} {'oracle_lqr':>12s} {'median_cost':>14s} "
+          f"{'median_ratio':>13s} {'n_finite':>9s} {'sat_frac':>9s} {'max|u|':>10s} {'m6_kink':>8s}")
     combined: list[dict] = []
+    per_case_variant_sat: dict[tuple[int, str], float] = {}  # for the confound checks below
     for oracle_name in ["M0", "M1", "M3", "M6"]:
         for case in CONTROL_CASES:
             if oracle_name in ("M0", "M1"):
-                these_costs = [float(r["cost"]) for r in oracle_rows if r["oracle"] == oracle_name and int(r["case"]) == case]
-                these_ratios = [float(r["cost_ratio_to_oracle"]) for r in oracle_rows if r["oracle"] == oracle_name and int(r["case"]) == case]
-                these_finite = [r["finite"] == "True" for r in oracle_rows if r["oracle"] == oracle_name and int(r["case"]) == case]
+                these = [r for r in oracle_rows if r["oracle"] == oracle_name and int(r["case"]) == case]
+                these_costs = [float(r["cost"]) for r in these]
+                these_ratios = [float(r["cost_ratio_to_oracle"]) for r in these]
+                these_finite = [r["finite"] == "True" for r in these]
+                these_sat = [float(r["saturation_frac"]) for r in these]
+                these_maxu = [float(r["max_abs_u"]) for r in these]
             else:
                 these = [r for r in rows if not r.get("failed") and r["oracle"] == oracle_name and r["case"] == case]
                 these_costs = [r["cost"] for r in these]
                 these_ratios = [r["cost_ratio_to_oracle"] for r in these]
                 these_finite = [r["finite"] for r in these]
+                these_sat = [r["saturation_frac"] for r in these]
+                these_maxu = [r["max_abs_u"] for r in these]
             if not these_costs:
                 continue
             median_cost = float(np.median(these_costs))
             median_ratio = float(np.median(these_ratios))
+            median_sat = float(np.median(these_sat))
+            median_maxu = float(np.median(these_maxu))
             n_finite = sum(1 for f in these_finite if f)
+            per_case_variant_sat[(case, oracle_name)] = median_sat
             kink = M6_KINK_MAGNITUDE.get(case, float("nan")) if oracle_name == "M6" else float("nan")
             kink_str = f"{kink:8.2f}" if np.isfinite(kink) else " " * 8
-            print(f"{oracle_name:8s} {case:5d} {oracle_costs[case]:12.4f} {median_cost:14.4e} "
-                  f"{median_ratio:13.4e} {n_finite:9d}/{len(these_costs)} {kink_str}")
+            print(f"{oracle_name:8s} {case:5d} {co.CASE_MAX_ACTION[case]:10.1f} {oracle_costs[case]:12.4f} "
+                  f"{median_cost:14.4e} {median_ratio:13.4e} {n_finite:9d}/{len(these_costs)} "
+                  f"{median_sat:9.4f} {median_maxu:10.3e} {kink_str}")
             combined.append({
-                "oracle": oracle_name, "case": case, "oracle_lqr_cost": oracle_costs[case],
-                "median_cost": median_cost, "median_ratio_to_oracle": median_ratio,
-                "n_finite": n_finite, "n_total": len(these_costs),
+                "oracle": oracle_name, "case": case, "max_action": co.CASE_MAX_ACTION[case],
+                "oracle_lqr_cost": oracle_costs[case], "median_cost": median_cost,
+                "median_ratio_to_oracle": median_ratio, "n_finite": n_finite, "n_total": len(these_costs),
+                "median_saturation_frac": median_sat, "median_max_abs_u": median_maxu,
                 "m6_kink_magnitude": kink if np.isfinite(kink) else "",
             })
 
@@ -357,6 +412,41 @@ def main() -> None:
         lines = [",".join(header)] + [",".join(str(r.get(h, "")) for h in header) for r in combined]
         (DOCS_DIR / "controller_comparison_summary.csv").write_text("\n".join(lines))
         print(f"\nwrote {DOCS_DIR / 'controller_comparison_summary.csv'}")
+
+    # ============================================================
+    # CONFOUND CHECKS - explicit, not just left implicit in the table.
+    # ============================================================
+    print(f"\n=== CONFOUND CHECK 1: surrogate (M3/M6) saturation vs the oracle's (M0) at the SAME bound "
+          f"(threshold {SATURATION_CONFOUND_THRESHOLD}) ===")
+    any_confound_1 = False
+    for case in CONTROL_CASES:
+        m0_sat = per_case_variant_sat.get((case, "M0"))
+        if m0_sat is None:
+            continue
+        for variant in VARIANTS_TO_RUN:
+            surr_sat = per_case_variant_sat.get((case, variant))
+            if surr_sat is None:
+                continue
+            flagged = surr_sat > SATURATION_CONFOUND_THRESHOLD and surr_sat > m0_sat
+            any_confound_1 = any_confound_1 or flagged
+            print(f"  case{case} {variant}: sat={surr_sat:.4f}  (oracle M0 sat={m0_sat:.4f})  "
+                  f"{'*** CONFOUND: saturates where the oracle does not ***' if flagged else 'clean'}")
+    if not any_confound_1:
+        print("  no case/variant flagged - no surrogate saturates meaningfully more than the oracle did.")
+
+    print(f"\n=== CONFOUND CHECK 2: M6 saturates but M3 doesn't (M6's known out-of-range-action failure mode) ===")
+    any_confound_2 = False
+    for case in CONTROL_CASES:
+        m3_sat = per_case_variant_sat.get((case, "M3"))
+        m6_sat = per_case_variant_sat.get((case, "M6"))
+        if m3_sat is None or m6_sat is None:
+            continue
+        flagged = m6_sat > SATURATION_CONFOUND_THRESHOLD and m3_sat <= SATURATION_CONFOUND_THRESHOLD
+        any_confound_2 = any_confound_2 or flagged
+        print(f"  case{case}: M3 sat={m3_sat:.4f}  M6 sat={m6_sat:.4f}  "
+              f"{'*** CONFOUND: M6 saturates, M3 does not - cost gap partly confounded by the bound ***' if flagged else 'clean'}")
+    if not any_confound_2:
+        print("  no case flagged - M6 does not saturate more than M3 anywhere in CONTROL_CASES.")
 
 
 if __name__ == "__main__":
