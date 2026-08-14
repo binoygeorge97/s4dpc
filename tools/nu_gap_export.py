@@ -247,12 +247,18 @@ def main() -> None:
                                member_state, max_action, A, B, np.eye(D_X), teacher_mse_by_cs.get((case, seed)), rows)
 
     # ---- full M3 (rollout_learned - the expensive part) ----
+    # ONE CASE AT A TIME, not grouped by max_action bound: a 25-member
+    # batch (5 cases x 5 seeds sharing a bound) through rollout_learned
+    # hit RESOURCE_EXHAUSTED on a T4 at N=200 twice already this session
+    # (Task 2 Part C, tools/horizon_sweep_surrogate.py) - same risk here,
+    # fixed proactively before spending GPU time on a third repeat.
     print(f"\n{'=' * 20} full M3 (rollout_learned) {'=' * 20}")
-    for max_action, cases in by_bound.items():
-        members = [(c, s) for c in cases for s in range(N_SEEDS) if (c, s) in m3_param_by_cs]
+    for case in CONTROL_CASES:
+        max_action = co.CASE_MAX_ACTION[case]
+        members = [(case, s) for s in range(N_SEEDS) if (case, s) in m3_param_by_cs]
         if not members:
             continue
-        print(f"  fullM3 max_action={max_action}, {len(members)} members")
+        print(f"  fullM3 case={case} max_action={max_action}, {len(members)} members")
         surrogate_params_batch = jax.tree_util.tree_map(lambda *xs: jnp.stack(xs), *[m3_param_by_cs[m] for m in members])
         x0_list, key_list = [], []
         for case, seed in members:
