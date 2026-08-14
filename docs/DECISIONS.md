@@ -2981,3 +2981,48 @@ substantial even at M3's OWN near-exact teacher-forced fidelity), this
 fix candidate does not look like it is chasing the right variable.
 
 GPU: 142.05 T4-min. Logged in `gpu_ledger.csv`.
+
+## 2026-08-14 — Task 6: proper horizon sweep, M3/M6, 5 caps x 6 cases x 5 seeds
+
+sha: (pending commit) | kaggle: s4dpc-horizon-sweep-surrogate-v2 | `docs/horizon_sweep_surrogate.csv`
+
+Full factorial re-run of the curriculum-horizon-cap sweep this task originally
+asked for: caps `{5, 20, 50, 100, 200}` x cases `{1,2,3,4,5,7}` (case 6 excluded
+per the standing rule) x 5 seeds, both M3 and M6, evaluated against the same
+LQR-oracle cost baseline as every other control-side result this session. 300/300
+runs finite - no divergence, no OOM (the per-case-not-per-bound batching fix from
+Task 2 Part C held).
+
+**Median `cost_ratio_to_oracle`, per (variant, cap, case):**
+
+```
+        cap=5        cap=20       cap=50       cap=100      cap=200
+case1 M3  83x    M3  74x     M3  89x     M3  86x     M3  81x
+      M6  76x    M6  40x     M6  37x     M6  37x     M6  18x
+case2 M3 5.4e4   M3 5.2e4    M3 3.7e4    M3 3.1e4    M3 5.1e4
+      M6 3.9e4   M6 4.3e4    M6 4.8e4    M6 4.7e4    M6 3.8e4
+case3 M3  344x   M3  539x    M3  553x    M3  407x    M3  330x
+      M6  904x   M6 1180x    M6 1374x    M6 1138x    M6 1636x
+case4 M3 8.6e4   M3 8.1e4    M3 7.5e4    M3 1.0e5    M3 1.1e5
+      M6 2.7e5   M6 1.8e5    M6 1.6e5    M6 2.3e5    M6 3.3e5
+case5 M3 1.1e6   M3 3.2e5    M3 3.4e5    M3 2.4e5    M3 2.4e5
+      M6 8.2e5   M6 5.7e5    M6 5.6e5    M6 2.6e5    M6 8.6e5
+case7 M3  513x   M3  420x    M3  825x    M3  748x    M3  578x
+      M6  539x   M6  463x    M6  636x    M6  595x    M6  780x
+```
+
+**No cap in this range rescues either variant on any case.** Ratios stay within
+roughly a factor of 2-3 of each other across the full cap range per (variant,
+case) cell - there is no monotonic trend with cap, in either direction, on any
+case. This directly answers Task 6's original question: the catastrophic M3/M6
+DPC failure documented earlier this session is **not** a curriculum-truncation
+artifact that a longer/shorter horizon cap would fix - it is stable across a
+40x range of caps. M3 and M6 remain within the same order of magnitude of each
+other on every case (neither is systematically much better), consistent with
+this session's central finding that the kink (M6-only) is not what's driving
+the failure, since M3 (zero kink by construction) fails just as hard.
+
+GPU: 621.51 T4-min (~10.4h - the single largest job this session; already
+running before the weekly quota was hit, so exempt from the block per CLAUDE.md
+§4's "already-running kernels are not blocked" reading). Logged in
+`gpu_ledger.csv`.

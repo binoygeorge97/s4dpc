@@ -28,6 +28,7 @@ with the already-computed DPC cost ratio for cross-reference.
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import time
@@ -55,7 +56,8 @@ from s4dpc.control import (
     BoundedGRUController, init_batched_state, make_controller_optimizer,
     rollout_learned, rollout_linear,
 )  # noqa: E402
-from s4dpc.identify import D_INPUT, D_OUTPUT, fit_least_squares, run_identify  # noqa: E402
+from s4dpc.identify import D_INPUT, D_OUTPUT, fit_least_squares, run_identify, save_checkpoint  # noqa: E402
+import flax.serialization as serialization  # noqa: E402
 from s4dpc.model import StackedModel  # noqa: E402
 from s4dpc.systems import get_discrete_matrices  # noqa: E402
 
@@ -245,23 +247,49 @@ def main() -> None:
                                member_state, max_action, Abar, Bbar, COUT, None, rows)
 
     # ---- M3 identification (shared by full-M3 and truncated-M3) ----
-    print(f"\n{'=' * 20} identifying M3, cases {CONTROL_CASES} x {N_SEEDS} seeds {'=' * 20}")
-    t0 = time.time()
-    id_rows = run_identify(
-        variant="M3", cases=CONTROL_CASES, n_seeds=N_SEEDS, epochs=40000,
-        d_model=D_MODEL, N=STATE_SIZE, n_layers=N_LAYERS, l_max=L_MAX,
-    )
-    print(f"  identification wall time: {time.time() - t0:.1f}s")
-    diverged = {(r["case"], r["seed"]) for r in id_rows if r["teacher_mse"] > 10.0}
-    print(f"  diverged: {sorted(diverged)}")
-    teacher_mse_by_cs = {(r["case"], r["seed"]): r["teacher_mse"] for r in id_rows}
-
+    # Checkpointed to disk (docs/nu_gap_export/ckpt/) immediately after
+    # training, all-or-nothing across the full case x seed grid (mirrors
+    # the per-case granularity used everywhere else in this script). This
+    # was previously the one remaining single point of failure in the
+    # whole export: a ~30-member fused vmap call with no intermediate
+    # saves, so losing the session mid-identification meant redoing all of
+    # it. On restart, if every (case, seed) checkpoint already exists,
+    # load instead of retraining.
     block_config = BlockConfig(d_model=D_MODEL, N=STATE_SIZE, l_max=L_MAX, **VARIANTS["M3"])
-    m3_graphdef, _ = nnx.split(
+    m3_graphdef, m3_template_state = nnx.split(
         StackedModel(block_config=block_config, d_input=D_INPUT, d_output=D_OUTPUT, n_layers=N_LAYERS,
                      decode=True, rngs=nnx.Rngs(params=jax.random.PRNGKey(0))),
         nnx.Param,
     )
+    ident_ckpt_dir = EXPORT_DIR / "ckpt"
+    ident_all_done = all(
+        (ident_ckpt_dir / f"M3_case{c}_seed{s}.msgpack").exists() for c in CONTROL_CASES for s in seeds
+    )
+    print(f"\n{'=' * 20} identifying M3, cases {CONTROL_CASES} x {N_SEEDS} seeds {'=' * 20}")
+    if ident_all_done:
+        print("  all (case, seed) identification checkpoints already exist, loading (resumed run)")
+        id_rows = []
+        for c in CONTROL_CASES:
+            for s in seeds:
+                sidecar = json.loads((ident_ckpt_dir / f"M3_case{c}_seed{s}.json").read_text())
+                pure_dict = serialization.msgpack_restore((ident_ckpt_dir / f"M3_case{c}_seed{s}.msgpack").read_bytes())
+                state = jax.tree_util.tree_map(lambda x: x, m3_template_state)
+                state.replace_by_pure_dict(pure_dict)
+                id_rows.append({"variant": "M3", "case": c, "seed": s,
+                                 "teacher_mse": sidecar["teacher_mse"], "param_state": state})
+    else:
+        t0 = time.time()
+        id_rows = run_identify(
+            variant="M3", cases=CONTROL_CASES, n_seeds=N_SEEDS, epochs=40000,
+            d_model=D_MODEL, N=STATE_SIZE, n_layers=N_LAYERS, l_max=L_MAX,
+        )
+        print(f"  identification wall time: {time.time() - t0:.1f}s")
+        ident_config = {"epochs": 40000, "d_model": D_MODEL, "N": STATE_SIZE, "n_layers": N_LAYERS, "l_max": L_MAX}
+        for row in id_rows:
+            save_checkpoint(row, ident_config, EXPORT_DIR)
+    diverged = {(r["case"], r["seed"]) for r in id_rows if r["teacher_mse"] > 10.0}
+    print(f"  diverged: {sorted(diverged)}")
+    teacher_mse_by_cs = {(r["case"], r["seed"]): r["teacher_mse"] for r in id_rows}
     m3_param_by_cs = {(r["case"], r["seed"]): r["param_state"] for r in id_rows if (r["case"], r["seed"]) not in diverged}
 
     # ---- truncated M3 (ERA, r=6) ----
