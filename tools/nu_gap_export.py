@@ -127,6 +127,29 @@ def train_linear_ensemble(AB_by_key, members, max_action, key_fn):
     return nnx.state(ensemble, nnx.Param)
 
 
+def npz_path(variant: str, case: int, seed: int) -> pathlib.Path:
+    return EXPORT_DIR / f"{variant}_{case}_{seed}.npz"
+
+
+def case_done(variant: str, case: int, seeds: list[int]) -> bool:
+    """Resumability check: has every seed for this (variant, case) already
+    been exported (e.g. by an earlier, interrupted run - the export
+    directory is preserved across a restart on the same VM, and can be
+    re-seeded from a local backup after colab upload on a fresh one)?
+    Checked once per case, matching the per-case training granularity -
+    a case is either fully redone or fully skipped, no partial-seed
+    resume within a case's own ensemble call."""
+    return all(npz_path(variant, case, s).exists() for s in seeds)
+
+
+def row_from_existing_npz(variant: str, case: int, seed: int) -> dict:
+    data = np.load(npz_path(variant, case, seed))
+    teacher_mse = float(data["teacher_mse"]) if not np.isnan(data["teacher_mse"]) else None
+    return {"variant": variant, "case": case, "seed": seed,
+            "cost_ratio_to_oracle": float(data["ratio"]), "finite": bool(data["finite"]),
+            "teacher_mse": teacher_mse}
+
+
 def evaluate_and_save(variant, case, seed, A_true, B_true, oracle_cost, eval_key, controller_state, max_action,
                        A_export, B_export, C_export, teacher_mse, rows):
     K_eff = k_eff_from_controller(controller_state, max_action)
@@ -136,9 +159,13 @@ def evaluate_and_save(variant, case, seed, A_true, B_true, oracle_cost, eval_key
     ratio = result["cost"] / oracle_cost if oracle_cost > 0 else float("inf")
     print(f"    [{variant}/case{case}/seed{seed}] ratio_to_oracle={ratio:.4e}  finite={result['finite']}")
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    np.savez(EXPORT_DIR / f"{variant}_{case}_{seed}.npz",
+    # ratio/finite saved alongside the matrices (not just printed) so a
+    # RESUMED run can reconstruct the summary CSV row from the .npz alone,
+    # without re-training a case just to re-derive its own summary line.
+    np.savez(npz_path(variant, case, seed),
               A=A_export, B=B_export, C=C_export, K_eff=K_eff,
-              teacher_mse=teacher_mse if teacher_mse is not None else np.nan)
+              teacher_mse=teacher_mse if teacher_mse is not None else np.nan,
+              ratio=ratio, finite=result["finite"])
     rows.append({"variant": variant, "case": case, "seed": seed, "cost_ratio_to_oracle": ratio,
                  "finite": result["finite"], "teacher_mse": teacher_mse})
 
@@ -168,33 +195,45 @@ def main() -> None:
     for case in CONTROL_CASES:
         by_bound.setdefault(co.CASE_MAX_ACTION[case], []).append(case)
 
+    seeds = list(range(N_SEEDS))
+
     # ---- M1 ----
     print(f"\n{'=' * 20} M1 {'=' * 20}")
     m1_AB = {}
     for case in CONTROL_CASES:
         ab_hat, _ = fit_least_squares(case, l_max=100, aprbs_low=-10.0, aprbs_high=10.0)
         m1_AB[case] = (ab_hat[:, :D_X], ab_hat[:, D_X:])
-    for max_action, cases in by_bound.items():
-        members = [(c, s) for c in cases for s in range(N_SEEDS)]
-        print(f"  M1 max_action={max_action}, {len(members)} members")
+    for case in CONTROL_CASES:
+        if case_done("M1", case, seeds):
+            print(f"  M1 case={case}: already exported, skipping (resumed run)")
+            rows.extend(row_from_existing_npz("M1", case, s) for s in seeds)
+            continue
+        max_action = co.CASE_MAX_ACTION[case]
+        members = [(case, s) for s in seeds]
+        print(f"  M1 case={case} max_action={max_action}, {len(members)} members")
         t0 = time.time()
         ens_state = train_linear_ensemble(m1_AB, members, max_action, key_fn=lambda m: m[0])
         print(f"  wall time: {time.time() - t0:.1f}s")
-        for i, (case, seed) in enumerate(members):
+        for i, (c, seed) in enumerate(members):
             member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ens_state)
-            A, B = m1_AB[case]
-            evaluate_and_save("M1", case, seed, *true_AB[case], oracle_costs[case], eval_keys[case],
+            A, B = m1_AB[c]
+            evaluate_and_save("M1", c, seed, *true_AB[c], oracle_costs[c], eval_keys[c],
                                member_state, max_action, A, B, np.eye(D_X), None, rows)
 
     # ---- M0_S4 (via true-plant rollout_linear, per Task 2's established equivalence) ----
     print(f"\n{'=' * 20} M0_S4 (trained via rollout_linear through the true plant) {'=' * 20}")
-    for max_action, cases in by_bound.items():
-        members = [(c, s) for c in cases for s in range(N_SEEDS)]
-        print(f"  M0_S4 max_action={max_action}, {len(members)} members")
+    for case in CONTROL_CASES:
+        if case_done("M0_S4", case, seeds):
+            print(f"  M0_S4 case={case}: already exported, skipping (resumed run)")
+            rows.extend(row_from_existing_npz("M0_S4", case, s) for s in seeds)
+            continue
+        max_action = co.CASE_MAX_ACTION[case]
+        members = [(case, s) for s in seeds]
+        print(f"  M0_S4 case={case} max_action={max_action}, {len(members)} members")
         t0 = time.time()
         ens_state = train_linear_ensemble(true_AB, members, max_action, key_fn=lambda m: m[0])
         print(f"  wall time: {time.time() - t0:.1f}s")
-        for i, (case, seed) in enumerate(members):
+        for i, (_, seed) in enumerate(members):
             member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ens_state)
             # Abar/Bbar for the ACTUAL M0_S4 construction (for delta_nu against the
             # augmented realization, even though the controller itself was trained
@@ -232,19 +271,24 @@ def main() -> None:
         res = build_truncated_m3(case, seed, param_state, m3_graphdef)
         if res.get("ok"):
             trunc_AB[(case, seed)] = (res["A"], res["B"])
-    for max_action, cases in by_bound.items():
-        members = [(c, s) for c in cases for s in range(N_SEEDS) if (c, s) in trunc_AB]
+    for case in CONTROL_CASES:
+        if case_done("truncM3", case, seeds):
+            print(f"  truncM3 case={case}: already exported, skipping (resumed run)")
+            rows.extend(row_from_existing_npz("truncM3", case, s) for s in seeds if npz_path("truncM3", case, s).exists())
+            continue
+        max_action = co.CASE_MAX_ACTION[case]
+        members = [(case, s) for s in seeds if (case, s) in trunc_AB]
         if not members:
             continue
-        print(f"  truncM3 max_action={max_action}, {len(members)} members")
+        print(f"  truncM3 case={case} max_action={max_action}, {len(members)} members")
         t0 = time.time()
         ens_state = train_linear_ensemble(trunc_AB, members, max_action, key_fn=lambda m: m)
         print(f"  wall time: {time.time() - t0:.1f}s")
-        for i, (case, seed) in enumerate(members):
+        for i, (c, seed) in enumerate(members):
             member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ens_state)
-            A, B = trunc_AB[(case, seed)]
-            evaluate_and_save("truncM3", case, seed, *true_AB[case], oracle_costs[case], eval_keys[case],
-                               member_state, max_action, A, B, np.eye(D_X), teacher_mse_by_cs.get((case, seed)), rows)
+            A, B = trunc_AB[(c, seed)]
+            evaluate_and_save("truncM3", c, seed, *true_AB[c], oracle_costs[c], eval_keys[c],
+                               member_state, max_action, A, B, np.eye(D_X), teacher_mse_by_cs.get((c, seed)), rows)
 
     # ---- full M3 (rollout_learned - the expensive part) ----
     # ONE CASE AT A TIME, not grouped by max_action bound: a 25-member
@@ -254,8 +298,12 @@ def main() -> None:
     # fixed proactively before spending GPU time on a third repeat.
     print(f"\n{'=' * 20} full M3 (rollout_learned) {'=' * 20}")
     for case in CONTROL_CASES:
+        if case_done("fullM3", case, seeds):
+            print(f"  fullM3 case={case}: already exported, skipping (resumed run)")
+            rows.extend(row_from_existing_npz("fullM3", case, s) for s in seeds if npz_path("fullM3", case, s).exists())
+            continue
         max_action = co.CASE_MAX_ACTION[case]
-        members = [(case, s) for s in range(N_SEEDS) if (case, s) in m3_param_by_cs]
+        members = [(case, s) for s in seeds if (case, s) in m3_param_by_cs]
         if not members:
             continue
         print(f"  fullM3 case={case} max_action={max_action}, {len(members)} members")
