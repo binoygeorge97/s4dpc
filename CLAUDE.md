@@ -213,13 +213,27 @@ X is running on Kaggle and Task Y is independent and ready to launch, and both K
 slots are occupied, Colab is where Y goes — not a shortcut around the 2-slot limit for
 splitting Task X.
 
-**`colab exec` is broken as of CLI 0.6.0** (`AttributeError:
-module 'jupyter_kernel_client' has no attribute 'KernelClient'` — a real bug in the
-installed package, not a usage error; `colab update` reports already-latest).
-Use `colab console -s <name>` instead, piping a full shell command in
-(`echo "cd /content && git clone ... && pip install ... && python script.py" | colab
-console -s <name>`), matching the Kaggle notebook cell pattern
-(`!git clone && !pip install && !python`). Revisit `exec` once the CLI updates.
+**`colab exec` was broken on CLI 0.6.0, root cause found and hand-patched locally
+(2026-08-14):** `AttributeError: module 'jupyter_kernel_client' has no attribute
+'KernelClient'`. Not a `colab-cli` bug per se — `google-colab-cli`'s dependency on
+`jupyter-kernel-client` is unpinned, and the installed `jupyter-kernel-client==1.0.1`
+renamed the class `KernelClient` → `JupyterKernelClient` (constructor signature
+unchanged — pure rename). Fixed by editing the one call site directly in the
+installed venv:
+`~/.local/share/uv/tools/google-colab-cli/lib/python3.13/site-packages/colab_cli/runtime.py:106`,
+`jupyter_kernel_client.KernelClient(` → `jupyter_kernel_client.JupyterKernelClient(`
+(clear `colab_cli/__pycache__` after editing). **This is a local hotfix to a
+uv-tool venv, not an upstream fix** — a `uv tool upgrade`/reinstall of
+`google-colab-cli` will silently revert it and the same `AttributeError` will come
+back. If `colab exec` breaks again with this exact error, look here before
+re-diagnosing from scratch; if the reappeared error is different, it's a new issue.
+`colab exec -s <name> -f script.py` (or piped stdin) is now the preferred way to
+run code — prefer it over the `console`+tmux workaround below when it's available.
+
+**Fallback if `exec` is broken again**: `colab console -s <name>`, piping a full
+shell command in (`echo "cd /content && git clone ... && pip install ... && python
+script.py" | colab console -s <name>`), matching the Kaggle notebook cell pattern
+(`!git clone && !pip install && !python`).
 
 **Long jobs**: the piped command keeps running in the session's tmux pane even if the
 local `colab console` connection drops (e.g. a Bash tool timeout) — reconnecting later
