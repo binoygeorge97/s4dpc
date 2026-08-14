@@ -251,6 +251,52 @@ idle timeout specifically so a forgotten session does *not* get auto-reclaimed �
 means a session left running keeps burning compute units indefinitely until someone
 stops it.
 
+### `launch/colab/orchestrate.py` — for jobs that must survive a VM death
+
+Built 2026-08-14 after three straight lost long-running Colab jobs. `python
+launch/colab/orchestrate.py --session <name> --script tools/some_script.py` bootstraps
+a session, launches the target script backgrounded (`python -u`, unbuffered — plain
+`python` leaves stdout fully buffered when redirected to a file, so a log can sit
+empty for many minutes of genuine progress, confirmed directly), then loops: a real
+`colab exec` health check every cycle (not "is the local keep-alive pid still
+running" — confirmed directly that a live local daemon pid is NOT evidence the remote
+VM is still there), and a verified **per-file** backup sync remote→local into
+`docs/nu_gap_export/` (never a directory-level `colab download`/`upload` — both are
+single-file-only in this CLI version; `ContentsClient.download` raises
+`IsADirectoryError` on a directory path, and three straight backup attempts before
+this script existed had exactly that call piped to `/dev/null`, so it was failing on
+every cycle regardless of session health). On a detected death (failed health check,
+or N consecutive cycles with no new verified artifact), it stops the session,
+relaunches, **re-uploads the local backup before re-running the script** so the
+script's own resume logic (per-case `case_done()` in `tools/nu_gap_export.py`) sees
+prior progress. `python launch/colab/status.py <name>` gives a one-line status from
+another shell.
+
+**Known, structural limitation — read before trusting this for an unattended run:**
+this only survives the *Colab VM* dying. It cannot survive *this Claude Code session's
+own host environment* going away (laptop sleep/shutdown, sandbox teardown) — every
+watcher and the local keep-alive daemon are child processes of that same session.
+Confirmed directly: a run was lost to a ~9.5 hour gap in the session's own execution
+(not a Colab-side failure at all — `colab sessions` still showed the VM assigned
+right up until a `colab exec` health check finally 404'd it). No amount of
+in-session monitoring fixes that; it needs either a genuinely persistent host, or
+accepting the exposure and preferring Kaggle (whose kernels run fully server-side,
+per CLAUDE.md §4 above) for anything that must survive many hours unattended.
+
+**Stall-detection threshold gotcha**: pick the "N cycles with no new artifact ⇒
+treat as dead" threshold from *measured* per-phase wall-clock time, not a guess — a
+too-short threshold kills healthy jobs (confirmed directly: killed a genuinely
+working M1 run twice by guessing 3-4 min and 15 min tolerances against a job whose
+curriculum phases individually ran 10-15+ min each). Killing a session this way
+mid-`colab new`/`colab stop` can also leave an **orphaned VM assignment** with no
+local record (`colab sessions` shows it as `[?]`) that `colab stop` can't target
+(it needs an auth token only the killed process had) — these have so far always
+self-cleared within under an hour (no keep-alive daemon ever started for them), but
+can also transiently exhaust the account's concurrent-assignment slots
+(`TooManyAssignmentsError`, HTTP 412) until they do. Only measure a phase's real
+duration by watching an **undisturbed** run (no auto-relaunch armed) before trusting
+a threshold on a real job.
+
 ---
 
 ## 5. Parity testing — DONE (2026-08-08, `docs/DECISIONS.md`); kept as reference

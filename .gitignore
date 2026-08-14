@@ -5,6 +5,13 @@ venv/
 *.msgpack
 !tests/fixtures/*.msgpack
 
+# raw per-(variant,case,seed) nu-gap export artifacts (large, intermediate -
+# the analysis-ready output is docs/nu_gap_export_summary.csv, which IS
+# tracked). Also the orchestrator's own operational log/status files.
+docs/nu_gap_export/
+launch/colab/*.log
+launch/colab/*_status.json
+
 # local staging for `kaggle kernels output -p ./out` (§4) and any one-off
 # comparison pulls (e.g. ./out-cpu/)
 /out*/
