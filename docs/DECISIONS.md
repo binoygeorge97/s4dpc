@@ -3096,3 +3096,113 @@ outcome.
 
 GPU: 389.70 T4-min (`s4dpc-nu-gap-export`). CPU analysis: seconds, no GPU spend.
 Logged in `gpu_ledger.csv`.
+
+## 2026-08-15 — CORRECTION + mechanism: b=0 is the finding, not a saturation artifact; traced to source
+
+**Correction to the entry above.** The previous entry treated `b=0.0` on
+60/60 M3-based rows as a degenerate nuisance that made the `b > delta_nu`
+agreement number look stronger than it was. That was wrong. `b` is the
+robust-stability margin of the closed loop the trained controller forms with
+the model it was TRAINED on. `b=0` on 60/60 M3-based rows, against `b>0` on
+29/30 M1 rows and 29/30 M0_S4 rows, means: **DPC training, after full
+convergence on a calm/decreasing loss curve, produced controllers that do not
+stabilize the very model their cost was computed through - every single time,
+on every case and seed. M1/M0_S4 training essentially never has this problem.**
+That IS the two-way discrimination the previous entry said was missing -
+`b`'s sign alone predicts the M1/M0_S4-vs-M3 split perfectly, on data neither
+the mode-count correlation nor the raw DPC ratio directly encodes. Restating
+this as a positive result, not a saturation artifact.
+
+**Verified directly, not asserted (`tools/verify_closed_loop_instability.py`):**
+for M3 case 3 seed 0 (ratio=368x oracle), the closed-loop operator
+`Abar + Bbar@K_eff` has spectral radius **1.0515**, with 32/1030 eigenvalues
+genuinely outside the unit circle (worst: `1.0204+0.2541j`) - not a boundary
+artifact at 1.0000001, a real 5% instability. Simulated 2500 steps from a
+training-range initial condition: `||x||` goes from 1.78 to **1.4e+54** - 54
+orders of magnitude of unbounded growth, well past the N=200 training horizon.
+The M1 control (same case/seed): spectral radius 0.982, simulated state decays
+to 1.2e-20 over the same 2500 steps. `b=0.0` is real.
+
+**One honest wrinkle, not swept under it:** the SAME M3-trained K_eff, closed
+around the TRUE plant instead of M3, has spectral radius **1.0055** - barely
+over 1, one marginal complex pair. By my `robust_margin`'s exact `>=1.0` test
+this would also register `b=0`, yet the REAL (nonlinear, tanh-bounded,
+recurrent) controller performs at ratio~1.02x against the true plant in
+practice - excellent. The static-K_eff-linearization proxy is a good, sharp
+signal where the margin is large (M3: not close, 32 unstable directions), but
+it is not infinitely precise right at the boundary, where the actual
+nonlinear/bounded controller can still work fine despite a marginally-unstable
+local linearization. Worth flagging since the whole `b`-based reading rests on
+this proxy; it doesn't change the M3 verdict (nowhere close to marginal).
+
+**Pole-count question (`tools/verify_closed_loop_instability.py`, all 6
+cases x 5 seeds, fullM3): M3 has genuinely spurious UNSTABLE modes, not just
+near-boundary ones - `delta_nu=1.0000` (the invalid/fallback value in
+`nu_gap()`) is a correct reflection of a real structural mismatch, not a
+numerical artifact.** Strict `|lambda|>1` count (no deadband): true plant has
+0 (case 1, whose one non-stable pole sits exactly at z=1), 3 (case 7), or 6
+(cases 2/3/4/5) unstable poles. M3's augmented operator has 2-19 per
+(case,seed) - generally MORE than the true plant, including 4-12 in case 1
+where the true plant has ZERO. This is exactly the kind of large, seed-variable
+unstable-pole-count mismatch that breaks the nu-gap winding-number consistency
+check (`|wno + eta_Phat - eta_P| < 0.4`) - not a bug in the check, a real
+signal that these systems are topologically dissimilar in a way the metric is
+supposed to catch.
+
+**Where do the spurious unstable modes come from, given `Lambda_re` is
+clipped? Traced to source (`tools/check_lambda_re_clip.py`, calling s4-nnx's
+own `discrete_dplr` directly on all 30 checkpoints - no re-derivation).** The
+clip (`jnp.clip(Lambda_re, None, -1e-4)` in s4-nnx's `S4LayerEnsemble.__call__`)
+does exactly what it was designed to do: **every one of the 512 per-checkpoint
+S4 channels, in every one of the 30 checkpoints tested, is stable in BOTH
+continuous time and discrete time** - zero exceptions. Max per-channel discrete
+spectral radius across the whole set: 0.9998 (near-boundary, matching the
+"~300 near-unit-circle modes" figure from Task 4, but never over). The clip
+only bounds the DIAGONAL part (`Lambda_re`); the actual state matrix is
+diagonal-plus-low-rank (`diag(lambd) - P@P.conj().T`, P a free/unclipped
+parameter) - checked this specific escape route directly (a non-Hermitian
+diag doesn't get Weyl's-inequality protection from a Hermitian rank-1
+correction) and it does NOT happen: 0/30 checkpoints have an unstable
+continuous-time DPLR matrix either. (Raw `Lambda_re` values DO drift past the
+-1e-4 boundary during training - 29-55 of 512 per checkpoint, up to +0.022 -
+confirming the clip is actively binding and gradients vanish once a parameter
+crosses it, but this drift is fully absorbed; it causes no instability.)
+
+**The instability lives entirely in the composition, not any single
+component.** `s4dpc/blocks.py`'s `ConfigurableBlock` wraps the (individually,
+provably stable) S4 recurrence in an encoder (`Linear`, 9->16), a per-block
+`out` projection (`Linear`, unconditional regardless of variant), and a
+decoder (`Linear`, 16->6) - none of which carry ANY stability constraint.
+Composing stable subsystems through unconstrained linear feedback does not
+generally preserve stability (standard systems theory - the clip was never
+positioned to prevent this, and structurally couldn't be from where it sits).
+The augmented operator IS this whole composed loop, which is exactly why
+`augmented_operator`/`robust_margin` see instability that no individual S4
+channel exhibits.
+
+**Horizon-blindness mechanism (`tools/mode_contribution_vs_horizon.py`, M3
+case 3 seed 0): real, but more nuanced than "invisible until N=200."** The
+single dominant unstable mode (lambda=1.0204+0.2541j, the same one identified
+above) accounts for ~100% of the full closed-loop cost at EVERY horizon
+tested, from N=5 to N=2000 - this is not a diffuse effect of ~300 modes, one
+mode explains essentially all of it. Its (normalized) cost contribution:
+N=5: 3.6, N=50: 26, N=100: 1890, N=150: 223,000, **N=200 (training cap):
+3.2e7**, N=500: 1.1e20, N=2000: 1.5e85. It is NOT literally invisible even at
+N=5 (already ~14% of a modest total cost there) - but in ABSOLUTE terms its
+contribution is tiny relative to what it becomes, and the curriculum
+(`tools/controller_oracles.py`'s `CURRICULUM`) gives the N=200 phase a full
+2000 epochs, the same as the largest allocation - so this isn't simple
+epoch-starvation either. The more accurate reading: the mode's growth is
+exponential (`|lambda|^(2N)` for the quadratic cost), so its absolute
+gradient PRESSURE stays negligible relative to the well-behaved loss terms
+across most of the curriculum and only becomes overwhelming once N is large
+enough - by which point training may already be in a basin 2000 further
+epochs at N=200 can't escape. Falsifiable prediction this makes: a cost with
+a non-vanishing terminal penalty or discount would surface this mode much
+earlier in the curriculum. **Not yet tested**: an actual N=1000 retraining
+run on case 3 (GPU) - proposed as the direct test, not yet run pending
+sign-off given the standing budget-reporting convention.
+
+GPU: 0 (all three checks pure CPU/numpy, reading existing exports + a
+read-only local clone of s4-nnx's source for the discretization function -
+no retraining, no jax execution on GPU).
