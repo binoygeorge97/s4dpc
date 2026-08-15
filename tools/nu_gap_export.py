@@ -247,14 +247,16 @@ def main() -> None:
                                member_state, max_action, Abar, Bbar, COUT, None, rows)
 
     # ---- M3 identification (shared by full-M3 and truncated-M3) ----
-    # Checkpointed to disk (docs/nu_gap_export/ckpt/) immediately after
-    # training, all-or-nothing across the full case x seed grid (mirrors
-    # the per-case granularity used everywhere else in this script). This
-    # was previously the one remaining single point of failure in the
-    # whole export: a ~30-member fused vmap call with no intermediate
-    # saves, so losing the session mid-identification meant redoing all of
-    # it. On restart, if every (case, seed) checkpoint already exists,
-    # load instead of retraining.
+    # Two layers of checkpointing to docs/nu_gap_export/ckpt/. Outer: final
+    # per-(case,seed) checkpoints, all-or-nothing across the full grid
+    # (mirrors the per-case granularity used everywhere else in this
+    # script) - on restart, if every one already exists, load instead of
+    # retraining. Inner (run_identify's checkpoint_dir): the ~30-member
+    # fused vmap call ITSELF snapshots every 2000 of its 40000 epochs, so
+    # even an interruption mid-identification (previously the one point in
+    # this whole export where a death cost the full ~2hr run) resumes near
+    # where it left off instead of from epoch 0 - see s4dpc/identify.py's
+    # _train_ensemble docstring.
     block_config = BlockConfig(d_model=D_MODEL, N=STATE_SIZE, l_max=L_MAX, **VARIANTS["M3"])
     m3_graphdef, m3_template_state = nnx.split(
         StackedModel(block_config=block_config, d_input=D_INPUT, d_output=D_OUTPUT, n_layers=N_LAYERS,
@@ -282,6 +284,7 @@ def main() -> None:
         id_rows = run_identify(
             variant="M3", cases=CONTROL_CASES, n_seeds=N_SEEDS, epochs=40000,
             d_model=D_MODEL, N=STATE_SIZE, n_layers=N_LAYERS, l_max=L_MAX,
+            checkpoint_dir=EXPORT_DIR, checkpoint_every=2000,
         )
         print(f"  identification wall time: {time.time() - t0:.1f}s")
         ident_config = {"epochs": 40000, "d_model": D_MODEL, "N": STATE_SIZE, "n_layers": N_LAYERS, "l_max": L_MAX}

@@ -177,6 +177,37 @@ def _train_one(
     return nnx.state(model, nnx.Param), final_mse
 
 
+def _stringify_keys(x):
+    if isinstance(x, dict):
+        return {str(k): _stringify_keys(v) for k, v in x.items()}
+    return x
+
+
+def _save_ensemble_snapshot(state: nnx.State, epoch: int, path: pathlib.Path) -> None:
+    """Snapshot of the WHOLE fused ensemble (leading n_ensemble axis intact)
+    at a given epoch, for resuming a killed _train_ensemble run. Not
+    per-member: all members are always in lockstep inside one fused vmap
+    (one shared optimizer, one train_step call per epoch - see
+    _train_ensemble's docstring), so there is nothing to gain from
+    splitting them out until the run actually finishes. Written to a temp
+    file then renamed, so a death mid-write never leaves a corrupt
+    snapshot for the next resume to trip over."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pure_dict = _stringify_keys(state.to_pure_dict())
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(serialization.msgpack_serialize(pure_dict))
+    tmp.replace(path)
+    path.with_suffix(".json").write_text(json.dumps({"epoch": epoch}))
+
+
+def _load_ensemble_snapshot(template_state: nnx.State, path: pathlib.Path) -> tuple[nnx.State, int]:
+    pure_dict = serialization.msgpack_restore(path.read_bytes())
+    state = jax.tree_util.tree_map(lambda x: x, template_state)
+    state.replace_by_pure_dict(pure_dict)
+    epoch = json.loads(path.with_suffix(".json").read_text())["epoch"]
+    return state, epoch
+
+
 def _train_ensemble(
     block_config: BlockConfig,
     n_layers: int,
@@ -186,10 +217,25 @@ def _train_ensemble(
     inputs_grid: jax.Array,
     targets_grid: jax.Array,
     weight_decay: float = 0.0,
+    checkpoint_path: pathlib.Path | None = None,
+    checkpoint_every: int = 2000,
+    resume: bool = True,
 ) -> tuple[nnx.State, jax.Array]:
     """keys: (n_ensemble,) PRNGKeys. inputs_grid/targets_grid: (n_ensemble,
     l_max, d_input/d_output). Returns (ensemble param state - every leaf has
-    a leading n_ensemble axis - per_member_final_mse: (n_ensemble,))."""
+    a leading n_ensemble axis - per_member_final_mse: (n_ensemble,)).
+
+    checkpoint_path, if given, snapshots the whole ensemble's params every
+    checkpoint_every epochs (one combined file, overwritten each time - see
+    _save_ensemble_snapshot), and resumes from it if it already exists and
+    resume=True. This is a host-side snapshot bolted onto an otherwise
+    unchanged plain-Python epoch loop (not a jax.lax.scan), so it costs one
+    device->host sync + a small file write every checkpoint_every epochs -
+    negligible against a run that is tens of minutes to hours long. Does
+    NOT checkpoint optimizer (Adam) momentum/variance state - a resume
+    restarts momentum from zero at the checkpointed params, a short
+    re-warmup transient against redoing potentially tens of thousands of
+    epochs from a random init."""
 
     @nnx.vmap(in_axes=0, out_axes=0)
     def init_ensemble(key):
@@ -197,6 +243,13 @@ def _train_ensemble(
 
     ensemble = init_ensemble(keys)
     optimizer = nnx.Optimizer(ensemble, optax.adamw(learning_rate, weight_decay=weight_decay), wrt=nnx.Param)
+
+    start_epoch = 0
+    if checkpoint_path is not None and resume and checkpoint_path.exists():
+        template_state = nnx.state(ensemble, nnx.Param)
+        loaded_state, start_epoch = _load_ensemble_snapshot(template_state, checkpoint_path)
+        nnx.update(ensemble, loaded_state)
+        print(f"    resumed ensemble from epoch {start_epoch} ({checkpoint_path})")
 
     def loss_fn(model):
         # M6_fix's StaticNorm holds mu/sigma as nnx.Variable, not
@@ -232,8 +285,10 @@ def _train_ensemble(
     # even more here since every step is ALSO fusing an n_ensemble-way
     # vmap, and eager dispatch of that every epoch is the more expensive
     # case to leave un-jitted.
-    for _ in range(epochs):
+    for epoch in range(start_epoch, epochs):
         train_step(ensemble, optimizer)
+        if checkpoint_path is not None and (epoch + 1) % checkpoint_every == 0:
+            _save_ensemble_snapshot(nnx.state(ensemble, nnx.Param), epoch + 1, checkpoint_path)
 
     # recompute AFTER the loop: per_member from inside the loop reflects the
     # loss BEFORE that iteration's update, which is off by one epoch.
@@ -256,9 +311,23 @@ def run_identify(
     aprbs_high: float = 10.0,
     use_vmap: bool = True,
     seed_base: int = 0,
+    checkpoint_dir: pathlib.Path | None = None,
+    checkpoint_every: int = 2000,
+    resume: bool = True,
 ) -> list[dict]:
     """Returns one row per (case, seed): variant, case, seed, teacher_mse,
-    and the trained param_state (for checkpoint saving by the caller)."""
+    and the trained param_state (for checkpoint saving by the caller).
+
+    checkpoint_dir (use_vmap path only): if given, the fused ensemble is
+    snapshotted to checkpoint_dir/ckpt/{variant}_ensemble_inprogress.msgpack
+    every checkpoint_every epochs and resumed from there if it already
+    exists - see _train_ensemble. Same out_dir convention as
+    save_checkpoint (out_dir/ckpt/...), so a caller already using
+    save_checkpoint(row, config, out_dir) for the final per-member
+    checkpoints can pass the same out_dir here. The in-progress snapshot is
+    deleted once this call completes successfully, since the final
+    per-member checkpoints (written by the caller via save_checkpoint)
+    supersede it."""
     block_config = BlockConfig(d_model=d_model, N=N, l_max=l_max, **VARIANTS[variant])
 
     data = {c: case_data(c, l_max, aprbs_low, aprbs_high) for c in cases}
@@ -281,10 +350,19 @@ def run_identify(
             ]
         )
 
+        checkpoint_path = (
+            checkpoint_dir / "ckpt" / f"{variant}_ensemble_inprogress.msgpack" if checkpoint_dir is not None else None
+        )
         ensemble_state, final_mse = _train_ensemble(
             block_config, n_layers, epochs, learning_rate, keys, inputs_grid, targets_grid,
             weight_decay=weight_decay,
+            checkpoint_path=checkpoint_path,
+            checkpoint_every=checkpoint_every,
+            resume=resume,
         )
+        if checkpoint_path is not None and checkpoint_path.exists():
+            checkpoint_path.unlink()
+            checkpoint_path.with_suffix(".json").unlink(missing_ok=True)
         for i, (case, seed) in enumerate(zip(flat_cases, flat_seeds)):
             member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ensemble_state)
             rows.append(
@@ -315,12 +393,6 @@ def run_identify(
             )
 
     return rows
-
-
-def _stringify_keys(x):
-    if isinstance(x, dict):
-        return {str(k): _stringify_keys(v) for k, v in x.items()}
-    return x
 
 
 def save_checkpoint(row: dict, config: dict, out_dir: pathlib.Path) -> pathlib.Path:
