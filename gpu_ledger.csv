@@ -39,3 +39,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-13,s4dpc-balanced-truncation,T4,43.46
 2026-08-13,s4dpc-identify-kstep-matched-budget,T4,142.05
 2026-08-14,s4dpc-horizon-sweep-surrogate-v2,T4,621.51
+2026-08-15,s4dpc-nu-gap-export,T4,389.70

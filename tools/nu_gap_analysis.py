@@ -27,25 +27,28 @@ stability boundary, and is EXACTLY 0 for any destabilizing gain - the
 one property that matters most and is unambiguous regardless of any
 residual sign-convention uncertainty in the rest of the formula.
 
-Controllers (M1, full M3, truncated M3) are trained FRESH here (no
-persisted checkpoints from earlier kernels in this session carry
-weights, only evaluation summaries) - self-contained, matching every
-other kernel in this session. Truncated M3 reuses
-tools/balanced_truncation.py's ERA machinery on freshly (re-)identified
-M3 checkpoints - a modest redundancy with that script's own identify
-step, accepted for self-containment over a fragile cross-kernel
-dependency.
+Restructured (user brief, 2026-08-13, item 1): "delta_nu(P, P_hat) ... is a
+winding-number condition plus an H-infinity norm over a frequency grid - no
+training, no autodiff, seconds on CPU. Stop queueing CPU linear algebra
+behind GPU training jobs." All GPU work (training M1/M0_S4/truncated-M3/
+full-M3 controllers, extracting (A,B,C) realizations and K_eff) now lives
+in tools/nu_gap_export.py, run once on Kaggle/Colab, writing
+docs/nu_gap_export/{variant}_{case}_{seed}.npz. This file's main() reads
+those .npz files and does ONLY the nu-gap/robust-margin/Markov-error math -
+pure numpy/scipy, no jax import anywhere past the module top, runs on a
+laptop in seconds.
 
-For each of {M1, full M3, truncated M3} x {case} x {seed}: extract an
-effective static gain K_eff = d(u)/d(x) at (x=0, h=0) from the TRAINED
-GRU controller (the standard "closest LTI analogue" linearization,
-matching how every controller in this project is deployed - starting
-at h=0 - and how the origin is the regulation point every cost function
-penalizes) - a genuine simplification of a recurrent, nonlinear
-controller down to a memoryless gain, stated plainly, not hidden.
-Report delta_nu(true, X) and b_{K_eff,X} side by side with each
-variant's already-recorded Markov error, and check whether b > delta_nu
-predicts the empirically observed DPC outcome case by case.
+For each of {M1, M0_S4, truncM3, fullM3} x {case} x {seed}: delta_nu(true,
+X) against the exported realization, b_{K_eff,X} (K_eff padded with zeros
+over the S4-hidden-state block for the two augmented-state variants,
+M0_S4/fullM3, whose exported state is 1030-dim while K_eff acts on the
+6-dim physical state the controller actually observes - matching what the
+trained controller does, not adding new information), and a Markov error
+(H=10, verify_markov_match) - all three, plus the already-recorded DPC
+cost ratio, in one row per (variant, case, seed). Checks whether
+b > delta_nu AGREES with the empirically observed outcome (cost_ratio <
+10x oracle = "observed success"), case by case - not just whether the
+predicate is true, which is a different, weaker question.
 
     python tools/nu_gap_analysis.py
 """
@@ -53,7 +56,6 @@ from __future__ import annotations
 
 import pathlib
 import sys
-import time
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -142,6 +144,21 @@ def nu_gap(P_ss, Phat_ss, n_freq: int = 2000) -> tuple[float, dict]:
     return (sup_gap if is_valid else 1.0), info
 
 
+def verify_markov_match(A: np.ndarray, B: np.ndarray, C: np.ndarray, true_markov: list[np.ndarray]) -> float:
+    """Max abs error between C@A^(h-1)@B and true_markov[h-1], h=1..len(true_markov).
+    Duplicated (not imported) from tools/balanced_truncation.py deliberately:
+    that module imports jax at the top level (needed for its OTHER
+    functions), and this file's whole point past --selftest is to run
+    pure numpy/scipy, no jax, no GPU."""
+    max_err = 0.0
+    M = np.eye(A.shape[0])
+    for h in range(len(true_markov)):
+        recon = C @ M @ B
+        max_err = max(max_err, float(np.max(np.abs(recon - true_markov[h]))))
+        M = A @ M
+    return max_err
+
+
 def robust_margin(A: np.ndarray, B: np.ndarray, K: np.ndarray) -> tuple[float, dict]:
     """b_{K,P} = 1/||[K;I](I-PK)^{-1}[I,P]||_inf, via the closed-loop
     state-space realization (d1 at measurement, d2 at plant input;
@@ -197,333 +214,118 @@ def _run_selftests() -> None:
 
 
 # ============================================================
-# Main pipeline (needs jax - only imported below --selftest gate)
+# Main pipeline: pure numpy/scipy, reads tools/nu_gap_export.py's .npz
+# output. No jax, no GPU, no training - seconds on a laptop.
 # ============================================================
 
+CASES = [1, 2, 3, 4, 5, 7]  # case 6 excluded from control comparisons (standing rule)
+N_SEEDS = 5
+DT = 0.01
+D_X, D_U = 6, 3
+MARKOV_H = 10
+SUCCESS_RATIO_THRESHOLD = 10.0  # observed cost_ratio_to_oracle below this = "worked"
+VARIANTS_ORDER = ["M1", "M0_S4", "truncM3", "fullM3"]
+
+
 def main() -> None:
-    import jax
-    jax.config.update("jax_enable_x64", True)  # BEFORE any other jax import/op
-    import jax.numpy as jnp
-    from flax import nnx
-
-    sys.path.insert(0, str(_REPO_ROOT / "tools"))
-    import controller_oracles as co
-    from balanced_truncation import (
-        COUT, N_HANKEL, R_TRUNC, build_truncated_m3, self_check_true_system,
-    )
-    from m3_spurious_modes import D_MODEL, STATE_SIZE, N_LAYERS, L_MAX, D_X, D_U, augmented_operator
-
-    from s4dpc.blocks import BlockConfig, VARIANTS
-    from s4dpc.control import (
-        BoundedGRUController, init_batched_state, make_controller_optimizer,
-        rollout_learned, rollout_linear,
-    )
-    from s4dpc.identify import D_INPUT, D_OUTPUT, fit_least_squares, run_identify
-    from s4dpc.model import StackedModel
     from s4dpc.systems import get_discrete_matrices
 
-    CONTROL_CASES = [c for c in co.CASES if c != 6]
-    N_SEEDS = 5
-    DT = 0.01
+    EXPORT_DIR = _REPO_ROOT / "docs" / "nu_gap_export"
     DOCS_DIR = _REPO_ROOT / "docs"
+    assert EXPORT_DIR.exists(), f"{EXPORT_DIR} not found - run tools/nu_gap_export.py first"
 
-    print(f"jax_enable_x64 = {jax.config.jax_enable_x64}")
-    print(f"CONTROL_CASES={CONTROL_CASES}  N_SEEDS={N_SEEDS}")
-    self_check_true_system()
+    true_AB = {c: tuple(np.asarray(m) for m in get_discrete_matrices(DT, c)) for c in CASES}
+    true_markov = {
+        c: [np.linalg.matrix_power(true_AB[c][0], h - 1) @ true_AB[c][1] for h in range(1, MARKOV_H + 1)]
+        for c in CASES
+    }
 
-    def k_eff_from_controller(controller_state, max_action: float) -> np.ndarray:
-        """Static linearization u = K_eff @ x of the trained GRU at
-        (x=0, h=0) - matches how every rollout in this project actually
-        starts (h=0) and the origin every cost function penalizes."""
-        controller = BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, max_action, rngs=nnx.Rngs(0))
-        nnx.update(controller, controller_state)
+    rows = []
+    n_missing = 0
+    for variant in VARIANTS_ORDER:
+        for case in CASES:
+            for seed in range(N_SEEDS):
+                path = EXPORT_DIR / f"{variant}_{case}_{seed}.npz"
+                if not path.exists():
+                    n_missing += 1
+                    continue
+                data = np.load(path)
+                A, B, C, K_eff = data["A"], data["B"], data["C"], data["K_eff"]
+                ratio = float(data["ratio"])
+                finite = bool(data["finite"])
+                teacher_mse = float(data["teacher_mse"]) if not np.isnan(data["teacher_mse"]) else None
+                A_true, B_true = true_AB[case]
 
-        def u_of_x(x):
-            h0 = jnp.zeros((co.HIDDEN_DIM,))
-            _, u = controller(h0, x)
-            return u
+                dnu, dnu_info = nu_gap(
+                    (A_true, B_true, np.eye(D_X), np.zeros((D_X, D_U))),
+                    (A, B, C, np.zeros((C.shape[0], D_U))),
+                )
 
-        K = jax.jacfwd(u_of_x)(jnp.zeros((co.D_X,)))
-        return np.asarray(K)
+                # K_eff acts on the PHYSICAL state (6-dim, what the trained
+                # GRU controller actually observes); M0_S4/fullM3's exported
+                # state is the 1030-dim augmented (physical + S4-hidden)
+                # realization. robust_margin needs K defined on the SAME
+                # state as the plant it closes the loop around - pad with
+                # zeros over the S4-hidden block, a state-feedback law
+                # that's blind to those coordinates, exactly matching what
+                # the trained controller does (it never sees the hidden
+                # state either).
+                n_state = A.shape[0]
+                K_for_margin = K_eff if n_state == D_X else np.hstack([K_eff, np.zeros((D_U, n_state - D_X))])
+                b, b_info = robust_margin(A, B, K_for_margin)
 
-    # ---- oracle costs / true systems, shared setup ----
-    true_AB, oracle_costs, eval_keys = {}, {}, {}
-    for case in CONTROL_CASES:
-        A_d, B_d = get_discrete_matrices(DT, case)
-        true_AB[case] = (np.asarray(A_d), np.asarray(B_d))
-        eval_key = jax.random.fold_in(jax.random.PRNGKey(123), case)
-        eval_keys[case] = eval_key
-        Q = co.Q_X * np.eye(A_d.shape[0])
-        R = co.R_U * np.eye(B_d.shape[1])
-        K = co.solve_dlqr(A_d, B_d, Q, R)
-        x0_eval_np = np.asarray(
-            jax.random.uniform(eval_key, (co.EVAL_BATCH, A_d.shape[0]), minval=-co.EVAL_X0_RANGE, maxval=co.EVAL_X0_RANGE)
-        )
-        x_hist_lqr, u_hist_lqr = co.rollout_lqr_true(A_d, B_d, K, x0_eval_np, co.EVAL_HORIZON)
-        oracle_costs[case] = co.true_quadratic_cost(x_hist_lqr, u_hist_lqr, co.Q_X, co.R_U, co.Q_F)
+                merr = verify_markov_match(A, B, C, true_markov[case])
 
-    # ---- M1: least-squares (A_hat, B_hat) per case (no seed dependence - LS is deterministic) ----
-    print(f"\n{'=' * 20} M1: least-squares systems + controller training {'=' * 20}")
-    m1_AB = {}
-    for case in CONTROL_CASES:
-        ab_hat, _ = fit_least_squares(case, l_max=100, aprbs_low=-10.0, aprbs_high=10.0)
-        m1_AB[case] = (ab_hat[:, :D_X], ab_hat[:, D_X:])
+                predicts_success = b is not None and b > dnu
+                observed_success = finite and ratio < SUCCESS_RATIO_THRESHOLD
+                agrees = predicts_success == observed_success
 
-    def train_linear_ensemble(AB_by_case_seed, members, max_action):
-        A_list, B_list, x0_list, key_list = [], [], [], []
-        for case, seed in members:
-            A, B = AB_by_case_seed[case] if case in AB_by_case_seed else AB_by_case_seed[(case, seed)]
-            A_list.append(jnp.asarray(A, dtype=jnp.float64))
-            B_list.append(jnp.asarray(B, dtype=jnp.float64))
-            init_key = jax.random.fold_in(jax.random.PRNGKey(seed), case)
-            x0_key = jax.random.fold_in(init_key, 999)
-            x0 = jax.random.uniform(
-                x0_key, (co.TRAIN_X0_BATCH, co.D_X), minval=-co.TRAIN_X0_RANGE, maxval=co.TRAIN_X0_RANGE, dtype=jnp.float64
-            )
-            x0_list.append(x0)
-            key_list.append(init_key)
-        A_batch, B_batch = jnp.stack(A_list), jnp.stack(B_list)
-        x0_batch, keys = jnp.stack(x0_list), jnp.stack(key_list)
+                print(f"    [{variant}/case{case}/seed{seed}] ratio={ratio:.4e}  markov_err_h10={merr:.3e}  "
+                      f"delta_nu={dnu:.4f} (valid={dnu_info['valid']})  b={b}  "
+                      f"predicts_success={predicts_success}  observed_success={observed_success}  agrees={agrees}")
 
-        @nnx.vmap(in_axes=0, out_axes=0)
-        def init_ensemble(key):
-            return BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, max_action, rngs=nnx.Rngs(key))
+                rows.append({
+                    "variant": variant, "case": case, "seed": seed,
+                    "cost_ratio_to_oracle": ratio, "finite": finite,
+                    "markov_err_h10": merr, "teacher_mse": teacher_mse,
+                    "delta_nu": dnu, "dnu_valid": dnu_info["valid"],
+                    "b": b, "predicts_success": predicts_success,
+                    "observed_success": observed_success, "agrees": agrees,
+                })
 
-        ensemble = init_ensemble(keys)
-        optimizer = make_controller_optimizer(ensemble, co.CTRL_LR, 0.0, co.TOTAL_EPOCHS)
-        for pi, phase in enumerate(co.CURRICULUM):
-            N = phase["N"]
+    if n_missing:
+        print(f"\n  ({n_missing} expected (variant,case,seed) .npz files not found - skipped)")
 
-            @nnx.jit
-            def train_step(ens, opt, N=N):
-                def loss_fn(e):
-                    cg, cp = nnx.split(e, nnx.Param)
+    header = sorted({k for r in rows for k in r.keys()})
+    lines = [",".join(header)] + [",".join(str(r.get(h, "")) for h in header) for r in rows]
+    (DOCS_DIR / "nu_gap_analysis.csv").write_text("\n".join(lines))
+    print(f"\nwrote {DOCS_DIR / 'nu_gap_analysis.csv'} ({len(rows)} rows)")
 
-                    def single_member(p, A, B, x0):
-                        c = nnx.merge(cg, p)
-                        return rollout_linear(c, x0, A, B, co.Q_X, co.R_U, co.Q_F, N)
-
-                    losses = jax.vmap(single_member)(cp, A_batch, B_batch, x0_batch)
-                    return jnp.mean(losses), losses
-
-                (loss, per_member), grads = nnx.value_and_grad(loss_fn, has_aux=True)(ens)
-                opt.update(ens, grads)
-                return loss, per_member
-
-            for epoch in range(phase["epochs"]):
-                loss, per_member = train_step(ensemble, optimizer)
-            print(f"    phase {pi + 1}/{len(co.CURRICULUM)} (N={N}) final mean DPC loss: {float(loss):.4f}")
-        return nnx.state(ensemble, nnx.Param)
-
-    by_bound = {}
-    for case in CONTROL_CASES:
-        by_bound.setdefault(co.CASE_MAX_ACTION[case], []).append(case)
-
-    m1_rows = []
-    for max_action, cases in by_bound.items():
-        members = [(c, s) for c in cases for s in range(N_SEEDS)]
-        print(f"  M1 max_action={max_action}, {len(members)} members")
-        t0 = time.time()
-        ens_state = train_linear_ensemble(m1_AB, members, max_action)
-        print(f"  wall time: {time.time() - t0:.1f}s")
-        for i, (case, seed) in enumerate(members):
-            member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ens_state)
-            K_eff = k_eff_from_controller(member_state, max_action)
-            A_true, B_true = true_AB[case]
-            dnu, dnu_info = nu_gap((A_true, B_true, np.eye(D_X), np.zeros((D_X, D_U))),
-                                    (m1_AB[case][0], m1_AB[case][1], np.eye(D_X), np.zeros((D_X, D_U))))
-            b, b_info = robust_margin(m1_AB[case][0], m1_AB[case][1], K_eff)
-            controller = co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, max_action, rngs=nnx.Rngs(0))
-            nnx.update(controller, member_state)
-            result = co._evaluate(controller, A_true, B_true, eval_keys[case])
-            ratio = result["cost"] / oracle_costs[case] if oracle_costs[case] > 0 else float("inf")
-            print(f"    [M1/case{case}/seed{seed}] ratio={ratio:.4e}  delta_nu={dnu:.4f}  b={b}  "
-                  f"predicts_success={b is not None and b > dnu}")
-            m1_rows.append({"variant": "M1", "case": case, "seed": seed, "cost_ratio_to_oracle": ratio,
-                             "delta_nu": dnu, "b": b, "predicts_success": (b is not None and b > dnu),
-                             "dnu_valid": dnu_info["valid"]})
-
-    header = sorted({k for r in m1_rows for k in r.keys()})
-    lines = [",".join(header)] + [",".join(str(r.get(h, "")) for h in header) for r in m1_rows]
-    DOCS_DIR.mkdir(parents=True, exist_ok=True)
-    (DOCS_DIR / "nu_gap_m1.csv").write_text("\n".join(lines))
-    print(f"wrote {DOCS_DIR / 'nu_gap_m1.csv'}")
-
-    # ---- M3 (full) + truncated M3: shared identification ----
-    print(f"\n{'=' * 20} identifying M3, cases {CONTROL_CASES} x {N_SEEDS} seeds {'=' * 20}")
-    t0 = time.time()
-    id_rows = run_identify(
-        variant="M3", cases=CONTROL_CASES, n_seeds=N_SEEDS, epochs=40000,
-        d_model=D_MODEL, N=STATE_SIZE, n_layers=N_LAYERS, l_max=L_MAX,
-    )
-    print(f"  identification wall time: {time.time() - t0:.1f}s")
-    diverged = {(r["case"], r["seed"]) for r in id_rows if r["teacher_mse"] > 10.0}
-    print(f"  diverged: {sorted(diverged)}")
-
-    block_config = BlockConfig(d_model=D_MODEL, N=STATE_SIZE, l_max=L_MAX, **VARIANTS["M3"])
-    m3_graphdef, _ = nnx.split(
-        StackedModel(block_config=block_config, d_input=D_INPUT, d_output=D_OUTPUT, n_layers=N_LAYERS,
-                     decode=True, rngs=nnx.Rngs(params=jax.random.PRNGKey(0))),
-        nnx.Param,
-    )
-
-    # truncated systems, per (case, seed)
-    print(f"\n{'=' * 20} balanced truncation per (case, seed) {'=' * 20}")
-    trunc_AB = {}
-    for r in id_rows:
-        case, seed = r["case"], r["seed"]
-        if (case, seed) in diverged:
-            continue
-        res = build_truncated_m3(case, seed, r["param_state"], m3_graphdef)
-        if res.get("ok"):
-            trunc_AB[(case, seed)] = (res["A"], res["B"])
-            print(f"  case{case}/seed{seed}: err_vs_true={res['err_vs_true_markov']:.3e}")
-        else:
-            print(f"  case{case}/seed{seed}: SKIPPED (cond={res.get('cond_Cr')})")
-
-    # ---- truncated-M3 controller training + nu-gap/margin ----
-    print(f"\n{'=' * 20} truncated-M3: controller training + nu-gap/margin {'=' * 20}")
-    trunc_rows = []
-    by_bound_trunc = {}
-    for (case, seed) in trunc_AB:
-        by_bound_trunc.setdefault(co.CASE_MAX_ACTION[case], []).append((case, seed))
-    for max_action, members in by_bound_trunc.items():
-        print(f"  truncM3 max_action={max_action}, {len(members)} members")
-        t0 = time.time()
-        ens_state = train_linear_ensemble(trunc_AB, members, max_action)
-        print(f"  wall time: {time.time() - t0:.1f}s")
-        for i, (case, seed) in enumerate(members):
-            member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ens_state)
-            K_eff = k_eff_from_controller(member_state, max_action)
-            A_true, B_true = true_AB[case]
-            A_tr, B_tr = trunc_AB[(case, seed)]
-            dnu, dnu_info = nu_gap((A_true, B_true, np.eye(D_X), np.zeros((D_X, D_U))),
-                                    (A_tr, B_tr, np.eye(D_X), np.zeros((D_X, D_U))))
-            b, b_info = robust_margin(A_tr, B_tr, K_eff)
-            controller = co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, max_action, rngs=nnx.Rngs(0))
-            nnx.update(controller, member_state)
-            result = co._evaluate(controller, A_true, B_true, eval_keys[case])
-            ratio = result["cost"] / oracle_costs[case] if oracle_costs[case] > 0 else float("inf")
-            print(f"    [truncM3/case{case}/seed{seed}] ratio={ratio:.4e}  delta_nu={dnu:.4f}  b={b}  "
-                  f"predicts_success={b is not None and b > dnu}")
-            trunc_rows.append({"variant": "truncM3", "case": case, "seed": seed, "cost_ratio_to_oracle": ratio,
-                                "delta_nu": dnu, "b": b, "predicts_success": (b is not None and b > dnu),
-                                "dnu_valid": dnu_info["valid"]})
-
-    header = sorted({k for r in trunc_rows for k in r.keys()})
-    lines = [",".join(header)] + [",".join(str(r.get(h, "")) for h in header) for r in trunc_rows]
-    (DOCS_DIR / "nu_gap_truncm3.csv").write_text("\n".join(lines))
-    print(f"wrote {DOCS_DIR / 'nu_gap_truncm3.csv'}")
-
-    # ---- full M3 controller training (rollout_learned) + nu-gap/margin ----
-    print(f"\n{'=' * 20} full M3: controller training (rollout_learned) + nu-gap/margin {'=' * 20}")
-    m3_param_by_cs = {(r["case"], r["seed"]): r["param_state"] for r in id_rows if (r["case"], r["seed"]) not in diverged}
-    m3_full_rows = []
-    by_bound_full = {}
-    for (case, seed) in m3_param_by_cs:
-        by_bound_full.setdefault(co.CASE_MAX_ACTION[case], []).append((case, seed))
-
-    for max_action, members in by_bound_full.items():
-        print(f"  fullM3 max_action={max_action}, {len(members)} members")
-        surrogate_params_batch = jax.tree_util.tree_map(
-            lambda *xs: jnp.stack(xs), *[m3_param_by_cs[m] for m in members]
-        )
-        x0_list, key_list = [], []
-        for case, seed in members:
-            init_key = jax.random.fold_in(jax.random.PRNGKey(seed), case)
-            x0_key = jax.random.fold_in(init_key, 999)
-            x0 = jax.random.uniform(
-                x0_key, (co.TRAIN_X0_BATCH, co.D_X), minval=-co.TRAIN_X0_RANGE, maxval=co.TRAIN_X0_RANGE, dtype=jnp.float64
-            )
-            x0_list.append(x0)
-            key_list.append(init_key)
-        x0_batch, keys = jnp.stack(x0_list), jnp.stack(key_list)
-
-        @nnx.vmap(in_axes=0, out_axes=0)
-        def init_ensemble(key):
-            return BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, max_action, rngs=nnx.Rngs(key))
-
-        ensemble = init_ensemble(keys)
-        optimizer = make_controller_optimizer(ensemble, co.CTRL_LR, 0.0, co.TOTAL_EPOCHS)
-        ref_states = init_batched_state(StackedModel(
-            block_config=block_config, d_input=D_INPUT, d_output=D_OUTPUT, n_layers=N_LAYERS,
-            decode=True, rngs=nnx.Rngs(params=jax.random.PRNGKey(0)),
-        ), co.TRAIN_X0_BATCH)
-
-        t0 = time.time()
-        for pi, phase in enumerate(co.CURRICULUM):
-            N = phase["N"]
-
-            @nnx.jit
-            def train_step(ens, opt, N=N):
-                def loss_fn(e):
-                    cg, cp = nnx.split(e, nnx.Param)
-
-                    def single_member(p, sp, x0):
-                        c = nnx.merge(cg, p)
-                        loss, _ = rollout_learned(c, m3_graphdef, sp, x0, ref_states, co.Q_X, co.R_U, co.Q_F, N)
-                        return loss
-
-                    losses = jax.vmap(single_member)(cp, surrogate_params_batch, x0_batch)
-                    return jnp.mean(losses), losses
-
-                (loss, per_member), grads = nnx.value_and_grad(loss_fn, has_aux=True)(ens)
-                opt.update(ens, grads)
-                return loss, per_member
-
-            for epoch in range(phase["epochs"]):
-                loss, per_member = train_step(ensemble, optimizer)
-            print(f"    phase {pi + 1}/{len(co.CURRICULUM)} (N={N}) final mean DPC loss: {float(loss):.4f}")
-        print(f"  wall time: {time.time() - t0:.1f}s")
-        ens_state = nnx.state(ensemble, nnx.Param)
-
-        for i, (case, seed) in enumerate(members):
-            member_state = jax.tree_util.tree_map(lambda x, i=i: x[i], ens_state)
-            K_eff = k_eff_from_controller(member_state, max_action)
-            A_true, B_true = true_AB[case]
-            Abar, Bbar = augmented_operator(m3_graphdef, m3_param_by_cs[(case, seed)])
-            dnu, dnu_info = nu_gap((A_true, B_true, np.eye(D_X), np.zeros((D_X, D_U))),
-                                    (Abar, Bbar, COUT, np.zeros((D_X, D_U))))
-            # K_eff acts on the PHYSICAL state (6-dim); the augmented plant's
-            # state is 1030-dim - robust_margin needs K defined on the SAME
-            # state as the plant it's closing the loop around. Since the
-            # controller only ever sees x (never s), pad K with zeros over
-            # the S4-state block - a state-feedback law that's blind to
-            # those coordinates, exactly matching what the trained
-            # controller actually does.
-            K_padded = np.hstack([K_eff, np.zeros((D_U, Abar.shape[0] - D_X))])
-            b, b_info = robust_margin(Abar, Bbar, K_padded)
-            controller = co.BoundedGRUController(co.D_X, co.HIDDEN_DIM, co.D_U, max_action, rngs=nnx.Rngs(0))
-            nnx.update(controller, member_state)
-            result = co._evaluate(controller, A_true, B_true, eval_keys[case])
-            ratio = result["cost"] / oracle_costs[case] if oracle_costs[case] > 0 else float("inf")
-            print(f"    [fullM3/case{case}/seed{seed}] ratio={ratio:.4e}  delta_nu={dnu:.4f}  b={b}  "
-                  f"predicts_success={b is not None and b > dnu}")
-            m3_full_rows.append({"variant": "fullM3", "case": case, "seed": seed, "cost_ratio_to_oracle": ratio,
-                                  "delta_nu": dnu, "b": b, "predicts_success": (b is not None and b > dnu),
-                                  "dnu_valid": dnu_info["valid"]})
-
-    header = sorted({k for r in m3_full_rows for k in r.keys()})
-    lines = [",".join(header)] + [",".join(str(r.get(h, "")) for h in header) for r in m3_full_rows]
-    (DOCS_DIR / "nu_gap_fullm3.csv").write_text("\n".join(lines))
-    print(f"wrote {DOCS_DIR / 'nu_gap_fullm3.csv'}")
-
-    # ---- combined summary ----
-    all_rows = m1_rows + trunc_rows + m3_full_rows
-    print("\n=== SUMMARY: median (delta_nu, b, predicts_success rate) vs actual DPC outcome, per (variant, case) ===")
-    print(f"{'variant':10s} {'case':5s} {'median_dnu':>11s} {'median_b':>10s} {'predict_rate':>13s} {'median_ratio':>13s}")
-    for variant in ["M1", "truncM3", "fullM3"]:
-        for case in CONTROL_CASES:
-            these = [r for r in all_rows if r["variant"] == variant and r["case"] == case]
+    print(f"\n=== SUMMARY: median (markov_err_h10, delta_nu, b), agreement rate with observed outcome "
+          f"(ratio<{SUCCESS_RATIO_THRESHOLD:.0f}x), per (variant, case) ===")
+    print(f"{'variant':10s} {'case':5s} {'median_merr':>12s} {'median_dnu':>11s} {'median_b':>10s} "
+          f"{'agree_rate':>11s} {'median_ratio':>13s}")
+    for variant in VARIANTS_ORDER:
+        for case in CASES:
+            these = [r for r in rows if r["variant"] == variant and r["case"] == case]
             if not these:
                 continue
+            merrs = [r["markov_err_h10"] for r in these]
             dnus = [r["delta_nu"] for r in these]
             bs = [r["b"] for r in these if r["b"] is not None]
-            preds = [r["predicts_success"] for r in these]
+            agrees = [r["agrees"] for r in these]
             ratios = [r["cost_ratio_to_oracle"] for r in these]
-            print(f"{variant:10s} {case:5d} {np.median(dnus):11.4f} "
+            print(f"{variant:10s} {case:5d} {np.median(merrs):12.3e} {np.median(dnus):11.4f} "
                   f"{(np.median(bs) if bs else float('nan')):10.4f} "
-                  f"{np.mean(preds):13.2%} {np.median(ratios):13.4e}")
+                  f"{np.mean(agrees):11.1%} {np.median(ratios):13.4e}")
+
+    print("\n=== Overall b>delta_nu agreement rate with observed outcome, per variant ===")
+    for variant in VARIANTS_ORDER:
+        these = [r for r in rows if r["variant"] == variant]
+        if not these:
+            continue
+        rate = np.mean([r["agrees"] for r in these])
+        print(f"  {variant:10s}: {rate:.1%} ({len(these)} rows)")
 
 
 if __name__ == "__main__":

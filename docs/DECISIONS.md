@@ -3026,3 +3026,73 @@ GPU: 621.51 T4-min (~10.4h - the single largest job this session; already
 running before the weekly quota was hit, so exempt from the block per CLAUDE.md
 §4's "already-running kernels are not blocked" reading). Logged in
 `gpu_ledger.csv`.
+
+## 2026-08-15 — nu-gap / robust-margin: full table, M1/M0_S4/truncM3/fullM3, 6 cases x 5 seeds
+
+sha: (pending commit) | kaggle: s4dpc-nu-gap-export | `docs/nu_gap_export_summary.csv`,
+`docs/nu_gap_analysis.csv`
+
+Wave 2/3's central ask, finally completed after three lost Colab attempts (see
+CLAUDE.md's `launch/colab/orchestrate.py` section): `tools/nu_gap_export.py` (GPU,
+Kaggle, 389.7 T4-min) trained/evaluated all four variants and exported
+`(A,B,C,K_eff)` per (variant, case, seed); `tools/nu_gap_analysis.py` (CPU-only,
+pure numpy/scipy, no jax, seconds) computed `delta_nu`, `b`, and a 10-step Markov
+error against the true plant for all 120 rows.
+
+**Controls behave exactly as expected.** M1 and M0_S4 both give `delta_nu~0`
+(machine-precision-level Markov error, 1e-16 to 1e-19) on every case, and
+`b > delta_nu` agrees with the observed DPC outcome on 29/30 rows each (96.7%).
+The one disagreement in each (case 5, seed 3, ratio=13.8x) is a borderline call
+against an admittedly arbitrary `ratio<10x = success` threshold, not a real
+theory failure - 13.8x sits far closer to the 1-4x range every other case-5 seed
+lands in than to any catastrophic M3-scale failure.
+
+**b > delta_nu agrees with the observed outcome on 100% of truncM3/fullM3 rows
+(60/60) - but this number is weaker than it looks, and I want to say why rather
+than just report it.** Two things undercut treating this as a clean
+confirmation:
+
+1. **It only ever predicts failure, because failure is the only outcome M3-based
+   DPC ever produces in this entire session.** There is no successful M3/truncM3
+   case anywhere to test whether the criterion could ALSO correctly predict a
+   success - "100% agreement" here means "100% agreement with the majority
+   (only) class," not genuine two-way discrimination.
+2. **In the large majority of these 60 rows `b` is exactly 0.0** - the trained
+   controller's own closed-loop linearization (`A + B@K_eff`) isn't even
+   locally Schur-stable against the plant it was trained on. That's a much
+   cruder signal than the coprime-factorization nu-gap comparison; you don't
+   need `delta_nu` at all to predict failure when `b=0` trivially loses to any
+   `delta_nu>=0`. In the minority of rows where `b` IS nonzero (truncM3 only,
+   9/30 - fullM3 is `b=0.0` in all 30), it's still 2+ orders of magnitude below
+   `delta_nu`, so the criterion still correctly predicts failure, just via a
+   less degenerate route.
+
+**A genuine data-quality caveat, not swept under the rug: `delta_nu`'s own
+validity check fails on most truncM3/fullM3 rows** (`dnu_valid=False`,
+reported as the 1.0 saturation fallback rather than a computed value - see
+`nu_gap()`'s winding-number consistency guard, `|wno + eta_Phat - eta_P| < 0.4`).
+Working hypothesis: M3's augmented realization carries ~300 near-unit-circle
+modes (Task 4, this session) against the true plant's 3-6, and that large,
+asymmetric unstable/marginal-pole-count mismatch is exactly the kind of thing
+that can break a winding-number-based consistency check - M0_S4 is also
+1030-dim but has ZERO such spurious modes by construction, and its `delta_nu`
+validates cleanly on every row. Where truncM3/fullM3's `delta_nu` DOES validate
+(9/60 rows), it still lands close to the cap (0.58-0.9995), which is reassuring
+that the fallback isn't hiding something qualitatively different - but I can't
+prove that for the invalid rows specifically, and the 1.0000 figure printed for
+most of them is a saturation flag, not a precise computed gap.
+
+**Overall verdict: the b > delta_nu theory is never contradicted by this
+dataset, and cleanly explains the M1/M0_S4-vs-M3 split - but it does not give
+the graded, case-by-case severity signal the original ask (Wave 2, item 3) was
+hoping to get by moving past the saturated mode-count correlation.** Both `b`
+and `delta_nu` saturate to boundary values (0 and ~1 respectively) for every
+M3-based row, so the test degenerates to a binary confirmation of something
+already established many times this session (M3-based DPC always fails, M1/M0_S4
+never do), not a new discriminator of WHY some cases fail 300x and others fail
+700,000x. That's the same structural problem the mode-count correlation had,
+reached by a more theoretically principled route this time, not a different
+outcome.
+
+GPU: 389.70 T4-min (`s4dpc-nu-gap-export`). CPU analysis: seconds, no GPU spend.
+Logged in `gpu_ledger.csv`.
