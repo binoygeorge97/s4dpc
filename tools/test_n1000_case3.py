@@ -185,7 +185,7 @@ def main() -> None:
         decode=True, rngs=nnx.Rngs(params=jax.random.PRNGKey(0)),
     ), co.TRAIN_X0_BATCH)
 
-    def make_train_step(N):
+    def make_train_step(N, x0_batch_local, ref_states_local):
         @nnx.jit
         def train_step(ens, opt):
             def loss_fn(e):
@@ -193,10 +193,10 @@ def main() -> None:
 
                 def single_member(p, sp, x0):
                     c = nnx.merge(cg, p)
-                    loss, _ = rollout_learned(c, m3_graphdef, sp, x0, ref_states, co.Q_X, co.R_U, co.Q_F, N)
+                    loss, _ = rollout_learned(c, m3_graphdef, sp, x0, ref_states_local, co.Q_X, co.R_U, co.Q_F, N)
                     return loss
 
-                losses = jax.vmap(single_member)(cp, surrogate_params_batch, x0_batch)
+                losses = jax.vmap(single_member)(cp, surrogate_params_batch, x0_batch_local)
                 return jnp.mean(losses), losses
 
             (loss, per_member), grads = nnx.value_and_grad(loss_fn, has_aux=True)(ens)
@@ -211,7 +211,7 @@ def main() -> None:
     t0 = time.time()
     for pi, phase in enumerate(co.CURRICULUM):
         N = phase["N"]
-        train_step = make_train_step(N)
+        train_step = make_train_step(N, x0_batch, ref_states)
         for epoch in range(phase["epochs"]):
             loss, per_member = train_step(ensemble, optimizer)
         print(f"    phase {pi + 1}/{len(co.CURRICULUM)} (N={N}) final mean DPC loss: {float(loss):.4f}")
@@ -224,9 +224,33 @@ def main() -> None:
                                           oracle_cost, eval_key, m3_graphdef, m3_params_by_seed)
 
     # ---- EXTENDED: continue training the SAME ensemble at N=1000, fresh LR schedule ----
-    print(f"\n{'=' * 20} EXTENDED: +1 phase at N={EXTENDED_N}, {EXTENDED_EPOCHS} epochs, fresh cosine LR {'=' * 20}")
+    # Smaller x0 batch than the baseline (co.TRAIN_X0_BATCH=1000): BPTT through
+    # rollout_learned's explicit Python for-loop (not jax.lax.scan) unrolls
+    # N=1000 steps into the jaxpr, and at the full batch this hit
+    # RESOURCE_EXHAUSTED trying to allocate ~16.3GB on a T4 (confirmed
+    # directly - the N=200 phase just before it, same ensemble, ran fine).
+    # EXTENDED_X0_BATCH trades gradient-estimate variance for fitting in
+    # memory; a properly invasive fix (rewrite rollout_learned to lax.scan)
+    # is out of scope for a one-off mechanism test.
+    EXTENDED_X0_BATCH = 100
+    x0_list_ext, key_list_ext = [], []
+    for seed in members:
+        init_key = jax.random.fold_in(jax.random.PRNGKey(seed), CASE)
+        x0_key = jax.random.fold_in(init_key, 998)
+        x0_list_ext.append(jax.random.uniform(
+            x0_key, (EXTENDED_X0_BATCH, co.D_X), minval=-co.TRAIN_X0_RANGE, maxval=co.TRAIN_X0_RANGE, dtype=jnp.float64
+        ))
+        key_list_ext.append(init_key)
+    x0_batch_ext = jnp.stack(x0_list_ext)
+    ref_states_ext = init_batched_state(StackedModel(
+        block_config=block_config, d_input=D_INPUT, d_output=D_OUTPUT, n_layers=N_LAYERS,
+        decode=True, rngs=nnx.Rngs(params=jax.random.PRNGKey(0)),
+    ), EXTENDED_X0_BATCH)
+
+    print(f"\n{'=' * 20} EXTENDED: +1 phase at N={EXTENDED_N}, {EXTENDED_EPOCHS} epochs, "
+          f"fresh cosine LR, x0_batch={EXTENDED_X0_BATCH} {'=' * 20}")
     optimizer_ext = make_controller_optimizer(ensemble, co.CTRL_LR, 0.0, EXTENDED_EPOCHS)
-    train_step_ext = make_train_step(EXTENDED_N)
+    train_step_ext = make_train_step(EXTENDED_N, x0_batch_ext, ref_states_ext)
     t0 = time.time()
     for epoch in range(EXTENDED_EPOCHS):
         loss, per_member = train_step_ext(ensemble, optimizer_ext)
