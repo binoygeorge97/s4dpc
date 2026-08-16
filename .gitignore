@@ -9,6 +9,7 @@ venv/
 # the analysis-ready output is docs/nu_gap_export_summary.csv, which IS
 # tracked). Also the orchestrator's own operational log/status files.
 docs/nu_gap_export/
+docs/n1000_case3/
 launch/colab/*.log
 launch/colab/*_status.json
 
