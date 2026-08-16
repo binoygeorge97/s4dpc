@@ -3272,3 +3272,82 @@ apart, but that's the next question, not answered here.
 
 GPU: 313.39 T4-min total (157.05 min OOM'd first attempt + 156.34 min the
 successful rerun). Logged in `gpu_ledger.csv`.
+
+## 2026-08-16 — CORRECTION on b, confirmed M3 was frozen in the N=1000 test, and PBH refutes the uncontrollability hypothesis
+
+**Correction: `b` is a binary stability LABEL, not a severity measure - both
+that and the M1/M0_S4-vs-M3 class discrimination are true at once.** M3
+case 3 seed 0's DPC ratio moved from 373x to 78.5x (a real, nearly-5x
+improvement from the N=1000 extension below) while `b` stayed pinned at
+exactly 0.0 throughout - `b`'s sign cannot and does not track that kind of
+within-class improvement. That does not undercut the earlier finding that
+`b`'s sign alone cleanly discriminates M1/M0_S4 (stable, b>0 on 29/30 rows
+each) from every M3-based row (unstable, b=0 on 60/60) - both statements
+hold simultaneously, at different resolutions.
+
+**Confirmed, empirically not just by reading the code: M3 WAS frozen during
+the earlier N=1000 controller test - it was the controller-side horizon
+extension, not a re-run of Task 5's k-step identification fix.** A user
+question raised real doubt about this (`test_n1000_case3.py`'s own docstring
+opened with the genuinely ambiguous "Trains M3 case 3," which reads either
+way). Verified two ways: (1) static reading of the actual gradient call -
+`nnx.value_and_grad(loss_fn, has_aux=True)(ens)` differentiates only the
+controller ensemble `ens`; M3's params are a plain closed-over JAX array
+(`surrogate_params_batch`), never part of the differentiated pytree; both
+`evaluate_and_report` calls (baseline and extended) are passed the exact
+same unchanged `m3_params_by_seed` dict. (2) A minimal local repro of the
+identical pattern (a "frozen" nnx module closed into a loss function via
+`nnx.merge` on a fixed snapshot, only a separate "controller" module
+differentiated) run for 50 real gradient steps: the frozen module's params
+showed max abs diff of **exactly 0.0** after training, while the controller's
+own params changed as expected. The rho/n_unstable movement reported
+earlier is fully explained by the closed-loop quantity `Acl = Abar + Bbar@K`
+depending on the CONTROLLER's `K_eff` (which legitimately changed), not on
+`Abar`/`Bbar` (M3, which did not). **So the controller-side N=1000 test (M3
+frozen, DPC horizon extended) has already been run, and it already failed
+to fix the instability** - see the entry above. It does not need to be
+re-run.
+
+**NEW HYPOTHESIS TESTED AND REFUTED: M3's spurious unstable modes are NOT
+uncontrollable or unobservable.** `tools/pbh_controllability_check.py`: PBH
+test (`rank[lambda*I - A, B]` for controllability, `rank[[lambda*I - A]; C]`
+for observability, smallest singular value reported directly rather than a
+silently-thresholded rank) on every eigenvalue with `|lambda|>1`, for every
+M3 checkpoint (all 6 cases x 5 seeds, 30 checkpoints, 2-19 unstable modes
+each), against M1 and M0_S4 as controls - all read directly from the
+existing `.npz` exports, zero new GPU work.
+
+M0_S4 is 1030-dimensional like M3 but KNOWN stabilizable (near-oracle DPC
+performance on every case, established many times this session) - it is the
+right control for "is a small absolute singular value actually meaningful
+at this dimension." Its raw PBH singular values ARE small (controllability:
+6e-6 to 1.2e-4; observability: 1.0e-3 to 1.5e-3) - but M0_S4's `A`/`B` are
+also much larger in norm than M3's (confirmed: `||A||_F` ~370 vs ~35, `||B||_F`
+~2.98 vs ~0.34 for case 3 seed 0), so an absolute comparison between them is
+apples-to-oranges. Normalizing each singular value by its own PBH matrix's
+Frobenius norm (a scale-fair comparison) gives the real answer: **M3's
+relative controllability margin (2e-7 to 1.6e-5 across all cases/seeds) is
+consistently 10-100x LARGER (better-conditioned) than M0_S4's own (1.7e-8 to
+4.0e-7) in every single case tested - never once smaller.** Same pattern for
+observability (M3: 1.9e-5 to 2.4e-4; M0_S4: 1.8e-6 to 6.6e-6). If M0_S4 -
+provably stabilizable - has this margin and works, M3 having a consistently
+BETTER margin cannot be uncontrollable or unobservable in any meaningful
+PBH sense. No case, no seed, no unstable eigenvalue shows a PBH singular
+value trending toward zero (the actual signature of a genuine
+uncontrollable/unobservable mode) - the smallest value found anywhere
+(4.49e-7 relative, case 4 seed 3) is still a real, bounded-away-from-zero
+number, not degenerate.
+
+**Verdict: the uncontrollability hypothesis is refuted by direct computation,
+comprehensively, not just on the one checkpoint spot-checked first.** M3 is
+stabilizable and detectable by this test. Per the user's own stated logic,
+this means the optimization-difficulty questions (more epochs at a longer
+N=1000 schedule, or freezing the individually-stable S4 layer and retraining
+only encoder/decoder/out) are back in play, NOT moot - but the specific
+"controller-side horizon test" step already ran (see above) and already
+came back negative, so whichever of those is chosen next is a genuinely new
+experiment, not a repeat.
+
+GPU: 0 (PBH check and the frozen-params repro are both pure CPU - the
+repro used a local jax/flax install, no GPU, no project checkpoints
+touched).
