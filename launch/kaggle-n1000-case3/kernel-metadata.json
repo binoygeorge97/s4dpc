@@ -1,0 +1,13 @@
+{
+  "id": "mlresearch42/s4dpc-n1000-case3",
+  "title": "s4dpc n1000 case3",
+  "code_file": "runner.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

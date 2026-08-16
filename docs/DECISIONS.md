@@ -3206,3 +3206,69 @@ sign-off given the standing budget-reporting convention.
 GPU: 0 (all three checks pure CPU/numpy, reading existing exports + a
 read-only local clone of s4-nnx's source for the discretization function -
 no retraining, no jax execution on GPU).
+
+## 2026-08-16 — N=1000 test on case 3: the simple fix does NOT work
+
+sha: (pending commit) | kaggle: s4dpc-n1000-case3 (v2, after an OOM on v1) |
+`docs/n1000_case3_summary.csv`
+
+The falsifiable prediction from the horizon-blindness entry above, tested
+directly. `tools/test_n1000_case3.py`: standard curriculum first (baseline,
+reproduces the established result exactly - all 5 seeds b=0, ratios
+37-2000x), then the SAME ensemble continued for one more phase at N=1000,
+2000 epochs, a FRESH cosine LR schedule (so the extension isn't crippled by
+the baseline schedule's already-decayed-to-0 tail), smaller x0 batch (100
+vs the standard 1000 - `rollout_learned` unrolls its horizon via a plain
+Python loop, not `jax.lax.scan`, and BPTT through 1000 steps at the full
+batch hit `RESOURCE_EXHAUSTED` on a T4 on the first attempt before a single
+epoch ran; the batch reduction fixed it, `git log` has both attempts, first
+one's GPU time logged and kept per CLAUDE.md's "diverged runs are results"
+rule).
+
+**Result: extending to N=1000 does not fix it. Per-seed, baseline -> extended:**
+
+```
+seed   rho (N=200) -> rho (+N=1000)   n_unstable (N=200) -> (+N=1000)   b   ratio (N=200) -> (+N=1000)
+  0        1.0528    ->   1.0486            31   ->   30              0.0     373x  ->    78.5x
+  1        1.0179    ->   1.0166            29   ->   31              0.0    1999x  ->   1800x
+  2        1.0149    ->   1.0155            10   ->   10              0.0     269x  ->    292x
+  3        1.0313    ->   1.0313            18   ->   18              0.0      37x  ->     35x
+  4        1.0584    ->   1.0560            17   ->   17              0.0     452x  ->    438x
+```
+
+Spectral radius and unstable-eigenvalue count are essentially UNCHANGED
+across all 5 seeds - none crosses back inside the unit circle, `b` stays
+exactly 0.0 in every seed both before and after. The raw DPC ratio moved a
+little (seed 0 improved 4.7x, seed 1 improved slightly, seeds 2-4 flat to
+marginally worse) - a small, seed-inconsistent wobble, not a fix.
+
+**This was not a weak test - the optimizer clearly got the predicted signal.**
+The extended-phase loss (dominated by the same mode `tools/
+mode_contribution_vs_horizon.py` identified) started at 7.8e21 and dropped
+~100x to 7.9e19 by epoch 2000 - the mode's cost WAS visible and WAS being
+pushed on, hard, for the entire dedicated phase (no competing short-horizon
+objective in this phase - N=1000 was the only term). Loss was still
+decreasing at 2000 epochs (though flattening, and the fresh cosine schedule
+was also intentionally decaying toward 0 by design at that point, so this
+run alone can't distinguish "genuinely stuck" from "just needs more epochs
+under a longer schedule").
+
+**Reading: the horizon-blindness mechanism correctly describes why STANDARD
+(N<=200) training never sees enough signal to fix this - but simply forcing
+a longer horizon is not, by itself, a working fix, at least not within 2000
+epochs of gradient descent under overwhelming, uncontested pressure.** That
+argues against a pure "no signal" story and toward the encoder/decoder/out
+composition (docs/DECISIONS.md's clip-tracing entry above) being a genuinely
+hard region of the loss landscape for Adam to navigate out of from this
+starting point - possibly a capacity question (can THIS architecture
+represent a stable closed loop at all, holding the already-learned S4
+channels fixed), possibly an optimization-difficulty question (the needed
+change is a coordinated shift across many interacting unconstrained
+parameters, and local gradient steps do not find it easily) - not yet
+distinguished by this experiment. Not run: more epochs at N=1000, a longer
+schedule, or freezing the (already individually-stable) S4 layer and
+retraining only encoder/decoder/out - any of these could help pull the two
+apart, but that's the next question, not answered here.
+
+GPU: 313.39 T4-min total (157.05 min OOM'd first attempt + 156.34 min the
+successful rerun). Logged in `gpu_ledger.csv`.
