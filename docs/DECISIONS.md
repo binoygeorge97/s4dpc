@@ -4146,3 +4146,129 @@ directly.
 GPU: 0 (CPU-only; the 400-point frequency grid uses one eigendecomposition
 per checkpoint instead of 400 direct solves, which would not have fit in
 the platform's compute budget at d1030).
+
+## 2026-08-18 — TASK A (fourth round): M3's raw one-step x-to-x Jacobian (Axx) vs A_d, directly - decisively reading (1) by the user's own stated criterion
+
+sha: (pending commit)
+
+The 77%-at-step-1 free-response result invited a sharper question: is
+this "M3's state-transition dynamics are genuinely wrong" (reading 1) or
+"x enters M3 as an encoder INPUT, not a state, so 'initialize at x0' isn't
+well-defined and the two representations are merely inconsistent"
+(reading 2, which would be a narrower, interface-specific claim)? Since
+M3 is exactly affine, its one-step Jacobian is a single constant matrix
+regardless of evaluation point - `Axx := Abar[:6,:6]` (the x-role block of
+the SAME already-extracted, already-validated augmented operator every
+other script this session uses, `docs/nu_gap_export/fullM3_*.npz`) IS
+this Jacobian, with no burn-in, no s0 choice, and no simulation required.
+Compared entrywise and in relative Frobenius norm to `A_d`, all 6 cases x
+5 seeds:
+
+```
+median ||Axx - A_d||_F / ||A_d||_F = 0.917   (range 0.569 - 1.402, n=30)
+```
+
+**Not close to A_d at any checkpoint - worse than the 77% reference point
+in the question, not marginally different from it.** By the user's own
+stated criterion ("~77% off -> reading (1)... close to A_d, divergence
+only emerging over several steps -> reading (2)"), this is unambiguously
+reading (1): stated plainly, per instruction - M3's own one-step
+state-transition map is simply wrong, despite reproducing the impulse
+response to `~1e-6`. There is no "divergence emerging over several
+steps" pattern to find, because the map is already wrong in its most
+local, single-step form.
+
+**One additional fact, not requested but load-bearing for interpreting
+this correctly: `||Axs||_F` (the x-prediction's sensitivity to the
+internal S4 state) is 5-15x LARGER than `||Axx||_F` in every single
+checkpoint** (e.g. case1/seed0: `||Axx||=2.01`, `||Axs||=19.1`). M3's
+one-step x-prediction is dominated by the internal-state channel, not the
+x-input channel, by a wide margin. This is why the two s0 choices in the
+free-response test agreed so closely (0.769 vs 0.773) even though they
+differ enormously in the internal state actually being fed in - `Axx@x0`
+alone is already catastrophically wrong (consistent with this entry's
+direct measurement), so which `s0` gets added on top barely changes the
+qualitative outcome.
+
+**On the mechanism, offered as the best-supported hypothesis, not a
+verified fact:** teacher-forced training never presents x_k and s_k as
+independently varying - s_k is ALWAYS built from the same true trajectory
+that produced x_k, so the two are correlated throughout training by
+construction. The training objective therefore has no way to constrain
+Axx and Axs SEPARATELY - only their joint action on the (x_k, s_k) pairs
+actually seen. Gradient descent has no incentive to prefer the
+"physically disentangled" solution (Axx=A_d, Axs=0) over any other
+(Axx, Axs) pair that reconstructs the training trajectories equally well,
+and nothing in the loss ever isolates Axx alone the way this entry's
+direct comparison does. This is closer in spirit to the user's reading
+(2) as a CAUSE (a training-procedure/identifiability defect, not a
+representational failure of learned dynamics models in general) even
+though the MEASURED SYMPTOM matches reading (1)'s criterion exactly. Not
+independently verified here (would need access to real per-step (x,s)
+training trajectories to check the collinearity claim directly - not
+attempted, flagged as the natural next step if this mechanism matters to
+the paper's framing).
+
+GPU: 0 (reuses already-extracted `nu_gap_export` matrices).
+
+## 2026-08-18 — TASK B (fourth round): BLOCKED - cannot locate "the first hypothesis doc" or its J_x=0.003 figure in this repository
+
+Searched exhaustively before reporting this as blocked, not guessing:
+`grep -rn "J_x"` and `grep -rn "0\.003"` across every `.py`/`.md` file in
+the repo (only one unrelated `J_x` hit, `docs/DECISIONS.md`'s 2026-08-13
+REFUTATION entry, which NAMES `J_x ~ A_d` as one of "the hypothesis
+document's requirements" but does not reproduce its number); `git log
+--all -p` across the full history for the same strings, including
+deleted files; the repo layout's own referenced `docs/00_protocol.md`
+(frozen tables/kill-criteria) does not exist in this checkout. Whatever
+produced the `0.003` figure is not in this git history - it lives in a
+document outside this repository that I don't have access to.
+
+**What IS established, from this repo alone, and is relevant context for
+whoever does have that document:** `s4dpc/diagnostics.py`'s own docstring
+(written before this session, predating today's work) already
+distinguishes `markov_parameters` ("realization-invariant") from "a raw
+one-step `d x_{k+1}/d x_k` Jacobian (which only sees one step and ignores
+however the surrogate's own, generally non-A_d-shaped, internal
+realization carries information forward through the S4 hidden state)" -
+language that reads as already anticipating something like this entry's
+Axx result, for a quantity the module explicitly avoids using as its
+primary diagnostic. If the original `J_x` measurement used
+`markov_parameters`, `jacobian_sweep`, or `local_linearity_defect` rather
+than a raw x-block extraction, that would be a genuinely different
+quantity from this entry's `Axx` (different: which derivative, w.r.t.
+what, at what point, s held fixed or not, and what normalization) - but
+I can't confirm which without the source. **Asking the user directly for
+the original script or document rather than fabricating a reconciliation
+I can't verify.**
+
+GPU: 0.
+
+## 2026-08-18 — TASK C: the free-response-vs-severity correlation was against the LQR-transfer construction's outcome specifically, not the original BPTT/GRU-DPC controller's - stated explicitly since these are different constructions
+
+The correlation reported in the previous entry (`Spearman(err_t1, log10
+cost_ratio)` etc.) used `cost_ratio` from `docs/lqr_transfer_to_true_plant.csv`,
+`variant=fullM3` rows only - the full-state LQR-plus-observer construction
+introduced this session (`tools/lqr_transfer_to_true_plant.py`: "pure
+linear algebra, no neural net, no BPTT, no optimizer"), NOT the original
+BPTT-trained GRU/DPC controller's `cost_ratio_to_oracle` from
+`tools/controller_surrogates.py`/`controller_oracles.py` (the "310x-
+466,000x oracle cost" headline number from the REFUTATION entry). These
+are related but distinct outcome measures - the LQR-transfer construction
+was built specifically to isolate whether M3's own dynamics are sufficient
+to explain the failure independent of any BPTT/training-mechanics
+confound, and the whole of this session's TASK A/B work (stability
+penalty, generic-SSM generalization, success/failure contrast, free
+response) has been run against IT, not against the original DPC number.
+If "the outcome the paper is built on" means the BPTT/GRU/DPC cost ratio
+specifically, that correlation has not been checked this session - the
+per-checkpoint DPC cost ratios exist in `docs/controller_surrogates_summary.csv`
+(case-level, from the original Task 2/3 sweep) and could be joined against
+this session's per-checkpoint free-response error if useful, but the two
+datasets come from different identification runs (different checkpoints
+entirely - the original DPC sweep's M3 checkpoints were never exported to
+`docs/nu_gap_export/`), so a direct per-checkpoint join is not currently
+possible without re-identifying or re-exporting. Flagging rather than
+silently assuming which outcome was wanted.
+
+GPU: 0.

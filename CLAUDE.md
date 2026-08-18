@@ -129,14 +129,37 @@ into the state rather than reached by driving `Bbar`, has no reason to
 respect that same weak coupling, and once excited, the near-unit-circle
 dynamics amplify it immediately. **Does not explain the case-by-case
 severity gradient** — checked directly, Spearman between free-response/
-frequency-response error and the per-checkpoint DPC ratio is weak and
-non-significant throughout (best case rho=0.325, p=0.079, n=30) — that
-gradient remains open. A companion population-level check (do checkpoints
-that measure better on `n_unstable`/`||K_s||/||K_x||`/etc. actually
+frequency-response error and the per-checkpoint LQR-transfer cost ratio
+(the pure-linear-algebra construction this session's work runs against,
+`docs/lqr_transfer_to_true_plant.csv` — NOT yet checked against the
+original BPTT/GRU-DPC cost ratio, a related but distinct outcome measure;
+`docs/DECISIONS.md`'s TASK C entry) is weak and non-significant throughout
+(best case rho=0.325, p=0.079, n=30) — that gradient remains open. A
+companion population-level check (do checkpoints that measure better on
+`n_unstable`/`||K_s||/||K_x||`/etc. actually
 transfer more often?) found a real but weak association when pooling
 across every architecture tried this session, which does NOT replicate
 within the flagship d1030 M3 population and is not, on Task A's own
 direct-intervention evidence above, actionable there.
+
+**Sharpened further, 2026-08-18 (`docs/DECISIONS.md`'s fourth-round TASK
+A):** the free-response failure isn't only a multi-step or s0-choice
+effect. M3's raw one-step x-to-x Jacobian (`Axx`, a single constant
+matrix since M3 is exactly affine — no evaluation-point ambiguity) is
+`~92%` off from `A_d` in relative Frobenius norm at every one of 30
+checkpoints (range 57%-140%) — already wrong at the most local, single-
+step level, not a pattern that emerges over a horizon. `||Axs||`
+(sensitivity to the internal S4 state) is 5-15x larger than `||Axx||`
+in every checkpoint: M3's x-prediction is dominated by the internal-state
+channel, not the x-input channel. Best-supported (not independently
+verified) explanation: teacher-forced training never presents x and s as
+independently varying, so the objective has no way to constrain `Axx`
+alone — only their joint action on the correlated (x,s) pairs actually
+seen in training. **An open item from this same round: a prior "J_x ~
+A_d, error ~0.003" measurement was referenced but could not be located
+anywhere in this repository or its git history** (searched exhaustively)
+— if it exists outside this repo, reconciling it against the `~92%`
+figure above needs the original source, not a guess.
 
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
