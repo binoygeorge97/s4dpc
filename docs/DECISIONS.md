@@ -3738,3 +3738,68 @@ GPU: 14.77 T4-min total (2.49 + 3.01 min on the two setup-bug attempts,
 smaller dimensions, ~95-100s per scale for all 6 cases x 5 seeds; the CPU-
 side PBH/DARE/transfer analysis runs inline in the same kernel, seconds per
 checkpoint at these dimensions).
+
+## 2026-08-18 — RECONCILED: "~300 spurious modes" vs "single-digit unstable modes" are two different thresholds, not a contradiction. Plus: this is an objective property, not an architecture-size property.
+
+**Reconciliation, computed directly on the same 30 d1030 checkpoints, not
+inferred:** Task 4's original figure used `NEAR_UNIT_THRESHOLD = 0.99`
+(`tools/m3_spurious_modes.py`) - counting everything with `|lambda| > 0.99`,
+STABLE and unstable alike. This session's more recent PBH/LQR-transfer work
+counts strictly `|lambda| > 1.0` - genuinely unstable only. Same
+checkpoints, both thresholds, computed together:
+
+```
+|lambda| > 0.99 (original convention):  median 302.5  (mean 307.8, range 175-619)
+|lambda| > 1.0  (strict, recent work):  median 8.5    (mean 9.1,   range 2-19)
+in [0.99, 1.0] (near boundary, STABLE): median 292.0  (mean 298.7)
+```
+
+**~97% of the original "~300 near-unit-circle" count is stable modes sitting
+close to, but on the correct side of, the boundary. Only ~8.5 of them
+(median) are actually on the wrong side.** This is not a correction that
+weakens the mechanism - per the reading that predicted it: "identification
+places a handful of modes on the wrong side of the unit circle, and that
+handful is unfixable downstream" is the tighter, more surprising, and (per
+every result since the LQR-transfer entry) the more accurate story. The
+~300 figure remains true and useful as a description of how much of M3's
+capacity is spent near the stability boundary generally (worth keeping,
+since it's what makes the small unstable minority hard to find/fix without
+exactly this kind of eigenvalue-level analysis) - but the number that
+explains the transfer failure is single digits to low teens, not hundreds.
+
+**Second question, answered with the dimension-sweep data already on hand:
+does the unstable-mode count scale with available capacity? No - checked,
+not assumed, count AND severity.** 16x more internal dimension (64 -> 1024)
+moved the median unstable count from 5.0 to 8.5 (not 16x, nowhere close) -
+and 4x more dimension (256 -> 1024) moved it from 7.5 to 8.5, barely at
+all - while teacher_mse improved ~500x/~1.5x respectively over the same
+steps. Severity is flatter still: median |lambda| among unstable modes
+(d1030: 1.023) and median closed-loop `rho_transfer` (d64: 1.018, d256:
+1.030) sit within a narrow band regardless of scale - no trend toward
+either worse or better as dimension grows. **Agree with the reading: this
+is not a capacity phenomenon where a bigger network has proportionally more
+room for garbage. The count and severity of unstable modes look like a
+near-fixed, small "leftover" - consistent with teacher-forced one-step MSE
+structurally being unable to penalize a mode's stability when that mode's
+one-step contribution to the loss (its direct Markov-parameter contribution)
+is small enough that gradient descent has no signal either way.** A mode
+weakly excited within a single step costs nothing in this objective whether
+`|lambda|` is 0.999 or 1.001 - stability of such a mode is unconstrained,
+not selected against, and whether it lands inside or outside the boundary
+is left to whatever the rest of the optimization (initialization, the fit
+to the STRONGLY-excited modes, ordinary SGD noise) happens to do to it.
+Larger models apparently do not create proportionally more such
+weakly-constrained directions - if anything the FRACTION of dimensions
+that are unstable falls sharply with scale (7.1% at d64, 2.9% at d256,
+0.8% at d1030), even as the absolute count stays roughly flat.
+
+**Disagreement/caveat, stated rather than smoothed over:** the near-flat
+trend rests on exactly 3 points per quantity, not a proper scaling curve -
+enough to reject "scales with capacity" as the explanation (the effect size
+would need to be far larger than what's observed), not enough to claim the
+count is a universal constant independent of dimension. Proceeding on the
+reading as the working hypothesis; Task A below is the test that matters
+more than this observational one.
+
+GPU: 0 (both reconciliations are arithmetic/eigenvalue counts on already-
+exported matrices - no new identification, no new DARE solves).
