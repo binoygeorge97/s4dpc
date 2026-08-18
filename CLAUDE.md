@@ -185,6 +185,37 @@ of the whole parameter set — and it does not explain why training lands
 91.7% off rather than by chance nearer the safe point (a possible soft
 optimizer/init bias, not investigated).
 
+**MITIGATION FOUND, 2026-08-18 (`docs/DECISIONS.md`'s fifth-round TASK
+C) — the first complete fix this entire project has found, not another
+partial one.** The dither cure for closed-loop identifiability
+(Gustavsson/Ljung/Söderström: collinear regressors need dither, loop
+noise, or a switched feedback law) applies directly, since teacher
+forcing puts `s` in exactly that structurally-collinear position relative
+to `x`. Re-fit `(Axx, Axs, Bx)` by OLS (no GPU, no gradient descent — the
+exact-linearity result above makes this closed-form) on the real training
+data PLUS synthetic `(x, s_random, u) -> true_x_next` samples, `s_random`
+drawn independently at the real empirical scale, target computed directly
+from `A_d`/`B_d` (well-defined regardless of `s_random`, since the true
+plant has no such state). Result, all 30 fullM3 checkpoints, no
+exceptions: `Axx -> A_d` and `Axs -> 0` to floating-point precision
+(2.8e-15, 1.6e-14), and **every checkpoint transfers at essentially
+oracle-optimal cost (median ratio 1.005x)** — a complete fix, not a
+partial one like every other mitigation tried this session. **What this
+does NOT show, stated to avoid overclaiming:** (a) `Axs->0` makes M3's
+x-prediction functionally identical to M1's plain linear regression for
+this fully-observed/Markov-in-x setting — the fix works by making the
+surrogate stop leaning on memory for the x-readout, not by teaching the
+memory to be trustworthy; (b) the synthetic targets used the known
+`A_d,B_d` directly, valid for this project's known-simulator setting, not
+a recipe against an unknown black-box real plant; (c) not yet validated
+under actual end-to-end gradient-descent retraining, only a closed-form
+readout re-fit. **SCOPE BOUNDARY, load-bearing for the paper:** this
+works because these plants are fully observed and Markov in `x` — a
+partially-observed system needs `s` to carry genuine information and
+cannot have it randomized freely without destroying real signal. The
+partially-observed case is the real open problem this result points
+toward, not something this fix already covers.
+
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
 is the entire reason for using linear plants.
