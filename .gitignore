@@ -10,6 +10,7 @@ venv/
 # tracked). Also the orchestrator's own operational log/status files.
 docs/nu_gap_export/
 docs/n1000_case3/
+docs/lqr_cache/
 launch/colab/*.log
 launch/colab/*_status.json
 

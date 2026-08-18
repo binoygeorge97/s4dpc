@@ -3432,3 +3432,78 @@ plan changed based on this result.
 
 GPU: 0 (full-state discrete LQR synthesis is pure CPU/scipy - ~30 x 100s ~=
 50 minutes total wall-clock, no jax, no GPU).
+
+## 2026-08-16 — CORRECTION: reframe "state estimation problem" - it's about what the surrogate IS, not what the controller can see
+
+**Correction to the entry above's verdict, per user challenge.** "Stabilizing
+M3 requires a controller that can observe s" is not the sharpest reading,
+and here is the control that shows it: **M0_S4 is also 1030-dimensional,
+its GRU controller is also x-only (never observes its own S4 hidden state
+either), and it controls the true plant at ~1.0x oracle cost.** If "the
+controller can't see the internal state" were the obstruction on its own,
+M0_S4 should fail exactly the same way M3 does - it doesn't. What actually
+differs: M0_S4's internal state is either dead (block-zeroed by
+construction, `Abar[:6,6:]==0` - the M0_S4 observability check earlier this
+session) or, where it isn't dead, stable and inert. M3's is LIVE and
+UNSTABLE - `tools/verify_closed_loop_instability.py`'s finding that real M3
+checkpoints carry 2-19 genuinely unstable internal modes stands unchanged.
+
+**The correct statement: identification from I/O data produced a surrogate
+whose stabilization requires acting on internal state that has no
+counterpart in the true plant.** That is a claim about what M3 IS (an
+artifact of fitting a 1030-dimensional model to identify a 6-dimensional
+system, given no incentive during identification to keep the unreachable
+majority of that capacity inert), not a claim about controller information
+access. The "controller can't see s" framing was necessary but not
+sufficient - M0_S4 already had that same property and it cost nothing.
+
+**Consequence: Task B's originally-planned Riccati-terminal-cost DPC retrain
+is NOT being run.** Even its positive branch would be uninformative by this
+new framing: if DPC succeeds at building an implicit estimator and
+stabilizes M3, the resulting policy is dominated (median 89x, see below) by
+a term reacting to internal state that doesn't exist in the true plant. That
+outcome - a controller that works on the surrogate and is dominated by
+machinery irrelevant to reality - IS the reality gap, manufactured by
+construction rather than discovered. Not worth GPU to go find out.
+
+**Quantified (Task B, user's second numbering - the ||Ks||/||Kx|| ratio
+distribution, free from the existing `docs/lqr_on_m3.csv`, all 30
+checkpoints): median 88.6x, range 19.9x-275.4x, every single case's median
+above 58x.** Per-case medians: case1 91.6x, case2 156.3x, case3 85.7x,
+case4 65.2x, case5 97.6x, case7 58.8x. No case comes close to a ratio near
+1 (which would indicate the physical and internal-state control demands are
+comparable) - the internal-state term dominates everywhere, by roughly two
+orders of magnitude, without exception.
+
+**The max_action finding is NOT secondary - restating it as a co-equal,
+independent failure, and its structural echo of this project's founding
+bug.** Even the (already-insufficient, s-blind) x-only gain's own required
+control magnitude exceeds `max_action` in most checkpoints - two independent
+ways to fail stacked on top of each other, not one dominant explanation with
+a footnote. And this is the SAME underlying question - "is the control
+magnitude this policy needs physically realistic?" - that motivated the
+project's very first fix: `dpc_example`'s original `StandaloneGRUController`
+was UNBOUNDED, letting early DPC runs emit controls reaching ~1e7, which
+misdiagnosed at least one case's failure (case 4) as an inherent dynamics
+problem when it was actually the bug (2026-08-13 entries above). That bug
+HID an unreasonable action requirement by letting the controller cheat past
+it. What's found here is the same question from the opposite direction:
+with `max_action` now correctly enforced (as it has been since Task 1), the
+LQR-optimal x-only gain for M3 needs actions the bound correctly refuses to
+allow - not a bug this time, a genuine, load-bearing fact about what M3
+demands.
+
+**In progress, not yet complete: the sharper test this correction points
+to.** `tools/lqr_transfer_to_true_plant.py` - drive M3's own s-dynamics
+with the TRUE (measured) x and u at every step (an exact, ideal linear
+observer built from M3's own identified dynamics, not a learned
+approximation - the most generous possible construction), apply the SAME
+full-state LQR gain to the true plant, check whether the combined
+closed loop is stable. All cases, all seeds, M0_S4 and M1 as controls.
+Pure linear algebra throughout - no neural net, no BPTT, no optimizer
+anywhere in the construction, so a negative result here would be about as
+clean as this investigation can produce. Launched; result pending in a
+follow-up entry.
+
+GPU: 0 (Task B is arithmetic on an existing CSV; the DECISIONS reframing
+itself needed no computation).
