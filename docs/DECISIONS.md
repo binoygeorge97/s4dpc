@@ -4639,3 +4639,80 @@ way, TASK D is a genuine second test of the SAME mechanism, not a rerun
 of the dimension-sweep question.
 
 GPU: 0.
+
+## 2026-08-18 — TASK D: fidelity-matched truncation - the deferred experiment, run - the gauge is the whole explanation, and truncation is cleanly ruled out
+
+sha: (pending commit) | `docs/fidelity_matched_truncation.csv`, `docs/fidelity_matched_truncation_spectrum.csv`
+
+The experiment flagged as outstanding since the 2026-08-13 balanced-
+truncation entry ("the only experiment that would actually test the
+hypothesis - not yet run"), now framed precisely by the TASK C correction
+above: does removing EXCESS realization content (regardless of which
+gauge produced it) fix transfer, or is the gauge the whole story?
+
+**Method:** Hankel-SVD/ERA (`tools/balanced_truncation.py`'s machinery,
+reimplemented directly on the already-extracted `docs/nu_gap_export`
+matrices - no jax/flax needed). For each fullM3 checkpoint: `target_fidelity`
+= that SPECIFIC checkpoint's own max-abs Markov-parameter error vs the
+true plant, at FULL 1030 dimension, over the h=1..40 window
+(`N_HANKEL=20` requires `G_1..G_40`) - stated precisely because this
+number is NOT the "~1e-6" figure quoted elsewhere in this project (that
+figure is from a shorter horizon/different metric); at this h<=40 window
+it ranges ~0.018-0.70 across checkpoints (M3's own mild instability
+compounds error over 40 steps far more than over 1 or 10). Sweep
+truncation order `r=6..60`, take the smallest `r` whose ERA-reconstructed
+model reaches that target; run the identical observer/LQR-transfer
+construction used everywhere else this session on the truncated system.
+M1 (already 6-dim) and M0_S4 (`Abar[:6,6:]=0` exactly, so full-dimension
+fidelity is already near machine precision) as controls. **Bug found and
+fixed en route:** `balanced_truncation.py`'s `to_output_normal_form`
+assumed `Cr` square, only valid at `r=6` - crashed the moment any
+checkpoint needed `r>6`. Generalized to `to_partial_output_normal_form`
+(similarity transform so the first 6 coordinates of the reduced state
+read out as the physical output exactly, remaining `r-6` coordinates
+whatever basis completes it - standard construction, verified against
+the `r=6` case first).
+
+**Result - clean, decisive, matches the "gauge is the whole explanation"
+branch:**
+
+```
+          median r_chosen   transfer-stable   median ratio
+fullM3    6                 2/30              1.21e13
+M0_S4     6                 30/30             1.005x
+M1        6                 30/30             1.005x
+```
+
+26/30 checkpoints already reach their own fidelity target at `r=6` - the
+TRUE plant's own order, zero excess dimensions by definition; the
+remaining 4 need only `r=7, 7, 12, 20`. **Regardless of `r`, 28/30
+catastrophically fail** (ratios from ~280x up to 8.08e129), and the 2
+successes are themselves marginal (65.8x, 80.6x - both well above
+oracle-optimal, barely under the 100x success threshold). Since the
+fidelity target used here is LOOSER than the "~1e-6" figure elsewhere
+(making `r=6` easier to reach than a stricter target would), this is if
+anything a GENEROUS test in truncation's favor, and it still fails almost
+everywhere.
+
+**Verdict: excess realization content is not the culprit. A completely
+independent construction method (Hankel-SVD/ERA on Markov parameters,
+nothing to do with the (Axx,Axs) sub-block extraction TASK A/C worked
+with) applied at the MINIMAL possible order, fidelity-matched to M3's own
+achieved accuracy, reproduces the same catastrophic failure. This rules
+out truncation as a general-purpose second cure, cleanly - not "truncation
+didn't help enough," but "truncation, done as well as this project knows
+how, changes almost nothing."** This also generalizes TASK A's finding
+past the specific `(Axx,Axs)` gauge: the problem isn't confined to one
+particular decomposition of M3's parameters - ANY reduction of M3's own
+data to a compact realization, by any of the two independent methods this
+project has now tried, lands somewhere that doesn't transfer. TASK C's
+dither cure remains the one route that worked, and per the FRAMING
+CORRECTION above, that is because it directly restores identifiability
+(supplies the information teacher-forced data structurally cannot) - not
+because it happens to produce a small model. TASK D confirms the second
+half of that reasoning by elimination: producing a small, fidelity-matched
+model WITHOUT restoring identifiability does not work.
+
+GPU: 0 (pure CPU; ~4 minutes total for all 90 checkpoints x the full
+r-sweep - truncation orders stay small, so DARE solves are fast, unlike
+this session's d1030 solves).

@@ -117,6 +117,11 @@ D_X, D_U = 6, 3
 DT = 0.01
 VARIANTS_ORDER = ["M1", "fullM3", "M0_S4"]
 NEAR_INTEGER_TOL = 0.1  # how close to a whole number counts as "clean" for this bin
+N_FREQ = 20000  # 10x the original 2000 - a spot check on 3 flagged checkpoints found this
+# resolves some (case3/seed2: 11.90->11.97, case7/seed4: -2.17->-2.00) but NOT all
+# (case1/seed0: -0.43 at 2000 -> drifts to +5.50 at 100000, never approaching an integer) -
+# 20000 is the practical middle ground (~6-8s/checkpoint here vs ~28s/checkpoint at 100000
+# for one already-slow case) that still gives a real, substantially-refined answer for all 90.
 
 
 def main() -> None:
@@ -135,6 +140,7 @@ def main() -> None:
                 dnu, info = nu_gap(
                     (A_true, B_true, np.eye(D_X), np.zeros((D_X, D_U))),
                     (A, B, C, np.zeros((C.shape[0], D_U))),
+                    n_freq=N_FREQ,
                 )
                 cond = info["cond"]
                 nearest_int = round(cond)

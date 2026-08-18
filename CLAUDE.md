@@ -218,6 +218,25 @@ randomized freely without destroying real signal. The
 partially-observed case is the real open problem this result points
 toward, not something this fix already covers.
 
+**TRUNCATION RULED OUT, 2026-08-18 (`docs/DECISIONS.md`'s TASK D) — the
+deferred fidelity-matched-truncation experiment, finally run, closing
+the last open question about excess content vs. gauge.** Hankel-SVD/ERA
+(independent of the (Axx,Axs) construction TASK A/C used) reduced each
+fullM3 checkpoint to the smallest order reaching that SAME checkpoint's
+own achieved Markov-parameter fidelity (not a generic "~1e-6" — at this
+experiment's h<=40 window, M3's own fidelity is looser, ~0.02-0.7,
+making this if anything a generous test for truncation). 26/30
+checkpoints already reach their own fidelity target at `r=6` — the true
+plant's own order, zero excess dimensions. Regardless of `r`: **28/30
+still catastrophically fail** (ratios up to 8e129; the 2 successes are
+marginal, 66x/81x). M1/M0_S4 controls: 30/30 each, as expected.
+**Verdict: excess realization content is not the culprit — a second,
+independent reduction method at minimal order and matched fidelity
+reproduces the same failure. Truncation is cleanly ruled out as a
+general-purpose cure; TASK C's dither cure remains the one route that
+worked, and by elimination this confirms it works BECAUSE it restores
+identifiability, not because it happens to produce a small model.**
+
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
 is the entire reason for using linear plants.
