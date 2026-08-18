@@ -3351,3 +3351,84 @@ experiment, not a repeat.
 GPU: 0 (PBH check and the frozen-params repro are both pure CPU - the
 repro used a local jax/flax install, no GPU, no project checkpoints
 touched).
+
+## 2026-08-16 — TASK A resolved, but not into the predicted dichotomy: a THIRD reading
+
+sha: (pending commit) | `docs/lqr_on_m3.csv` | `tools/lqr_on_m3.py`
+
+Full-state discrete LQR synthesized directly for M3's augmented (A, B, C) - all
+6 cases x 5 seeds, 30/30 checkpoints, pure CPU (`scipy.linalg.solve_discrete_are`,
+~100s per checkpoint given the 1030-dim state). Q/R match the DPC cost's own
+weights (`Q = C^T (Q_x=5.0 * I_6) C`, `R = R_u=0.1 * I_3`).
+
+**STOP-CHECK cleared: 0/30 checkpoints have b=0 for the full-state-optimal LQR.**
+Every single case/seed gives a strictly positive robust margin (0.0001-0.0044) -
+small in absolute H-infinity terms, but categorically different from the
+b=0.0 DPC always produces. A stabilizing controller for M3 provably exists,
+in every case and seed, with zero exceptions. Confirms Task A's PBH result
+from a completely independent angle (direct synthesis, not just a rank test).
+
+**But the planned next step - regress a GRU onto this gain, check width -
+turned out not to be well-posed, for a reason the branching logic didn't
+anticipate.** The full LQR gain acts on the ENTIRE 1030-dim augmented state
+(x, the 6-dim physical state, AND s, M3's own 1024-dim internal S4 state) -
+but the GRU controller (like every controller in this project) only ever
+observes x. It cannot see s at all, not even at t=0. So "fit a GRU to
+reproduce K_lqr" is asking a memoryless function of x alone to reproduce a
+law that needs s - not fair to any controller, regardless of width.
+
+**Checked the fair version instead: zero out K_lqr's s-columns (K_xonly -
+the only linear form ANY x-only controller, of any width, could ever
+represent) and re-check the closed loop. Result, 30/30 checkpoints, zero
+exceptions: b_xonly = 0.0000 and rho_xonly > 1 in every single case.** A
+memoryless, x-only linear gain NEVER stabilizes M3 - not once, across every
+case and seed tested. This is not a "not wide enough" finding (no width
+fixes a function class problem when the OPTIMAL member of that class
+already fails) - it is an information problem.
+
+**Where the gain actually goes explains why:** `||K_lqr[:, s-columns]||_op`
+dwarfs `||K_lqr[:, x-columns]||_op` by roughly 20x to 90x+ in every
+checkpoint (e.g. case 7 seed 3: 4397 vs 174; smallest ratio found, case 5
+seed 4: 241 vs 12, still ~20x). The overwhelming majority of the control
+authority LQR needs is directed at the S4 hidden state, not the physical
+state - a controller that cannot observe or estimate s is missing almost
+all of what stabilization actually requires.
+
+**A second, independent obstruction stacks on top: even the (already
+insufficient) x-only gain's own required control magnitude routinely
+exceeds `max_action` anyway.** At the edge of the training x0 range
+(`||x||=TRAIN_X0_RANGE*sqrt(6)`), `||K_xonly@x||` exceeds `max_action` in
+most checkpoints tested - up to 25x over budget (case 7 seed 3: 1279 vs 50),
+though not in all (case 1 seed 4: 21.5 vs 50, under budget). This is the
+"third reading" flagged as a possible outranking finding - it's real, but
+it turns out to be secondary to the deeper information problem above: even
+with UNLIMITED action magnitude (no tanh/max_action bound at all), the
+x-only gain still wouldn't stabilize the loop, because it's missing access
+to s, not just running out of control authority.
+
+**Verdict: neither reading (1) [GRU too narrow] nor reading (2) [objective
+doesn't penalize instability] as originally framed. The actual obstruction:
+stabilizing M3 requires a controller that can observe or reconstruct its
+1024-dim internal state, which is structurally a state-ESTIMATION problem
+(build an implicit observer from the history of x through the GRU's own
+recurrent hidden state h, since h is the only place that history can live),
+not a capacity-at-a-single-timestep problem or a missing-terminal-cost
+problem in isolation.** Task B's Riccati terminal cost (which - importantly -
+CAN legitimately use the model's true internal state z_N even though the
+controller can't, since the trainer sees the full rollout) is not moot by
+this finding - it's now a test of whether DPC's gradient signal, over
+~200 steps, can push the GRU's hidden state into implicitly performing that
+estimation, not a test of whether a wider network would help. Worth being
+explicit before running it: this reframes what a positive OR negative
+result would mean - success would show the recurrence given the right
+incentive; failure would leave open whether it's an optimization-difficulty
+problem (can't find the estimator) or a more fundamental one (the estimator
+isn't learnable via gradient descent through this rollout at all, or 64
+hidden units aren't enough to REPRESENT a working estimator regardless of
+training - a genuinely different width question than the one originally
+posed, about estimator capacity, not gain capacity). Not yet distinguished.
+Paused here for input before spending GPU on Task B, given how much the
+plan changed based on this result.
+
+GPU: 0 (full-state discrete LQR synthesis is pure CPU/scipy - ~30 x 100s ~=
+50 minutes total wall-clock, no jax, no GPU).
