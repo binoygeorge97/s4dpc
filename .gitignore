@@ -12,6 +12,8 @@ docs/nu_gap_export/
 docs/n1000_case3/
 docs/lqr_cache/
 docs/dimension_sweep/
+docs/stability_constrained/
+docs/linear_ssm_baseline/
 launch/colab/*.log
 launch/colab/*_status.json
 

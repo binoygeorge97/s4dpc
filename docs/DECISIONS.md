@@ -3862,3 +3862,100 @@ suggests. Flagged, not resolved.
 GPU: 4.22 T4-min (1.08 min smoke test + 3.14 min full run - fast because,
 unlike Task A, there is no power-iteration penalty in this script; plain
 teacher-forced training only).
+
+## 2026-08-18 — TASK A: stability-hinge-penalized identification fits comparably and still fails - the strongest-negative branch, with a direct falsification of "just eliminate the unstable modes"
+
+sha: (pending commit) | kaggle: s4dpc-stability-constrained | `docs/stability_constrained_summary.csv`
+
+Re-identified M3 at the standard d1030 internal dimension, all 6 cases, 5
+seeds, identical 40000-epoch budget and data to every other M3 run this
+session, with a hinge penalty `PENALTY_WEIGHT * relu(rho_estimate - 1.0)^2`
+added to teacher-forced MSE (`PENALTY_WEIGHT=1.0`). `rho_estimate` comes
+from 20 power iterations (`jax.jvp`) run against a separate `decode=True`
+step-graphdef built alongside the `decode=False` training graphdef, since
+the training model can't take single-step inputs (`tools/identify_stability_constrained.py`).
+Validated locally before spending GPU: power iteration matches exact
+eigendecomposition to ~1.5-2% at 20 iterations on a real M3 checkpoint
+(oscillation from the dominant complex-conjugate pair, not divergence).
+**Every `n_unstable` below is from the EXACT eigendecomposition of the
+extracted Abar, never the training-time power-iteration proxy** - same
+strict `|lambda| > 1.0` convention as the RECONCILED entry above, so this
+is directly comparable to the standard-M3 d1030 numbers there.
+
+**Fairness check first, per instruction - does the penalty degrade
+teacher_mse badly enough to confound the test? No. ~2x, not an order of
+magnitude:**
+
+```
+                          median teacher_mse   median n_unstable   n_stable/30   median ratio
+standard M3 (d1030)       7.03e-06             8.5                 0/30          25,300x
+stability-penalized M3    1.36e-05             3.0                 1/30          4,313x
+```
+
+teacher_mse: 1.94x higher than standard M3 - comparable, not confounded.
+The penalty is doing real, comparably-priced work: median unstable count
+drops 2.83x (8.5 -> 3.0), median transfer ratio improves 5.87x (25,300x ->
+4,313x) - genuine, measurable effects, same "real but not decisive" shape
+as the dimension-sweep entry.
+
+**Transfer success: 0/30 -> 1/30 - in any practical sense, unchanged.** The
+one success (case1/seed3) is marginal, not robust: `rho_transfer=0.999812`
+(barely under 1), ratio 6.5x - the best of a bad set, not a clean win.
+
+**The decisive result: two checkpoints hit `n_unstable=0` EXACTLY - the
+penalty's own stated goal, fully achieved, confirmed by exact
+eigendecomposition. Both still failed transfer:**
+
+```
+case1/seed2:  n_unstable=0/1030  teacher_mse=1.12e-06 (excellent)  rho_transfer=1.002441  ratio=10.3x
+case7/seed2:  n_unstable=0/1030  teacher_mse=3.28e-05              rho_transfer=1.021277  ratio=1,397x
+```
+
+A fully, provably internally-stable augmented realization - zero augmented
+eigenvalues outside the unit circle, both by construction target and by
+direct post-hoc verification - still produces a controller that
+destabilizes the true plant. This falsifies "just eliminate the unstable
+modes and transfer will work" by direct existence proof, not just by a
+population-level trend.
+
+**Confirmed at the population level too, not only by these two points:**
+`Spearman(n_unstable, rho_transfer) = 0.171` (p=0.366, n=30) and
+`Spearman(n_unstable, log ratio_transfer) = 0.227` (p=0.228) - both weak
+and not statistically significant. Unlike the earlier kink-magnitude
+correlation (wrong sign, -0.54), this one isn't even wrong-signed - there
+is simply no reliable relationship, in either direction, between how many
+augmented eigenvalues sit outside the unit circle and how badly the
+transferred controller performs. Within case1 alone: seed2 (`n_unstable=0`)
+FAILS while seed3 (`n_unstable=3`, MORE unstable modes) is the one
+checkpoint across all 30 that SUCCEEDS. `n_unstable` does not predict
+transfer outcome, even locally, even in the direction naively expected.
+
+**Verdict: the strongest-negative branch. Even a surrogate whose augmented
+operator is exactly, provably Schur-stable does not transfer.** This closes
+the "eliminate the spurious unstable modes" mitigation path directly - not
+by inference from a correlation, but by two checkpoints that hit the target
+exactly and still failed. Whatever "spurious" ultimately means in this
+project's standing realization-mismatch candidate (CLAUDE.md §1's "current
+working picture"), it is not captured by eigenvalue-stability of the
+augmented operator alone. Reading: internal stability is a property of
+M3's recursion in isolation; transfer success depends on whether M3's
+LINEARIZATION (`Abar, Bbar`) is close enough to the true plant's
+(`A_d, B_d`) for a controller synthesized from one to stabilize the other -
+a stable-but-wrong linearization fails the same way a Markov-accurate-but-
+wrong one already does (§1: M3's ~1e-6 Markov error was already too small
+to explain the blowup under ordinary error propagation). Internal stability
+and linearization fidelity are different axes; this experiment pushed one
+axis to its limit (exactly zero unstable modes, verified) while leaving the
+other unconstrained, and the failure persisted essentially unchanged.
+CLAUDE.md §1 updated to match.
+
+**How to apply:** do not propose "penalize/clip internal eigenvalues" as a
+fix again without a new argument for why it would touch the linearization-
+fidelity axis rather than only the stability axis - this experiment tested
+that specific lever directly, at the specific dimension used throughout
+this project, and it did not work, including in its best case.
+
+GPU: 116.25 T4-min (single vmapped ensemble across all 30 case x seed
+members trained together in one kernel - `training wall time: 2298.3s`
+[~38.3 min] for the GPU-side fit; the remainder is CPU-side PBH/DARE/
+transfer analysis for 30 checkpoints plus environment setup).

@@ -73,6 +73,39 @@ fidelity-matched truncation (larger r, chosen so `err_vs_m3_markov` reaches
 M3's own ~1e-6 floor) is the only experiment that would actually test the
 hypothesis — not yet run.
 
+**Update, 2026-08-18 (`docs/DECISIONS.md`'s RECONCILED/TASK A/TASK B entries —
+read there for the full evidence trail):** the "~300 near-unit-circle modes"
+figure above and later single-digit figures are NOT in tension — same 30
+d1030 checkpoints, `|lambda|>0.99` gives ~300 (median 302.5), strict
+`|lambda|>1.0` gives median 8.5; ~97% of the ~300 are stable modes sitting
+close to, not over, the boundary. The mechanism is tighter than originally
+stated: a handful of augmented modes (single digits to low teens) land on
+the wrong side of the unit circle, not hundreds. This count/severity does
+NOT scale with internal dimension (5.0 → 7.5 → 8.5 unstable modes across a
+64→256→1024 sweep, while fidelity improves ~500x) — an objective property
+(teacher-forced one-step MSE cannot penalize a weakly-excited mode's
+stability either way), not a capacity property. **Directly tested and
+refuted as a fixable lever:** re-identifying M3 with an explicit hinge
+penalty on the internal spectral radius reduces `n_unstable` (median
+8.5 → 3.0) at comparable fidelity (~2x teacher_mse, not confounded), but
+transfer success stays at 1/30 — and two checkpoints that hit
+`n_unstable=0` EXACTLY (exact eigendecomposition, not the training-time
+proxy) still failed transfer (`rho_transfer` 1.002, 1.021). Population
+correlation between `n_unstable` and transfer outcome is statistically
+indistinguishable from zero (Spearman ≈0.17–0.23, p>0.2, n=30). **Also
+directly tested: not S4-specific.** A fully generic dense linear SSM (no S4
+structure, no HiPPO, no clip) fit by gradient descent on the identical
+objective produces the same spurious-unstable-mode/transfer-failure
+pattern (6/30 transfer success — better than S4 at matched 70-dim capacity,
+but with far heavier-tailed failures when it does fail, unexplained).
+**Sharpened standing candidate:** the mechanism is not "internal
+instability" per se — that's fixable, and fixing it doesn't help — but a
+mismatch between M3's learned linearization (`Abar, Bbar`) and the true
+plant's (`A_d, B_d`) that persists even when the augmented operator is
+exactly Schur-stable. Internal stability and linearization fidelity are
+different axes; only the first has been shown to be directly controllable
+via the objective so far.
+
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
 is the entire reason for using linear plants.
