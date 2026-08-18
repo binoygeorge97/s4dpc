@@ -3574,3 +3574,104 @@ majority of that capacity to stay inert.
 GPU: 0. ~100 minutes total CPU wall-clock (60 fresh 1030-dim DARE solves,
 M3 and M0_S4, ~95-120s each, cached to `docs/lqr_cache/` for reuse; M1's 30
 6-dim solves are near-instant).
+
+## 2026-08-18 — Bulletproofing the decisive result: construction verified, spectrum decomposed, framing corrected
+
+Three checks against the previous entry's central result, per user request,
+plus a reframing of how it gets stated. `docs/figures/lqr_transfer_trajectory.png`
+is the paper figure.
+
+**TASK A(1) - the "exact linear predictor" claim needed a qualification, and
+the user was right to ask for it.** `tools/trajectory_comparison.py`, case 3
+seed 0: `s_hat` (M3's internal recursion driven by the TRUE trajectory) and
+`s_free` (the SAME recursion driven by M3's OWN self-referential
+free-running x) start identical (both 0) but diverge almost immediately -
+by step 2 their difference is already a meaningful fraction of where they
+eventually end up, simply because `x_true` (growing) and `x_free` (M3's own
+closed loop, which IS stable on its own turf - `lqr_on_m3.py`'s `b_full>0`
+result) are different inputs from step 1 onward. **Restated claim: "exact
+GIVEN ground-truth driving," not "exact, verified independently against
+M3's own behavior."** The two were never going to match, because M3 itself
+free-running under its own optimal gain does something totally different
+(converges) from what it's asked to track here (a growing true-plant
+trajectory). This doesn't weaken the result - it's the more defensible
+version of the claim, and worth stating precisely rather than the looser
+original phrasing.
+
+**TASK A(2) - the transient, and the figure.** No sudden transition: `‖x_true‖`
+grows smoothly and monotonically from essentially step 0 (case 3 seed 0:
+6.52 -> 6.83 by step 5 -> 7.16 by step 9 -> ...), consistent with a linear
+system whose dominant closed-loop eigenvalue has `|lambda|` just over 1 -
+slow-looking at first purely because exponential growth at a small rate
+looks flat over a few steps, not because anything is being tracked and then
+lost. By step 175 it exceeds 10x its initial norm; by step 300 it's at
+323.7, still climbing. M1 and M0_S4 (both ~1.005x oracle) are numerically
+indistinguishable on the plot - confirmed directly (agree to 6 decimal
+places over the first 10 steps), consistent with this session's earlier
+"M1 and M0_S4 agree to ~10 significant figures" finding. M3 free-running
+(dashed, its own turf) stays bounded and decays with oscillation, exactly
+as `lqr_on_m3.py` already established. The qualitative picture: two
+overlapping stable trajectories, one bounded/decaying-but-oscillating
+trajectory, and one relentlessly, smoothly diverging trajectory - visually
+unambiguous.
+
+**TASK B - decomposed the unstable closed-loop spectrum, all 30 checkpoints,
+292 unstable eigenvalues total (`tools/eigenmode_decomposition.py`).** For
+each unstable eigenvector, computed its energy fraction in the physical
+(x, 6-dim) block vs the internal (s, ~1024-dim) block. **Median frac_x =
+0.180 (82% of eigenvector energy in the s-block); mean 0.249; 240/292 (82%)
+of unstable modes are majority-s-block.** Precise statement, not
+overclaimed: no mode is EXCLUSIVELY one or the other (max frac_x found
+anywhere: 0.897, never 1.0; modes are genuinely x/s-coupled, not cleanly
+separable) - but the large majority of the closed-loop instability's energy
+concentrates in the block with no physical counterpart, consistent with
+(and now a second, independent line of evidence for) the ||Ks||>>||Kx||
+gain-magnitude finding from the previous entry. Real per-checkpoint spread
+worth being honest about: case 2 seed 0's unstable modes are mostly
+x-dominated (median frac_x=0.587) while case 1 seed 1's are almost entirely
+s-dominated (median frac_x=0.016) - the split is real and directionally
+consistent, not uniform across every single checkpoint.
+
+**FRAMING correction for how this whole result gets stated, per instruction:**
+- **The headline is the controlled comparison, not the failure in
+  isolation.** The same LQR-synthesis-and-transfer procedure applied to
+  three surrogates with statistically indistinguishable prediction fidelity
+  (M1, M0_S4, M3 all recover Markov parameters to 1e-6-to-1e-14) gives
+  1.005x / 1.005x / 25,300x (median). M0_S4 is the arm that forecloses "the
+  gap is just 1e-6 vs 1e-16 precision" as an explanation - it is equally
+  1030-dimensional, has an equally unobserved internal state, and works
+  perfectly. The difference is entirely what identification put in those
+  dimensions, not their existence.
+- **Nothing in the failing computation is DPC-specific.** The transfer
+  experiment is a single LQR solve plus a closed-loop eigenvalue check -
+  no BPTT, no GRU, no gradient step, no training curriculum anywhere in it.
+  ANY controller synthesis method through this surrogate would hit the same
+  wall; DPC is simply the method this project happened to be using when the
+  problem was found. Stating this explicitly so the result doesn't read as
+  narrower than it is.
+- **Scope limits, recorded before a reviewer asks:** this demonstration
+  covers linear plants (n=6 cases), one surrogate architecture family (S4,
+  d_model=16/N=32, 1030 augmented dims, teacher-forced one-step MSE
+  identification), and one controller synthesis method demonstrated to fail
+  (full-state LQR) alongside one to fail during actual training (DPC/GRU).
+  The honest claim is about THIS class of surrogate under THIS
+  identification objective, not "learned surrogates" or "neural state-space
+  models" unqualified.
+- **M6 has been silent throughout this entire linear-algebra line of
+  investigation, and that needs to be said rather than left implicit.**
+  Every tool since the nu-gap analysis (`nu_gap_export.py` onward) is
+  LTI-only - M6's LayerNorm/GELU/GLU make it not exactly affine, so
+  `augmented_operator`'s jacfwd linearization is a LOCAL approximation for
+  M6, not an exact global realization the way it is for M3. Nothing here
+  has been run on M6. Task 6's horizon-sweep result (M6 fails at the same
+  order of magnitude as M3 on every case) is the only evidence connecting
+  the two, and it's DPC-outcome evidence, not a mechanism demonstration -
+  the LQR-transfer argument in this entry has not been extended to M6 and
+  is not being claimed to apply to it directly. Two honest options, neither
+  taken yet: extend via trajectory-linearized LQR at a specific operating
+  point (an approximation, not exact), or state plainly in the writeup that
+  M6's inclusion in the mechanism claim is by analogy to the DPC-outcome
+  parallel, not by direct demonstration.
+
+GPU: 0 (all three checks are pure CPU, reusing `docs/lqr_cache/`'s already-
+solved K_lqr matrices - no new DARE solves).
