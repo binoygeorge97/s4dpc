@@ -3803,3 +3803,62 @@ more than this observational one.
 
 GPU: 0 (both reconciliations are arithmetic/eigenvalue counts on already-
 exported matrices - no new identification, no new DARE solves).
+
+## 2026-08-18 — TASK B: this is not S4-specific. Generalizes, with a real severity difference not yet explained.
+
+sha: (pending commit) | kaggle: s4dpc-linear-ssm-baseline | `docs/linear_ssm_baseline_summary.csv`
+
+A fully unconstrained linear state-space model - dense `A` (64x64), `B`, `C`,
+`D`, no diagonal/DPLR structure, no HiPPO initialization, no Lambda_re clip,
+no complex parameterization anywhere - trained by plain gradient descent on
+the IDENTICAL teacher-forced one-step MSE loss and APRBS data as every M3
+run this session (`tools/linear_ssm_baseline.py`). 64 hidden states, 70
+augmented total - matching `tools/dimension_sweep.py`'s d64 S4 config
+exactly, for a direct, dimension-matched comparison. Same 40000-epoch
+budget, all 6 cases, 5 seeds. Ran clean on the full budget after a smoke
+test at 2000 epochs (5% of budget) showed slow but genuine convergence
+(mean MSE 220 -> 85), confirming this needed the full epoch count before
+judging it, not a sign of anything wrong with the setup.
+
+**It also produces spurious unstable modes and also mostly fails the
+LQR-transfer test - the phenomenon is not S4-specific. But there's a real,
+unexplained severity difference, not just "also fails":**
+
+```
+                          median teacher_mse   median n_unstable   n_stable/30   median ratio
+linear SSM (70 dims)      5.30e-05             6.0                 6/30          13,735x
+S4 d64 (70 dims)          3.39e-03             5.0                 2/30          334x
+S4 d1030 (1030 dims)      7.03e-06             8.5                 0/30          25,300x
+```
+
+At matched dimension (70 total), the generic linear model achieves BETTER
+fidelity than S4 (5.3e-5 vs 3.4e-3 - S4's structure is not obviously helping
+optimization here, arguably hurting it) and a HIGHER transfer success rate
+(6/30 = 20% vs 2/30 = 6.7%). The 6 successes are genuinely good, not
+marginal: ratios 1.4x-97.6x, most near-oracle. **But the 24 that still fail,
+fail WORSE than any S4 configuration tested this session** - ratios up to
+1.36e147 (vs S4's worst on record, ~1e15 at d1030) - which is why the
+MEDIAN ratio (13,735x) looks worse than d64 S4's despite the higher success
+rate: with only 30 samples split roughly 20%/80%, the median still falls
+inside the failing majority, and that majority's tail is far heavier here.
+
+**Reading: the underlying mechanism (teacher-forced one-step MSE cannot
+constrain a weakly-excited mode's stability) generalizes past S4 to a
+completely generic linear recurrence - this widens the scope of the paper's
+claim substantially, per the user's own framing.** But it does NOT mean S4
+is unremarkable in this story - removing S4's structure changed the outcome
+in both directions at once (more successes, worse failures), which is
+itself informative and not yet explained by anything established so far.
+Candidate factors, none tested here: S4's positive-real-part-forcing clip
+concentrating initial spectral mass near (not away from) the boundary
+(`docs/DECISIONS.md`'s clip-tracing entry already found raw `Lambda_re`
+drifts TOWARD the clip during training, gradients vanishing once caught);
+the complex/DPLR parameterization's own optimization landscape; or simply
+that a dense 64x64 real matrix and a 16-channel x 32-state complex DPLR
+structure aren't actually "the same total capacity" in any way that makes
+the comparison as matched as the shared "70 augmented dims" framing
+suggests. Flagged, not resolved.
+
+GPU: 4.22 T4-min (1.08 min smoke test + 3.14 min full run - fast because,
+unlike Task A, there is no power-iteration penalty in this script; plain
+teacher-forced training only).
