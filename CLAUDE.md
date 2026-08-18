@@ -98,13 +98,45 @@ structure, no HiPPO, no clip) fit by gradient descent on the identical
 objective produces the same spurious-unstable-mode/transfer-failure
 pattern (6/30 transfer success — better than S4 at matched 70-dim capacity,
 but with far heavier-tailed failures when it does fail, unexplained).
-**Sharpened standing candidate:** the mechanism is not "internal
-instability" per se — that's fixable, and fixing it doesn't help — but a
-mismatch between M3's learned linearization (`Abar, Bbar`) and the true
-plant's (`A_d, B_d`) that persists even when the augmented operator is
-exactly Schur-stable. Internal stability and linearization fidelity are
-different axes; only the first has been shown to be directly controllable
-via the objective so far.
+**Correction, 2026-08-18: the "linearization-mismatch" wording above (in an
+earlier draft of this update) was ill-posed and has been retracted, not
+softened.** `Abar` is 1030-dim, `(A_d, B_d)` is 6-dim — there is no direct
+matrix comparison to make, so "mismatch between them" was not a real claim.
+The actual paradox, unresolved: the quantity that DOES admit a fair
+comparison — induced input-output behavior from rest — already agrees to
+`~1e-6` (M3's teacher-forced Markov fidelity). Internal stability, also
+directly testable, has been driven to exactly zero unstable modes on two
+checkpoints. Both of the only two things measured so far say M3 is fine;
+transfer still fails on both. **Resolved, 2026-08-18 (`docs/DECISIONS.md`'s TASK B, "third round" —
+read there for the full method and evidence): free response from a
+nonzero initial condition is the discriminating quantity, and it is not
+subtle.** Driven from a matched nonzero `x0` with `u=0` (both a paired
+observer-derived and a `s0=0` internal state tried — the choice barely
+matters), M3's own free-running prediction is already `~77%` relative
+error at the VERY FIRST step, versus `~1e-18`/`~1e-13` for the M0_S4/M1
+controls (same harness, so this validates the method rather than being a
+bug). The frequency-domain transfer function `H_M3(z)` vs `H_true(z)`
+disagrees by a median `27x` at each checkpoint's worst frequency and
+`~3.2x` even near DC — broad, not confined to a narrow band. **This is
+not in tension with the `~1e-6` teacher-forced/Markov fidelity — it is
+the mechanism that explains how both are true at once.** Every fidelity
+metric used elsewhere in this project drives the model through `Bbar`
+from rest; a mode that couples weakly to `Bbar` costs nothing in that
+forced evaluation regardless of its own stability (same "objective blind
+spot" as the RECONCILED entry, restated in input-space rather than
+eigenvalue terms) — but a raw nonzero physical `x0`, injected directly
+into the state rather than reached by driving `Bbar`, has no reason to
+respect that same weak coupling, and once excited, the near-unit-circle
+dynamics amplify it immediately. **Does not explain the case-by-case
+severity gradient** — checked directly, Spearman between free-response/
+frequency-response error and the per-checkpoint DPC ratio is weak and
+non-significant throughout (best case rho=0.325, p=0.079, n=30) — that
+gradient remains open. A companion population-level check (do checkpoints
+that measure better on `n_unstable`/`||K_s||/||K_x||`/etc. actually
+transfer more often?) found a real but weak association when pooling
+across every architecture tried this session, which does NOT replicate
+within the flagship d1030 M3 population and is not, on Task A's own
+direct-intervention evidence above, actionable there.
 
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which

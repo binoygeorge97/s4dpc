@@ -3959,3 +3959,190 @@ GPU: 116.25 T4-min (single vmapped ensemble across all 30 case x seed
 members trained together in one kernel - `training wall time: 2298.3s`
 [~38.3 min] for the GPU-side fit; the remainder is CPU-side PBH/DARE/
 transfer analysis for 30 checkpoints plus environment setup).
+
+## 2026-08-18 — Correction: "mismatch between M3's (Abar,Bbar) and the true plant's (A_d,B_d)" was retracted from CLAUDE.md sec 1 as ill-posed
+
+The dimensions don't match (1030 vs 6) - there is no direct matrix
+comparison to make, so the wording was a category error, not a hedged
+finding. Retracted, not softened; replaced in CLAUDE.md sec 1 with an
+explicit open question (a control-relevant quantity this project hadn't
+yet measured) rather than a named mechanism. TASK B below answers it.
+
+## 2026-08-18 — TASK A (third round): success-vs-failure contrast - a real but modest signal that does not replicate in the flagship M3 population, and is not actionable there
+
+sha: (pending commit) | `docs/success_vs_failure_contrast.csv`
+
+For the first time this session there was real outcome variance to
+contrast: 1/30 stability-penalized M3, 6/30 generic linear SSM, 2/30 S4
+d64, several more from the dimension sweep - alongside a much larger
+failing population. `tools/success_vs_failure_contrast.py` pools every
+checkpoint from every variant identified this session (fullM3, M0_S4, M1,
+stability-penalized M3, the generic linear SSM, S4 d64/d256 - 210
+checkpoints total) using only already-extracted Abar/Bbar/K_lqr/teacher_mse
+sitting on disk from earlier scripts - no new GPU work, pure CPU,
+~5 minutes total (eigendecomposition of ~90 1030-dim matrices is the
+bottleneck). Compares success (LQR-transfer `cost_ratio<100x`) against
+failure on: teacher_mse, `n_unstable` at both RECONCILED-entry thresholds,
+`||K_s||/||K_x||` (LQR gain norm on the internal vs physical block), the
+median internal-block energy fraction of Abar's OWN unstable eigenvectors
+(not the closed-loop transfer matrix's, unlike `eigenmode_decomposition.py`
+- that matrix has zero unstable eigenvalues on every success by
+definition, so it can't be compared across the boundary), Hankel
+singular-value spread (`sigma_6/sigma_1`, since the true systems are
+exactly 6-dimensional - same `markov_from_augmented`/block-Hankel/SVD
+construction as `tools/balanced_truncation.py`), and internal dimension.
+
+**Pooling everything together showed several "significant" separators
+(n_unstable, `||K_s||/||K_x||`, internal_dim, all p<0.01) - but internal_dim
+itself was one of them, which is a confound warning, not a discovery:**
+smaller-dimension variants (S4 d64, the generic SSM) simply have higher
+baseline success rates (established already, Task B/dimension-sweep
+entries above), so they're overrepresented in the success bucket, and any
+quantity that merely tracks "which architecture class is this" will look
+like a separator without being a real within-architecture predictor.
+
+**Stratifying by internal dimension to control for that confound gives a
+much more honest, much weaker picture:**
+
+```
+d1030 (fullM3 + stability-penalized M3, 9 succ / 51 fail):
+  n_unstable (|l|>1.0):       p=0.24   (NOT significant)
+  n_unstable (|l|>0.99):      p=0.06   (marginal)
+  ||K_s||/||K_x||:            p=0.08   (marginal)
+  frac_s of unstable eigvecs: p=0.70   (NOT significant)
+  Hankel sigma6/sigma1:       p=0.74   (NOT significant)
+
+d64-equiv (S4 d64 + generic SSM, 23 succ / 37 fail):
+  n_unstable (|l|>1.0):       p=0.0025  succ median 4 vs fail median 6 (real)
+  ||K_s||/||K_x||:            p=0.54, succ median 10.5 vs fail median 1.6
+                               - REVERSED sign from the d1030 stratum (there
+                               succ=47 < fail=114) - not a consistent
+                               predictor, variant-confounded
+  frac_s of unstable eigvecs: p=0.90   (NOT significant)
+```
+
+**Per-variant-class descriptive check (n too small per class for its own
+significance test, but the direction is informative): every variant class
+EXCEPT fullM3 itself shows lower `n_unstable` in successes** (stability-
+penalized M3: 2.0 vs 3.0; generic SSM: 4.5 vs 6.5; S4 d64: 4.0 vs 6.0; S4
+d256: 6.0 vs 8.0) - **but fullM3, the flagship variant this whole project
+is about, shows no such pattern at all (succ median 9.0 vs fail median
+8.5, n=4 vs 26 - if anything the wrong direction).** Cross-checked directly
+against the free-response error from TASK B below, within fullM3 only
+(n=4 success is too small to power this cleanly): no clean separation
+(p=0.06-0.76 across error horizons and s0-choices), and the one metric
+close to significance (`err_t1`, p=0.06) is confounded by the same n=4
+problem.
+
+**Verdict, stated as plainly as the "say so" instruction asked for: a
+real, weak, population-level association between `n_unstable` and transfer
+outcome exists when pooling across a wide range of architectures and
+dimensions, but it does NOT replicate in the d1030 population this
+project's central claims are actually about, and `||K_s||/||K_x||`
+flips sign across dimension strata - not a real universal predictor,
+variant-confounded.** teacher_mse, unstable-eigenvector energy fraction,
+and Hankel-SV-spread show no signal anywhere, at any dimension. This is
+consistent with, not in tension with, TASK A's second-round direct
+intervention (`docs/DECISIONS.md`'s stability-hinge entry): even where a
+population-level correlation exists elsewhere, it was not, on direct
+manipulation of the flagship variant, an actionable lever.
+
+GPU: 0 (every input already extracted by earlier GPU runs; this is pure
+CPU linear algebra on stored checkpoints).
+
+## 2026-08-18 — TASK B (third round): the free-response test - CONFIRMED, sharper than hypothesized, and resolves the linearization-mismatch paradox
+
+sha: (pending commit) | `docs/free_response_test.csv`, `docs/frequency_response_test.csv`
+
+Every fidelity metric used this project so far - Markov parameters,
+teacher-forced MSE, impulse response - measures the FORCED response from
+rest (`s=0`, driven by input `u` through `Bbar`). Every control rollout
+starts from a genuinely nonzero `x0`. `tools/free_response_test.py` tests
+directly whether M3's response to a nonzero INITIAL CONDITION with `u=0`
+(no forcing at all) matches the true plant, on the already-extracted
+linear operators - M3 is exactly LTI, so this needed no new GPU work.
+
+**Method:** for each case, sample a random seed state (same PRNG
+convention as `lqr_transfer_to_true_plant.py`'s `get_x0_batch`, `[-5,5]^6`,
+batch 50), free-decay it under the TRUE plant (`u=0`) for `T_BURN=50`
+steps to get `x0 := x_true(50)` - the true plants are themselves mildly
+open-loop unstable (`rho(A_true)` 1.00-1.02, matching the project's known
+`rho~1.02` figure), so this `x0` is a healthy, non-degenerate magnitude
+(median norm 6.6-15 across cases), not a numerical-artifact near-zero
+state. `x0` alone doesn't fix the surrogate's internal state, so two
+choices for `s0`, both paired with the SAME `x0` so only `s0` varies:
+(a) **observer-derived** - burn in the SAME recursion
+`lqr_transfer_to_true_plant.py` uses (`s_hat_{k+1}=Asx@x_true+Ass@s_hat`,
+`u=0`) on the true free-decay trajectory for the same 50 steps; (b)
+**s0=0**. From `z0=[x0,s0]`, the surrogate runs its OWN full free dynamics
+(`z_{k+1}=Abar@z_k`, using `Axx`/`Axs` too - this is exactly the "feeds its
+own compounding-error x-prediction back into itself" free-running mode
+already named in `lqr_transfer_to_true_plant.py`'s own docstring, not a new
+mode of using Abar) for 200 steps, compared against the true plant
+continuing its free decay from the same `x0`. Separately, `H_M3(z) =
+C(zI-Abar)^-1 Bbar` vs `H_true(z) = (zI-A_true)^-1 B_true` compared over a
+400-point frequency grid `z=e^{jw}` (one eigendecomposition per checkpoint,
+not 400 direct solves - the direct-solve version was minutes-to-hours
+slower at d1030 and abandoned before running).
+
+**Controls validate the pipeline to machine precision - a bug in the
+harness would have broken these too:**
+
+```
+                s0=observer, err@t=1   err@t=200   |  freq max_rel_diff
+M0_S4 (exact)   5.1e-19                6.1e-18     |  3.2e-16
+M1 (6-dim only) 6.6e-15                9.5e-13     |  1.3e-12
+fullM3          0.77                   1.10        |  27.4 (median), 3.2 near DC
+```
+
+**fullM3 is already ~77% relative error at the VERY FIRST FREE-RUNNING
+STEP, for BOTH s0 choices (0.769 observer, 0.773 zero - the choice barely
+matters, so this isn't an artifact of picking the "wrong" s0)** - not a
+slow leak that compounds over the 200-step horizon, a near-immediate
+failure. The frequency response confirms this isn't confined to a narrow
+band near specific spurious eigenvalues: disagreement is broad, present
+even near DC (median 3.2x, i.e. 320% relative error in the near-steady-
+state gain), peaking at 27x at each checkpoint's own worst frequency.
+
+**This is not a contradiction with the established `~1e-6` Markov/teacher-
+forced fidelity - it's the mechanism that explains how both can be true at
+once, and it is the answer to the open question CLAUDE.md sec 1 was left
+with after this session's earlier ill-posed "linearization mismatch"
+wording was retracted.** Teacher-forced/Markov evaluation always drives
+the model through `Bbar` from a fixed (usually zero or APRBS-near-zero)
+starting state - a mode that couples weakly to `Bbar` contributes
+negligibly to that forced trajectory regardless of its own stability
+(the RECONCILED entry's "objective blind spot" reading, restated here in
+input-space terms rather than eigenvalue terms). A raw nonzero physical
+`x0`, injected directly into the state rather than reached by driving
+`Bbar`, has no reason to respect that same weak coupling - and once such a
+mode is excited, near-unit-circle dynamics amplify it fast, which is
+exactly why the frequency response (which integrates the SAME operator's
+behavior at every horizon at once, not just the truncated Markov window)
+shows the mismatch so starkly even near DC.
+
+**Does NOT explain the per-case severity gradient - checked, not
+assumed:** Spearman between free-response error (`err_t1`, either s0
+choice) or frequency-response `max_rel_diff` and `log10(cost_ratio)`
+across all 30 fullM3 checkpoints is weak and non-significant throughout
+(`err_t1`/observer: rho=0.325, p=0.079 - closest to significant and still
+short; `err_t1`/zero: rho=0.183, p=0.333; `err_t200`: rho~0, p>0.88 both
+s0 choices; frequency `max_rel_diff`: rho=-0.239, p=0.203). This extends
+CLAUDE.md sec 1's existing "no tested spectral quantity correlates with
+the per-case DPC ratio" to free-response and frequency-response error too
+- the mechanism explains the QUALITATIVE paradox (why forced-response
+fidelity and free-running failure coexist), not WHY some cases fail worse
+than others, which remains open.
+
+**Verdict: hypothesis confirmed, more sharply than posed.** Free response
+from a genuinely nonzero physical initial condition - exactly what any
+controller must contend with at every rollout's first step - is where
+M3's spurious near-unit-circle modes actually show up; the finite-horizon,
+input-driven fidelity metrics used everywhere else in this project were
+structurally blind to them, not by bad luck but because those metrics
+never excite the modes that matter. CLAUDE.md sec 1 updated to state this
+directly.
+
+GPU: 0 (CPU-only; the 400-point frequency grid uses one eigendecomposition
+per checkpoint instead of 400 direct solves, which would not have fit in
+the platform's compute budget at d1030).
