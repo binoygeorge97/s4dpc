@@ -215,6 +215,14 @@ def main() -> None:
             K_x, K_s = K_lqr[:, :D_X], K_lqr[:, D_X:]
 
             b_own, rho_own = robust_margin_and_rho(Abar, Bbar, -K_lqr)
+            # robust_margin_and_rho returns b=None when control.norm's H-inf
+            # computation itself fails to converge (a real, expected edge
+            # case, not a bug) - coerce to NaN HERE, once, so every
+            # downstream use (print, save, CSV, summary aggregation
+            # including "> 0" comparisons) is uniformly safe. NaN compares
+            # False to everything in both python and numpy, so "> 0" never
+            # raises, unlike None.
+            b_own = np.nan if b_own is None else b_own
 
             n_s = n_total - D_X
             Asx, Ass, Bs = Abar[D_X:, :D_X], Abar[D_X:, D_X:], Bbar[D_X:, :]
@@ -222,6 +230,7 @@ def main() -> None:
             B_open = np.vstack([B_true, Bs])
             K_direct = np.hstack([-K_x, -K_s])
             b_transfer, rho_transfer = robust_margin_and_rho(A_open, B_open, K_direct)
+            b_transfer = np.nan if b_transfer is None else b_transfer
             ratio_transfer, finite = simulate_transfer_cost(
                 A_true, B_true, A_open, B_open, K_direct, x0_batches[case], oracle_costs[case]
             )
