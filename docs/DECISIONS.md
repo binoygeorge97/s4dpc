@@ -4272,3 +4272,143 @@ possible without re-identifying or re-exporting. Flagging rather than
 silently assuming which outcome was wanted.
 
 GPU: 0.
+
+## 2026-08-18 — BOOKKEEPING: superseding the J_x=0.003 figure
+
+The `J_x ~ A_d, error ~0.003` figure referenced this round predates this
+repository (the "first hypothesis document," not locatable in this git
+history or its full log - previous entry). Recorded here so the project
+has one number for this quantity, not two silently contradictory ones:
+**the 91.7% Axx-vs-A_d relative Frobenius error (this session, computed
+directly from the already-validated augmented-operator extraction)
+supersedes the 0.003 figure.** Whatever the original measurement did
+differently (evaluation point, s handling, normalization - all
+unconfirmed, previous entry), this session's number is measured against
+the SAME `A_d` used everywhere else in this project's control-side work,
+on the SAME 30 real, trained fullM3 checkpoints the rest of this
+session's findings are built from - not a fresh, unverifiable number from
+outside the repository.
+
+## 2026-08-18 — TASK A (fifth round): the (Axx, Axs) split is exactly non-identifiable from teacher-forced training, for every timestep after the first - the gauge-freedom reframing holds, precisely characterized
+
+sha: (pending commit) | `docs/nonidentifiability_spectrum.csv`, `docs/nonidentifiability_null_directions.csv`
+
+The user's reframing: the 91.7% Axx error isn't "the model got the
+dynamics wrong," it's gauge freedom - training only constrains
+`x_next = Axx@x + Axs@s + Bx@u` along the manifold traced out by the real
+training trajectory (where `s` is a FIXED, deterministic function of that
+SAME trajectory's history, evolving via separate parameters `Asx, Ass, Bs`
+that don't involve `Axx`/`Axs` at all). Any `(Axx, Axs)` agreeing with the
+true dynamics on that manifold fits equally well - the loss can't see the
+difference. Asked to make this a theorem, not a hypothesis - reported
+honestly below, including where the first, more literal attempt at "stack
+(x,s) and take the SVD" did NOT cleanly show what the theory predicts, and
+what a more targeted test found instead.
+
+**Mathematical reduction verified first, since the user's two asks turned
+out to be the same computation:** because `x_next` is exactly linear in
+`(Axx, Axs)` holding `s_t` fixed (a genuine fact of this project's
+augmented-state formalism, not an approximation), the Gauss-Newton
+Hessian of the training loss restricted to `(Axx, Axs)` coordinates, per
+output row, is exactly `Z^T Z` where `Z = [X | S]` is the stacked
+training-trajectory data matrix - identical for every output row, since
+the design vector `z_t = [x_t; s_t]` doesn't depend on which row is being
+predicted. A null vector of `Z` is therefore an EXACT flat direction of
+this real, local Gauss-Newton Hessian, not a heuristic - "stack (x,s) and
+find the null space" (part 1) and "compute the Gauss-Newton null space
+restricted to (Axx,Axs)" (part 2) are the same calculation, and this
+script does it once.
+
+**First attempt - raw SVD of `Z = [X | S]` (real fullM3/M0_S4 training
+data, `L=100` per case, `s4dpc.data.generate_microgrid_trajectory`,
+DATA_SEED=42, matching real identification exactly) - honestly reported
+as inconclusive, not force-fit into the desired result:**
+
+```
+fullM3 Z=[x,s] eff_rank(1e-6): median 100 of 100 possible (full row rank -
+  same as a RANDOM 100x1030 Gaussian control matrix, also rank 100)
+bottom-10 near-null right-singular vectors: median x-block energy fraction
+  0.0009 (essentially ALL s, negligible x-mixing)
+```
+
+At the raw-SVD level, `Z` looks close to full rank, and its weakest
+directions are almost pure-`S`, not genuine x-s mixing - on its face, this
+does NOT support the gauge-freedom reading. Cause identified before
+concluding anything from it: `S` alone (1024 columns, only 100 training
+samples) is trivially capacity-rich relative to the sample count, so most
+of its "weak" directions are just unexplored `S`-capacity unrelated to
+`X` at all - a generic-overparameterization artifact (the SAME phenomenon
+this project already found and named in the D-only 490-dim null-space
+work), not evidence about `(Axx,Axs)` collinearity specifically.
+
+**Targeted test, precise and decisive: for each physical-state
+perturbation direction `e_i` (i=1..6), does SOME combination of `S`'s
+columns reproduce `-x_traj[:,i]` on the real training data?** Solved via
+ordinary least squares, `S @ v_s ~= -x_traj[:, i]`, all 6 cases x 5 seeds,
+both fullM3 and M0_S4:
+
+```
+INCLUDING t=0:  median relative residual = 0.0310  (S mostly, not fully, compensates)
+EXCLUDING t=0:  median relative residual = 0.0000  (EXACT compensation, to ~1e-16-2e-5)
+```
+
+**The entire residual is concentrated at the single t=0 training sample,
+where `s_0=0` by construction (the "cold start" convention used
+everywhere in this project) structurally prevents ANY compensation -
+that one sample is the ONLY thing in the entire 100-step training
+trajectory that constrains `Axx` at all. For every t>=1 (99 of the 100
+training samples), `S`'s column space contains an EXACT combination
+(residual at the level of floating-point noise) that reproduces any
+specific physical-state perturbation's trajectory-level signature.** This
+is the theorem-shaped statement: on 99% of the real training signal, the
+`(Axx, Axs)` split is exactly non-identifiable, not approximately.
+Confirmed identical (median 0.0310 including t=0, ~0.0000/max 2.1e-5
+excluding it) for M0_S4 - **the SAME gauge orbit is present for the hand-
+constructed model too. M0_S4 doesn't avoid this ambiguity; it happens, by
+construction, to sit at the one point of the orbit (Axs=0 exactly) that
+is transfer-safe. Identification has no gradient toward that point,
+because the objective is exactly constant across the whole orbit (proven
+above, not merely observed) - this is the user's framing, verified, not
+just restated.**
+
+**Unifying four measurements as one fact, seen four ways, per
+instruction:**
+
+1. M3's Hankel singular-value spectrum has no cliff at rank 6 (balanced-
+   truncation entry, 2026-08-13) - a system whose excess ~1024 dimensions
+   were inert would show one; M3's don't, because they aren't inert.
+2. `Axx` is 91.7% off from `A_d` (this session, earlier entry) - the model
+   landed on a point of the orbit far from the transfer-safe one.
+3. `||K_s||/||K_x||` is ~91x median for fullM3 (this session's success/
+   failure contrast, `docs/success_vs_failure_contrast.csv`) - the LQR
+   gain built on top of this realization inherits the same imbalance,
+   leaning overwhelmingly on the (uncontrolled, mismatched-to-truth)
+   internal-state channel.
+4. (This entry) `S` exactly spans whatever's needed to reproduce any
+   physical-state perturbation, for 99 of 100 real training samples - the
+   mechanism that makes 1-3 possible, not merely correlated with them.
+
+A model with a correct `Axx` and an inert excess realization would show a
+Hankel cliff at rank 6, an `Axx` close to `A_d`, and `||K_s||/||K_x||`
+near zero - M3 shows none of the three, and (4) is the reason none of
+them can be otherwise: the training objective genuinely cannot
+distinguish a correct-Axx/inert-excess solution from the one M3 landed
+on, except through a single sample's worth of signal at t=0.
+
+**Caveat, stated rather than smoothed over:** this establishes exact
+non-identifiability of `(Axx, Axs)` specifically, given the REST of the
+model's parameters (`Asx, Ass, Bs`, and the S4 recursion producing them)
+already fixed at their trained values - it does not by itself prove
+anything about identifiability of the FULL parameter set jointly (a much
+larger claim, not attempted here). It also does not explain why gradient
+descent, among the entire flat orbit, lands where it does rather than
+nearer the safe point - "no gradient signal either way" is consistent
+with landing anywhere on the orbit, including by chance near the good
+point, and M3 never does (91.7% median, minimum 56.9% across 30
+checkpoints) - that specific question (is there a soft bias, e.g. from
+initialization or optimizer dynamics, toward one region of the orbit) is
+not answered here.
+
+GPU: 0 (pure CPU; the training-trajectory regeneration matches real
+identification's `DATA_SEED=42` exactly, and every extracted matrix was
+already sitting on disk from earlier GPU work this session).

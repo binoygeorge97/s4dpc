@@ -151,15 +151,39 @@ checkpoints (range 57%-140%) — already wrong at the most local, single-
 step level, not a pattern that emerges over a horizon. `||Axs||`
 (sensitivity to the internal S4 state) is 5-15x larger than `||Axx||`
 in every checkpoint: M3's x-prediction is dominated by the internal-state
-channel, not the x-input channel. Best-supported (not independently
-verified) explanation: teacher-forced training never presents x and s as
-independently varying, so the objective has no way to constrain `Axx`
-alone — only their joint action on the correlated (x,s) pairs actually
-seen in training. **An open item from this same round: a prior "J_x ~
-A_d, error ~0.003" measurement was referenced but could not be located
-anywhere in this repository or its git history** (searched exhaustively)
-— if it exists outside this repo, reconciling it against the `~92%`
-figure above needs the original source, not a guess.
+channel, not the x-input channel. **A prior "J_x ~ A_d, error ~0.003"
+measurement was referenced but could not be located anywhere in this
+repository or its git history — superseded by the 91.7% figure above
+(`docs/DECISIONS.md`'s BOOKKEEPING entry), not left as two contradictory
+numbers.**
+
+**Reframed and proven, 2026-08-18 (`docs/DECISIONS.md`'s fifth-round TASK
+A):** not "the model got the dynamics wrong" but gauge freedom, and this
+is now a proven fact, not a hypothesis. `x_next = Axx@x + Axs@s + Bx@u` is
+exactly linear in `(Axx, Axs)` holding `s_t` fixed, so the Gauss-Newton
+null space restricted to those coordinates is exactly the null space of
+the stacked training data `Z=[X|S]` — a real theorem, not an analogy.
+Direct test on the real training trajectory (`s4dpc.data`,
+`DATA_SEED=42`, matching real identification exactly): for every
+timestep `t>=1` (99 of the 100 training samples), `S`'s column space
+contains an EXACT combination (residual ~1e-16 to 2e-5) reproducing any
+specific physical-state perturbation — the ONLY sample that constrains
+`Axx` at all is `t=0`, where `s_0=0` by the project's own cold-start
+convention structurally forbids any compensation. Confirmed identical for
+M0_S4: the same gauge orbit exists there too — M0_S4 doesn't avoid the
+ambiguity, it sits by hand construction at the orbit's one transfer-safe
+point (`Axs=0` exactly), and identification has no gradient toward that
+point because the objective is exactly constant across the whole orbit.
+Four measurements are one fact, seen four ways: no Hankel cliff at rank 6
+(the excess ~1024 dims aren't inert), `Axx` 91.7% off `A_d` (which point
+of the orbit training landed on), `||K_s||/||K_x||` ~91x median (the LQR
+gain inherits the same imbalance), and this entry's exact t>=1
+compensation (the mechanism that makes the other three possible, not
+merely correlated with them). Caveat: this proves non-identifiability of
+`(Axx,Axs)` given the rest of the model fixed, not joint identifiability
+of the whole parameter set — and it does not explain why training lands
+91.7% off rather than by chance nearer the safe point (a possible soft
+optimizer/init bias, not investigated).
 
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
