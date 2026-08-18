@@ -3507,3 +3507,70 @@ follow-up entry.
 
 GPU: 0 (Task B is arithmetic on an existing CSV; the DECISIONS reframing
 itself needed no computation).
+
+## 2026-08-17 — DECISIVE RESULT: M3's provably-optimal controller, with an ideal observer, does not stabilize the true plant. 0/30, no exceptions. Pure linear algebra.
+
+sha: (pending commit) | `docs/lqr_transfer_to_true_plant.csv` | `tools/lqr_transfer_to_true_plant.py`
+
+The direct test of the reframed claim (previous entry): drive M3's own
+internal (S4-hidden-state) dynamics with the TRUE, measured trajectory
+(an exact, non-learned observer built from M3's own identified matrices -
+not a GRU trying to approximate one), apply the SAME full-state LQR gain
+already proven to stabilize M3's own closed loop (`b_own > 0` on 30/30
+checkpoints, previous LQR entry), and check whether the combined system
+stabilizes the TRUE plant. All 6 cases x 5 seeds, plus M0_S4 and M1 as
+controls, identical construction. No neural net, no BPTT, no optimizer, no
+capacity limit anywhere in this computation - closed-loop eigenvalues of a
+fixed linear system, full stop.
+
+**Result: 0/30 for M3. 30/30 for M0_S4. 30/30 for M1. Zero exceptions in
+either direction.**
+
+```
+variant   n_stable_on_true_plant   median cost_ratio (unstable ones: astronomical)
+M1        30/30                    1.005x  (every case, every seed)
+M0_S4     30/30                    1.005x  (every case, every seed)
+fullM3     0/30                    25,300x  (min 11.1x, max 9.67e12x - case 5 seed 0)
+```
+
+`rho` (transferred closed-loop spectral radius) for M3 ranges 1.0028 to
+1.0851 across all 30 - never once back inside the unit circle, not even
+close, not even the best case (case 1 seed 4, ratio "only" 11.1x is still
+unambiguously unstable, `rho`=1.0028). M0_S4 and M1 both land at essentially
+exactly the true-plant LQR's own achievable cost (1.005x) in every single
+case - not approximately right, correct to 3 decimal places, every time.
+
+**This is the central finding of the investigation.** A controller that is
+PROVABLY OPTIMAL for the surrogate (not a trained approximation - the exact
+LQR solution) - equipped with the most generous possible reconstruction of
+the surrogate's own internal state (not a learned estimator with any
+approximation error - the exact linear predictor implied by the surrogate's
+own identified dynamics, driven by ground truth) - fails to control the true
+plant, unstably, in literally every case and seed tested. Nothing about the
+GRU, BPTT, the DPC objective's finite horizon, the optimizer, warm-starting,
+k-step identification, or curriculum design is implicated anywhere in this
+argument - all of those were this session's earlier hypotheses, and all of
+them are now ruled out simultaneously, because this result doesn't route
+through any of them. The failure is fully explained by two established
+facts about what M3 IS as an identified object: (1) it has genuinely
+unstable internal modes with no counterpart in the true plant (this
+session's closed-loop-instability and PBH entries), and (2) stabilizing
+those modes requires control action that, even under the most favorable
+possible construction, does not transfer - the surrogate's own optimal
+fix for its own problem actively destabilizes reality.
+
+**Why M0_S4 and M1 are the right controls, restated with this result in
+hand:** M0_S4 shares M3's exact architectural blind spot (x-only GRU,
+1030-dim augmented realization, controller never observes its own S4 state)
+and controls perfectly - ruling out "the controller can't see internal
+state" as sufficient on its own (previous entry). M1 has no internal state
+at all - ruling out any argument that depends on the augmented realization's
+existence per se. Between them they isolate the one thing M3 has that
+neither control does: LIVE, UNSTABLE internal dynamics with no physical
+counterpart, io-identified into existence by fitting a 1030-dimensional
+model to a 6-dimensional system with nothing constraining the unreachable
+majority of that capacity to stay inert.
+
+GPU: 0. ~100 minutes total CPU wall-clock (60 fresh 1030-dim DARE solves,
+M3 and M0_S4, ~95-120s each, cached to `docs/lqr_cache/` for reuse; M1's 30
+6-dim solves are near-instant).
