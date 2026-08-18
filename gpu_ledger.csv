@@ -45,3 +45,5 @@ date,kernel_slug,accelerator,minutes
 2026-08-18,s4dpc-dimension-sweep,T4,2.49
 2026-08-18,s4dpc-dimension-sweep,T4,3.01
 2026-08-18,s4dpc-dimension-sweep,T4,9.29
+2026-08-18,s4dpc-stability-smoke,T4,1.13
+2026-08-18,s4dpc-linear-ssm-smoke,T4,1.08
