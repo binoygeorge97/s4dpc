@@ -180,6 +180,22 @@ def train_ensemble_with_stability_penalty(block_config, keys, inputs_grid, targe
     ensemble = init_ensemble(keys)
     optimizer = nnx.Optimizer(ensemble, optax.adamw(LEARNING_RATE, weight_decay=0.0), wrt=nnx.Param)
 
+    # SEPARATE decode=True graphdef for the power-iteration penalty: `decode`
+    # is fixed at construction (s4dpc/blocks.py's ConfigurableBlock docstring
+    # - a s4-nnx S4LayerEnsemble requirement), and single-step calls (what
+    # power iteration needs) are only valid in decode=True/stepped mode, not
+    # the decode=False/conv mode _build_model uses for efficient
+    # whole-sequence teacher-forced training. Same param STRUCTURE either
+    # way (decode only changes __call__'s forward-pass behavior, not what
+    # parameters exist) - this is the exact pattern tools/nu_gap_export.py
+    # and tools/m3_spurious_modes.py already use to evaluate a
+    # decode=False-trained model in stepped mode.
+    step_graphdef, _ = nnx.split(
+        StackedModel(block_config=block_config, d_input=D_INPUT, d_output=D_OUTPUT, n_layers=N_LAYERS,
+                     decode=True, rngs=nnx.Rngs(params=jax.random.PRNGKey(0))),
+        nnx.Param,
+    )
+
     def loss_fn(model, power_key):
         graphdef, params, rest = nnx.split(model, nnx.Param, ...)
         power_keys = jax.random.split(power_key, inputs_grid.shape[0])
@@ -190,9 +206,11 @@ def train_ensemble_with_stability_penalty(block_config, keys, inputs_grid, targe
             pred, _ = m(inp, states)
             mse = jnp.mean((pred - tgt) ** 2)
 
+            m_step = nnx.merge(step_graphdef, p)
+
             def f(z):
                 x, s = _unpack(z)
-                x_next, (s_next,) = m(jnp.concatenate([x, jnp.zeros((D_U,), dtype=jnp.float64)]), [s])
+                x_next, (s_next,) = m_step(jnp.concatenate([x, jnp.zeros((D_U,), dtype=jnp.float64)]), [s])
                 return _pack(x_next, s_next)
 
             z0 = jnp.zeros((Z_DIM,), dtype=jnp.float64)
