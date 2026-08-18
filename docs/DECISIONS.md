@@ -3675,3 +3675,66 @@ consistent, not uniform across every single checkpoint.
 
 GPU: 0 (all three checks are pure CPU, reusing `docs/lqr_cache/`'s already-
 solved K_lqr matrices - no new DARE solves).
+
+## 2026-08-18 — TASK C: does the reality gap scale with over-parameterization? Real trend, not a mitigation
+
+sha: (pending commit) | kaggle: s4dpc-dimension-sweep (v3, after two setup bugs)
+| `docs/dimension_sweep_summary.csv`
+
+Re-identified M3 at ~64 and ~256 real internal dims (`d_model=4,N=8` and
+`d_model=8,N=16`), all 6 cases x 5 seeds, and ran the identical PBH-unstable-
+count + LQR-synthesis + observer-transfer pipeline as the decisive result,
+against the existing ~1024-dim (`d_model=16,N=32`) data. Two setup bugs on
+the way (`python-control` missing from the Kaggle environment - every prior
+use of it this session ran locally; then a `None`-vs-`NaN` formatting crash
+when `control.norm`'s H-infinity solve legitimately failed to converge on
+one checkpoint) - both fixed, both logged as diverged attempts, not deleted
+(2.49 + 3.01 T4-min before the working v3 run).
+
+```
+scale   internal_dims   median_teacher_mse   median_n_unstable   n_stable/30   median_ratio
+d64     64              3.39e-03             5.0                 2/30         3.34e+02
+d256    256             1.04e-05             7.5                 1/30         1.22e+04
+d1030   1024            7.03e-06             8.5                 0/30         2.53e+04
+```
+
+**Does not vanish at minimal dimension - the failure dominates at every
+scale tested, including the smallest (28/30 still fail even at d64).**
+That rules out "just shrink your S4 identifier" as a reliable fix. But
+there IS a real, directionally consistent trend across all three scales,
+not nothing: unstable-mode count, transfer-success rate, and median
+failure severity all move the same direction as dimension shrinks
+(5.0/2 stable/334x -> 7.5/1 stable/12,223x -> 8.5/0 stable/25,300x).
+
+**The honest complication: teacher_mse (prediction fidelity) is NOT held
+constant across the sweep, and this matters for how much weight the trend
+can bear.** d64 fits ~500x worse than d1030 (3.4e-3 vs 7.0e-6) - its
+improvement is entangled with being a markedly worse-fitting model, exactly
+the confound this script's own docstring flagged as a risk before running
+it. d256, by contrast, fits comparably to d1030 (1.0e-5 vs 7.0e-6, within
+1.5x - genuinely the fairer comparison) and STILL shows a real gap from
+d1030: transfer success 1/30 vs 0/30, median ratio roughly 2x milder
+(12,223x vs 25,300x). That fidelity-matched pair is the cleanest evidence
+in this entry, and it shows a modest, real effect - not a vanishing one.
+
+**Verdict: over-parameterization is a real contributing factor (more
+internal capacity gives identification more room to place unstable,
+uncontrolled-for internal dynamics), but reducing it is not, on this
+evidence, an actionable mitigation on its own.** Even the fairest
+comparison available (d256 vs d1030) moves the failure rate from "always"
+to "almost always" and the severity from "catastrophic" to "still
+catastrophic, somewhat less so." A practitioner reading this table should
+not conclude "use a smaller S4 and the problem goes away" - at best,
+"smaller may help somewhat, and does not solve it." Restating this
+precisely because the hoped-for outcome (a vanishing effect at minimal
+dimension, turning the finding into a mitigation) is not what the data
+shows, and the previous entries' pattern (every hoped-for fix this session
+- warm-starting, k-step identification, horizon extension - failing to
+resolve the core problem) extends to this one too, more informative than
+the alternative would have been.
+
+GPU: 14.77 T4-min total (2.49 + 3.01 min on the two setup-bug attempts,
+9.29 min on the successful run - identification itself is fast at these
+smaller dimensions, ~95-100s per scale for all 6 cases x 5 seeds; the CPU-
+side PBH/DARE/transfer analysis runs inline in the same kernel, seconds per
+checkpoint at these dimensions).
