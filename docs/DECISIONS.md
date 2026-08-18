@@ -4581,3 +4581,61 @@ only fullM3.
 GPU: 0 (pure CPU OLS + DARE solves; ~2 hours wall-clock, dominated
 entirely by 60 DARE solves at d1030, ~100-150s each - the same cost this
 session already established for every d1030 LQR-transfer construction).
+
+## 2026-08-18 — FRAMING CORRECTION for TASK C, before it goes anywhere near the paper
+
+Flagged by the user immediately after TASK C landed, before drafting -
+recorded as a correction to how the result is described, not a change to
+the result itself (the 30/30 exact-precision transfer numbers above
+stand unchanged).
+
+**The problem with the natural framing:** "Axs->0, Axx->A_d" makes M3's
+x-readout functionally equivalent to M1's plain linear regression (TASK
+C's own entry already said this). Described as "we fixed the learned
+surrogate," a reviewer has an immediate, correct rebuttal: the
+demonstrated cure for "an over-parameterized surrogate fails" is "make it
+behave like the minimal model" - classical order selection / model-order
+reduction, a solved problem, not a new result. Framed that way, TASK C
+would be claiming to have solved something system identification already
+solved decades ago.
+
+**The defensible claim, narrower and still real - write it this way, not
+the broader one:** this project did not discover that small models
+transfer better than big ones (already known, and this project's own
+dimension-sweep entry already found reducing SIZE alone does not fix
+this - 5-8.5 unstable modes essentially flat from d64 to d1030). What
+this session's TASK A/TASK C pair actually shows, and what a reviewer
+cannot wave away with "that's just order selection":
+
+1. **The missing constraint is identified precisely, not guessed at:**
+   `(Axx, Axs)` is EXACTLY non-identifiable from teacher-forced data for
+   every timestep after the first (TASK A, proven, not observed).
+2. **The objective has NO GRADIENT toward the safe point of that
+   ambiguity** - not "gradient descent failed to find it," but "the loss
+   surface is exactly flat along the entire orbit containing it," proven
+   by the same Gauss-Newton-null-space argument, not inferred from
+   training curves.
+3. **A MODIFIED objective (dither-augmented data) recovers the safe
+   point exactly** - this is the actual result: identifiability, once
+   restored, produces the safe gauge; the fact that the safe gauge here
+   happens to coincide with M1's model is a property of these particular
+   (fully-observed, Markov-in-`x`) plants, not the mechanism being
+   demonstrated.
+
+**Do not claim "we fixed learned surrogates."** The claim this project
+can defend is: a specific, provable identifiability failure in how these
+surrogates are trained explains a control-relevant failure mode that
+prediction-accuracy metrics cannot see, and restoring identifiability
+(by any means - dither here, truncation if TASK D below confirms it)
+removes the failure. That the restored model happens to be small is a
+consequence of these plants' structure, not the point being proven.
+
+**How this changes what TASK D (next entry) is actually testing:** not
+"does a smaller model work" (already answered, no) but "does restoring
+identifiability via a DIFFERENT mechanism (removing excess, unidentified
+content post-hoc via truncation, no retraining) ALSO produce the safe
+gauge, or is dither-based retraining the only route to it." Framed this
+way, TASK D is a genuine second test of the SAME mechanism, not a rerun
+of the dimension-sweep question.
+
+GPU: 0.
