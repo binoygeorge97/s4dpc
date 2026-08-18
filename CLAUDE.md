@@ -571,3 +571,41 @@ with the reasoning. Reviewers ask exactly these questions.
   writing days; it is future work
 - Manually transcribing numbers into LaTeX instead of generating `\input`-able tables
 - Writing the research log retroactively on day 6
+
+---
+
+## 12. TACC operational flow
+
+Added 2026-08-18 alongside `launch/tacc/` — the Lonestar6 execution layer.
+Full detail lives in `launch/tacc/README.md`; this section is the short
+version so it's visible without leaving CLAUDE.md. This section documents
+operational flow only — it changes nothing in §1-§11 above.
+
+**The path a run takes:**
+
+```
+EE-119537 (local orchestration)
+  → GitHub (push to main)
+  → TACC: git pull --ff-only (launch/tacc/sync_tacc.sh, never edits source there)
+  → gpu-a100-dev smoke (launch/tacc/smoke_test.sh)
+  → gpu-a100-small production (launch/tacc/submit_all.sh)
+  → Slurm (launch/tacc/job.slurm — platform-only wrapper around `python -m s4dpc.sweep`)
+  → CSV/result retrieval (launch/tacc/pull_results.sh, into $WORK then locally)
+  → docs/LOG.md (append git SHA + CSV path + conclusions/anomalies, same as Kaggle runs)
+```
+
+Also holds, same as every other golden rule in this file:
+
+- TACC's Python is `python/3.12.11` via `module load` — the default
+  `python3`/3.9.7 on TACC must never be used for this project.
+- Scientific code is never edited on TACC — only cloned/pulled. `s4dpc/sweep.py`
+  remains the only entry point on every platform (§3 rule 1).
+- The user controls scientific experiment definitions (variant, cases, seeds,
+  epochs, architecture, `--wandb` mode). Claude does not invent or alter these.
+- Claude may monitor and collect the results of approved jobs (`status.sh`,
+  `pull_results.sh`).
+- Claude may not independently launch follow-up experiments on TACC — every
+  `sbatch` submission is something the user explicitly asked for.
+- Resource escalation — a bigger queue (`gpu-a100`/`gpu-h100`), more nodes,
+  longer walltime, or more concurrent jobs than already approved — requires
+  explicit user approval before Claude submits it.
