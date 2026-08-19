@@ -130,15 +130,19 @@ def rollout_linear(
 
 
 def init_batched_state(model: StackedModel, batch_size: int) -> list[jax.Array]:
-    """Per-trajectory S4 recurrent state, batch axis prepended. Built
-    directly at the x64-flag-matching complex dtype rather than via
-    model.init_state(), which hardcodes complex64 regardless of
-    jax_enable_x64 (s4dpc/model.py) - s4dpc.diagnostics.zero_states works
-    around the same issue for the unbatched (diagnostics) case; this
-    mirrors it for the batched (rollout) case. Silent downcast risk
-    otherwise: the surrogate's trained weights and the controller are
-    float64/complex128 under x64, but the S4 recurrent state carried
-    through rollout_learned's BPTT would stay complex64 without this."""
+    """Per-trajectory S4 recurrent state, batch axis prepended.
+
+    Not redundant with model.init_state() even now that init_state()
+    itself follows jax_enable_x64 (s4dpc/model.py): init_state()'s shape
+    is (d_model, N) - no batch_size parameter exists or is planned there,
+    since the unbatched shape is also what identify.py's conv-mode
+    training and diagnostics.zero_states need. This function's reason to
+    exist has narrowed to exactly the batch-axis prepending
+    ((batch_size, d_model, N)) that rollout_learned's jax.vmap over a
+    batch of independent trajectories requires - the dtype-matching half
+    of its original docstring is now redundant with init_state()'s own
+    fix, kept here only because building the batched zeros directly is
+    simpler than calling init_state() and re-broadcasting."""
     complex_dtype = jnp.complex128 if jax.config.jax_enable_x64 else jnp.complex64
     n = model.block_config.N
     shape = (batch_size, model.block_config.d_model, n)

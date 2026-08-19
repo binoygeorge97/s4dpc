@@ -77,9 +77,14 @@ LOCKFILE_SHA="$(sha256sum "$REPO_ROOT/requirements.lock" | awk '{print $1}' | cu
 
 echo
 echo "== summary =="
-echo "$PROBE_JSON" | python3 - "$GIT_SHA" "$LOCKFILE_SHA" <<'PYEOF'
-import json, sys
-d = json.load(sys.stdin)
+# PROBE_JSON goes through the environment, not stdin: `python3 -` already
+# reads ITS OWN SCRIPT from stdin, so a heredoc attached to the same
+# command consumes stdin for the script source - a piped `echo "$PROBE_JSON" |`
+# into that same command never reaches json.load(sys.stdin) inside the
+# script, which sees EOF immediately instead (found running this on TACC).
+PROBE_JSON="$PROBE_JSON" python3 - "$GIT_SHA" "$LOCKFILE_SHA" <<'PYEOF'
+import json, os, sys
+d = json.loads(os.environ["PROBE_JSON"])
 git_sha, lockfile_sha = sys.argv[1], sys.argv[2]
 pkgs = d.get("packages", {})
 print(f"Python version   : {d.get('python_version')}")

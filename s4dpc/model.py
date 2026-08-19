@@ -45,9 +45,24 @@ class StackedModel(nnx.Module):
         ]
 
     def init_state(self, N: int | None = None) -> list[jax.Array]:
+        """Zero S4 recurrent state, one (d_model, N) complex array per
+        layer. Complex dtype follows the global jax_enable_x64 flag
+        (complex128 under x64, complex64 otherwise) - same one-line check
+        already used by s4dpc.control.init_batched_state and
+        s4dpc.identify._cast_params for the same reason: identify.py casts
+        every OTHER param to match this flag, so a state that stayed
+        hardcoded at complex64 under x64 would silently mix precisions
+        inside jax.lax.scan (decode=True) once the surrounding Abar/Bbar
+        are complex128 - jax.lax.scan requires the carry's dtype to stay
+        fixed across iterations, so this actually errors rather than
+        silently downcasting. Computed inline rather than imported from
+        identify.py/control.py: both of those already import StackedModel
+        from this module, so importing back would be circular - this is
+        the "smallest local dtype choice" the one-line check amounts to."""
         n = N if N is not None else self.block_config.N
         shape = (self.block_config.d_model, n)
-        return [jnp.zeros(shape, dtype=jnp.complex64) for _ in range(self.n_layers)]
+        complex_dtype = jnp.complex128 if jax.config.jax_enable_x64 else jnp.complex64
+        return [jnp.zeros(shape, dtype=complex_dtype) for _ in range(self.n_layers)]
 
     def __call__(
         self, x: jax.Array, states: list[jax.Array] | None = None
