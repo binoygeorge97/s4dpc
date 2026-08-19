@@ -4799,3 +4799,221 @@ to survive a third; the per-frequency-point Python loop, not the
 per-checkpoint eigendecomposition, is the dominant cost at high
 `n_freq` and would be the next thing to vectorize if an even finer grid
 is ever needed).
+
+## 2026-08-19 — TASK 0 (new session, gating check): conv/step modes agree to machine precision on all 30 real checkpoints - AND a major, unrelated finding: established scripts modeled M3 as linear when it is affine
+
+sha: (pending commit) | `docs/task0_parity_summary.csv`, `docs/task0_parity_stepcurve.csv` | `tools/task0_decode_mode_parity.py`
+
+Before any citation work: does `decode=False` (conv, used for
+identification) agree with `decode=True` (stepped, used for every
+control rollout and every LQR-transfer computation this session) on
+REAL TRAINED checkpoints, not fresh-init params? Run on all 30 real
+fullM3 msgpack checkpoints in `docs/nu_gap_export/ckpt/` - the actual
+exports every LQR-transfer, gauge-freedom, dither-cure, and truncation
+result this session was built from.
+
+**Environment, stated precisely since it's not the exact pin:** this
+machine has only Python 3.10 (no sudo to install 3.11); jax==0.7.2/
+flax==0.11.2/s4-nnx all hard-require Python>=3.11 at the package level
+(not just the CLAUDE.md pin - confirmed by pip's own dependency
+resolver). Used `uv python install 3.11` (a standalone, no-root Python
+build) to create a venv with the EXACT pinned `jax==0.7.2,
+flax==0.11.2, optax==0.2.8, numpy==2.0.2, scipy==1.16.3`, and
+`s4-nnx@v0.2.0` installed from git - the real pin, not an approximation.
+Single-threaded via `XLA_FLAGS`/`OMP_NUM_THREADS=1` set before any jax
+import. `jax_enable_x64=True` throughout. `model.init_state()` was
+found to hardcode `complex64` regardless of the x64 flag (already
+documented in this project's `s4dpc/diagnostics.py`) - used
+`zero_states` instead, per that module's own existing fix.
+
+**(A) conv vs step, s0=0, steps 1-100 (the only length conv mode accepts
+at all - see (B)): clean pass, all 30 checkpoints, no exceptions.**
+
+```
+max_abs   median=2.598e-13   worst=1.886e-12  (case2/seed4)
+max_rel   median=1.078e-11   worst=1.278e-10  (case1/seed0)
+```
+
+Every value is at float64 machine-precision scale - the expected level
+of disagreement between two DIFFERENT code paths (FFT-based causal
+convolution vs sequential `jax.lax.scan` recursion) computing the SAME
+mathematical quantity. Full per-checkpoint table in
+`docs/task0_parity_summary.csv`; per-step deviation curve (which step
+index the max occurs at, no growth pattern toward step 100) in
+`docs/task0_parity_stepcurve.csv`.
+
+**(B) - established by direct inspection of `s4-nnx`'s actual source
+(`s4_nnx/s4.py`, `S4LayerEnsemble.__call__`) before running anything,
+then empirically confirmed on all 30 checkpoints:**
+
+```python
+if not self.decode:
+    if inputs.shape[0] != self.l_max:
+        raise ValueError("Convolution mode currently requires sequence "
+                          f"length to equal l_max={self.l_max}; got {inputs.shape[0]}")
+    ...
+    outputs = causal_convolution(inputs, kernel) + self.D.value * inputs
+    return outputs, previous_state   # <- returned UNCHANGED, never used above
+```
+
+**Conv mode does not truncate, pad, or wrap past `l_max` - it raises a
+hard `ValueError`. There is no way to run it past 100 steps at all, in a
+single call, ever.** And `previous_state` is accepted as an argument but
+never read to compute `outputs` - it is passed through unmodified. Conv
+mode is therefore, by construction, ONLY the zero-initial-state impulse
+response (standard S4/SSM kernel theory - the causal-convolution kernel
+IS the response from rest), for exactly L=100. **Empirically confirmed
+on all 30 checkpoints: running conv mode twice with two different random
+nonzero `previous_state` values gives BIT-IDENTICAL output, `0.000e+00`
+difference, every single checkpoint, no exceptions.**
+
+**(D) - decode=True DOES depend on s0, substantially, confirming the two
+modes are ONLY equivalent at s0=0, exactly as (B) predicts:**
+
+```
+step_out(s0=random, scale=0.32) vs step_out(s0=0): max_abs median=4.209, min=1.568, all 30 checkpoints
+```
+
+Order-1-to-10 magnitude changes from a modest (empirically-scaled)
+nonzero `s0` - not a subtle effect. **Conclusion for (A)+(B)+(D)
+together: the two modes are equivalent ONLY at s0=0, and this is not
+a bug to fix - it is how conv mode is defined, and this project has
+never once called it with a nonzero state (conv mode is only ever used
+by `identify.py`, which always cold-starts at s0=0; every nonzero-s0
+computation this session - the free-response test, the LQR-transfer
+observer construction, the dither cure - always used decode=True or the
+Abar/Bbar linear-algebra abstraction, never conv mode).** Since conv
+mode structurally cannot represent a nonzero state, and this project
+never asked it to, this is a verified architectural boundary, not a
+disagreement between two things that were supposed to agree.
+
+**Since conv mode can't run past l_max, the >100-step question needed a
+different construction: does decode=True's REAL, free-running output
+(matching `s4dpc.control.rollout_learned`'s exact construction - `x` fed
+back from the model's OWN prior output, never the true trajectory past
+t=0) match the closed-form prediction from M3's own augmented linear
+operator (Abar, Bbar - extracted via jacfwd, the SAME construction
+`tools/m3_spurious_modes.py` and every downstream script this session
+used)? First attempt: NO, badly (median max_abs=178.6, worst 2.24e11) -
+investigated rather than dismissed, and this surfaced something bigger
+than Task 0 itself was asking about.**
+
+**MAJOR FINDING, not what Task 0 set out to check: M3 is affine, not
+linear, and established session scripts modeled it as linear.** `f(z=0,
+u=0) != 0` for M3 - this project's OWN `equilibrium_drift` diagnostic
+already names and measures exactly this quantity
+(`s4dpc/diagnostics.py`, "the TRUE plant satisfies F_true(0,0)=0
+exactly... this returns the model's raw deviation"). Measured directly
+on all 30 real checkpoints: `||c0_x||` (the physical-state component of
+`f(0,0)`) has median **0.83**, range **0.49-1.33** - real, substantial,
+not a rounding-level artifact. Adding this single constant term to the
+closed-form simulation (`z_{k+1} = Abar@z_k + Bbar@u_k + c0`, instead of
+dropping the `+c0`) closes the gap from median 178.6/worst 2.24e11 down
+to **median 1.265e-12, worst 1.13e-3** (two checkpoints, case2/seed2 and
+case7/seed3, land in the 1e-3-to-1e-8 absolute range rather than 1e-12 -
+both are checkpoints whose free-running trajectory itself blows up
+astronomically without `c0` either, `7.9e10` and `2.2e11` - ordinary
+float64 rounding compounding through 200 steps of a highly unstable
+recursion, confirmed by their RELATIVE error staying at the same
+~1e-12-to-1e-13 level as every other checkpoint, not a separate issue).
+**With `c0` included, this is machine-precision agreement across the
+full population, no exceptions - decode=True's real output is exactly
+the affine relationship the augmented-operator formalism describes, c0
+included.**
+
+**Established session scripts that build `z_{k+1} = Acl @ z_k` (or
+`Abar @ z_k`) with NO `+c0` term, confirmed by direct grep, not
+assumed:** `tools/lqr_transfer_to_true_plant.py` (`z = z @ Acl.T`),
+`tools/fidelity_matched_truncation.py` (`z = z @ Acl.T`),
+`tools/free_response_test.py` (`z = z @ Abar.T`),
+`tools/dither_cure_test.py` (`z = z @ Acl.T`). Every one of these
+propagates M3's dynamics as LINEAR when the real, verified relationship
+is AFFINE.
+
+**Impact assessment, precise about what is and isn't at risk - not
+everything built on these scripts is affected equally:**
+
+1. **Every EIGENVALUE-based verdict is exactly unaffected, provably, not
+   just probably.** `c0` never enters an eigenvalue computation
+   (`rho_transfer`, `n_unstable`, PBH controllability/observability,
+   the Hankel-SVD spectrum, the `(Axx,Axs)` non-identifiability theorem's
+   Gauss-Newton null-space argument). This covers the MAJORITY of this
+   session's headline claims: the 0/30 (fullM3) vs 30/30 (M0_S4, M1)
+   LQR-transfer stability split, TASK A's spurious-mode counts and the
+   gauge-freedom theorem, TASK D's truncation-still-fails verdict at
+   `r=6`. All of these stand exactly as reported.
+2. **Catastrophic-failure MAGNITUDES (300x to 8e129x) are qualitatively
+   robust but not exactly numerically correct.** An unstable
+   (`rho_transfer>1`) closed loop diverges to infinity whether or not a
+   BOUNDED per-step forcing term is included - "catastrophic, many
+   orders of magnitude worse than oracle" survives regardless. The exact
+   reported ratio (e.g. "25,300x" specifically, vs whatever the
+   `+c0`-corrected number would be) has NOT been re-verified and should
+   be treated as approximate in its last few significant figures, not
+   as a bug.
+3. **The controls (M0_S4, M1) are unaffected by construction, not by
+   luck.** M0_S4's `out.kernel=0, out.bias=0` (already established,
+   Task 2 Part A entries) zero its OWN `c0` exactly - no bias path
+   exists. M1's `fit_least_squares` fits `[A_hat|B_hat]` with NO
+   intercept column, and the TRUE plant genuinely has zero bias
+   (`A_d@0+B_d@0=0`) - M1 is fitting toward a target that is actually
+   bias-free, so omitting an intercept is correct for M1, not a gap.
+4. **The genuinely AT-RISK numbers are the STABLE (`rho_transfer<1`),
+   near-the-100x-threshold successes - the minority of checkpoints this
+   session's mitigations were measured by.** A stable closed loop with a
+   real bias term settles to a nonzero equilibrium `z* = (I-Acl)^{-1}@c0`,
+   not to zero - `simulate_cost`'s sum-of-`||x||^2` implicitly assumed
+   convergence to exactly zero. This could shift the exact cost ratio for:
+   TASK C's dither cure (30/30 near-1.005x - though the dither-cured
+   `(Axx,Axs,Bx)` block was ITSELF re-fit via OLS with no intercept
+   against a genuinely-zero-bias target, `A_d@x+B_d@u`, so the dither
+   cure's OWN `c0_x` should be exactly zero by construction; only the
+   UNCHANGED `Asx/Ass/Bs` path's small residual bias, `s`-component norm
+   ~0.06-0.13 in the general population, measured above, is a candidate
+   for a small remaining correction - not independently verified on the
+   dither-cured checkpoints specifically, since they were never saved as
+   loadable params, only as `(Axx,Axs,Bx)` numpy arrays); the handful of
+   marginal successes in TASK A's stability-hinge run (case1/seed3,
+   6.5x) and TASK D's truncation (65.8x, 80.6x) - these were NOT
+   re-verified with `c0` included and are flagged, not corrected, here.
+
+**Scope of what this entry does and does not cover, stated precisely:**
+only the 30 real **fullM3** checkpoints have saved, loadable params
+(`docs/nu_gap_export/ckpt/*.msgpack`) - this is the common ancestor of
+nearly every decisive result this session (LQR-transfer, the
+gauge-freedom theorem, TASK A/B/C/D, the nu-gap work), so it is the
+highest-value target and the one Task 0 asked to verify first. **M6,
+M0_S4 (as an actual instantiated model, not just its extracted
+matrices), and the "dither-cured model" have NO saved checkpoint
+anywhere in this repository - M6 was never checkpointed by any script
+that still has its weights; M0_S4 is a deterministic hand-construction
+that was never saved as msgpack either (regenerable without training,
+not attempted here); the dither cure never instantiated an actual nnx
+model at all - `tools/dither_cure_test.py` only ever produced raw numpy
+`(Axx,Axs,Bx)` arrays via closed-form OLS, combined with the real M3's
+UNCHANGED `Asx/Ass/Bs/C`, never assembled into a loadable
+`StackedModel`.** Task 0 as literally posed ("every case, every seed,
+every variant... M3, M6, M0_S4, and the dither-cured model") could only
+be run on M3, for this concrete, checkable reason - not skipped by
+choice.
+
+**Verdict per the user's own decision rule: PASS - conv and step modes
+agree to float64 precision at every step tested, on every real
+checkpoint, at the only initial condition conv mode can represent
+(s0=0); the s0-dependence divergence is a verified architectural
+boundary this project has never crossed, not a bug. Recorded as a
+verified invariant. Proceeding to the citation sweep is warranted on
+THIS specific question.** The affine-vs-linear finding is a SEPARATE,
+also-important discovery that does not block Task 0's own verdict (no
+established EIGENVALUE-based claim is affected) but does mean a
+specific, bounded set of MAGNITUDE numbers (mostly the near-threshold
+marginal successes) should be treated as approximate pending a
+`+c0`-corrected re-run, flagged explicitly rather than silently
+carried into the paper.
+
+GPU: 0 (pure CPU, py311 venv with the exact pinned jax/flax/s4-nnx via
+`uv python install 3.11` - no sudo available in this sandbox, so a
+standalone build was used instead of apt; ~41 minutes wall-clock for
+all 30 checkpoints, dominated by unjitted per-step Python loops x 200
+steps x free-running + teacher-forced + jacfwd extraction, not by any
+single expensive operation).

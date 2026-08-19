@@ -237,6 +237,36 @@ general-purpose cure; TASK C's dither cure remains the one route that
 worked, and by elimination this confirms it works BECAUSE it restores
 identifiability, not because it happens to produce a small model.**
 
+**VERIFIED INVARIANT, 2026-08-19 (`docs/DECISIONS.md`'s TASK 0) —
+conv-mode (identification) and stepped-mode (every control/LQR-transfer
+result above) agree to float64 machine precision, on all 30 real trained
+fullM3 checkpoints, at s0=0 (the only state conv mode can represent —
+verified directly from `s4-nnx` source: conv mode hard-rejects any
+sequence length != l_max, and its `previous_state` argument is accepted
+but never used, confirmed empirically bit-identical across random
+states on every checkpoint).** Every result above that depends on this
+equivalence is safe. **Companion finding, not a threat to the above but
+requiring its own caveat: M3 is affine, not linear — `f(0,0)!=0`
+(`equilibrium_drift`, median norm 0.83 across the 30 checkpoints) — and
+`lqr_transfer_to_true_plant.py`, `free_response_test.py`,
+`dither_cure_test.py`, and `fidelity_matched_truncation.py` all
+propagate `z=z@Acl.T` with no `+c0` term.** Every EIGENVALUE-based
+verdict in this document (`rho_transfer`, `n_unstable`, PBH, the Hankel
+spectrum, the gauge-freedom theorem) is exactly unaffected — `c0` never
+enters an eigenvalue computation. Catastrophic-failure magnitudes stay
+qualitatively "astronomically bad" regardless (an unstable loop diverges
+whether or not a bounded forcing term is added) but their exact reported
+ratios haven't been re-verified with `c0` included. The controls (M0_S4,
+M1) are unaffected by construction (M0_S4's bias path is zeroed by hand;
+M1 and the true plant are both genuinely bias-free). **The numbers
+actually at risk are the near-100x-threshold marginal successes** —
+TASK C's dither-cured checkpoints (though the dither-cure's OWN re-fit
+targeted a genuinely bias-free quantity, so its risk is smaller and
+localized to the unchanged `Asx/Ass/Bs` path's own small residual bias),
+TASK A's one stability-hinge success (6.5x), and TASK D's two truncation
+successes (66x, 81x) — none of these were re-verified with `c0`
+included; treat their exact ratios as provisional pending that check.
+
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
 is the entire reason for using linear plants.
