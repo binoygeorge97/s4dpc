@@ -1,0 +1,15 @@
+{
+  "variant": "M3",
+  "case": 7,
+  "seed": 0,
+  "teacher_mse": 1.8187420700467287e-06,
+  "config": {
+    "epochs": 40000,
+    "d_model": 16,
+    "N": 32,
+    "n_layers": 1,
+    "l_max": 100
+  },
+  "git_sha": "ce75a5b",
+  "lockfile_sha": "aeaac02b0546"
+}

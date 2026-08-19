@@ -1,0 +1,21 @@
+{
+  "variant": "dither_cured",
+  "case": 4,
+  "seed": 1,
+  "source_checkpoint": "M3_case4_seed1.msgpack",
+  "source_checkpoint_exists_locally": true,
+  "recipe": {
+    "method": "closed-form OLS with intercept on (x_traj,s_traj,u_traj) real training data plus N_DITHER synthetic (x,s_random,u)->true_x_next samples",
+    "n_dither": 2000,
+    "dither_rng_seed": 0,
+    "x_synth_range": 5.0,
+    "aprbs_range": [
+      -10.0,
+      10.0
+    ],
+    "s_synth_scale": 0.4693066967459117,
+    "note": "Asx/Ass/Bs/C copied UNCHANGED from the source M3 checkpoint - only (Axx,Axs,Bx,c0_x) are re-fit. Not a StackedModel - see module docstring for why this architecture cannot represent this model."
+  },
+  "git_sha": "4c5293e",
+  "lockfile_sha": "aeaac02b0546"
+}

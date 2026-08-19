@@ -1,0 +1,15 @@
+{
+  "variant": "M0_S4",
+  "case": 1,
+  "seed": 4,
+  "teacher_mse": 0.0,
+  "config": {
+    "d_model": 16,
+    "N": 32,
+    "n_layers": 1,
+    "l_max": 100,
+    "construction": "hand-zeroed block, tools/controller_m0_s4.py._build_m0_s4 - deterministic, no training"
+  },
+  "git_sha": "7bb54f1",
+  "lockfile_sha": "aeaac02b0546"
+}

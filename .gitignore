@@ -4,11 +4,20 @@ wandb/
 venv/
 *.msgpack
 !tests/fixtures/*.msgpack
+!docs/nu_gap_export/ckpt/*.msgpack
 
 # raw per-(variant,case,seed) nu-gap export artifacts (large, intermediate -
 # the analysis-ready output is docs/nu_gap_export_summary.csv, which IS
 # tracked). Also the orchestrator's own operational log/status files.
-docs/nu_gap_export/
+#
+# EXCEPTION (2026-08-19, TASK D): ckpt/ and dither_cured/ are the actual
+# checkpoints for M3/M0_S4/M6/dither-cured models - small (~5MB combined,
+# not the multi-MB-per-file Abar/Bbar npz exports this rule was written
+# for) and load-bearing for reproducibility, so they are tracked despite
+# living under this otherwise-ignored directory.
+docs/nu_gap_export/*
+!docs/nu_gap_export/ckpt/
+!docs/nu_gap_export/dither_cured/
 docs/n1000_case3/
 docs/lqr_cache/
 docs/dimension_sweep/
