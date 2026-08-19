@@ -4412,3 +4412,307 @@ not answered here.
 GPU: 0 (pure CPU; the training-trajectory regeneration matches real
 identification's `DATA_SEED=42` exactly, and every extracted matrix was
 already sitting on disk from earlier GPU work this session).
+
+## 2026-08-18 — TASK B (fifth round): the nu-gap integer-guard bug hunt found a real one - the MAJORITY of "failed" rows are not confirmed winding violations
+
+sha: (pending commit) | `docs/nugap_integer_check.csv`
+
+`tools/nu_gap_analysis.py`'s `nu_gap()` calls the comparison invalid
+(forcing `delta_nu=1.0`) whenever `abs(wno + eta_Phat - eta_P) >= 0.4`,
+without distinguishing a clean nonzero integer (genuine winding
+violation - `delta_nu=1` is the metric's own correct maximal verdict, not
+a missing value) from a non-integer reading (the winding-number
+computation itself broke down - the honest report is indeterminate, not
+1.0). Reran the exact same comparison (`tools/nugap_integer_check.py`,
+after a performance rewrite noted below) and binned every failed row by
+distance to the nearest integer.
+
+**Bug hunt result: real, not a false alarm, matching the shape of this
+project's prior bugs-as-results.** Of 27/90 rows that failed the current
+guard: 8 are a clean nonzero integer (genuine violation, correctly
+reported); 19 - the majority - are NOT close to any integer (distances
+0.10 to 0.47, several sitting right at the edge of the current 0.4
+threshold itself). Winding numbers of a continuous curve avoiding the
+origin are topologically forced to be integers - a reading that lands
+0.4-0.47 away from the nearest one (as far as a value in this range CAN
+be from an integer) is not a fractional winding number, it is the
+computation failing to resolve one. **The current implementation's
+`delta_nu=1` verdicts, when they fire, should not be trusted uncritically
+- most of them are not confirmed as genuine winding violations by this
+check.**
+
+```
+(a) clean NONZERO integer (delta_nu=1 correct):        8/27
+(b) clean ZERO but still failed the guard (never seen): 0/27
+(c) not close to any integer (indeterminate):          19/27
+```
+
+**Performance note, not a separate finding but required to run this at
+all:** the original `nu_gap()`'s `_freq_response` does one direct
+`np.linalg.solve` per frequency point; at d1030 x 2000 points x ~90
+checkpoints this did not complete in practical time locally (killed after
+11 CPU-minutes with zero checkpoints finished). Reimplemented with one
+eigendecomposition per checkpoint (`H(z) = (CV) diag(1/(z-lambda)) (V^-1
+B)` over the whole frequency grid at once, same technique as this
+session's `free_response_test.py`) - ~11.7s/checkpoint, ~18 minutes
+total. Same math, verified against the original formula; only the
+per-frequency solve was replaced.
+
+**Not yet determined: whether a finer frequency grid resolves the 19
+indeterminate rows into clean integers (a resolution/numerical-precision
+fix) or whether they stay non-integer at higher resolution (a deeper
+problem with the phase-unwrapping approach itself).** Flagged as the
+natural next step, not attempted here - this entry's job was the bug
+hunt, not the fix. Whatever the resolution, **every `delta_nu=1` value
+already used elsewhere in this project's nu-gap analysis
+(`docs/nu_gap_analysis.csv`) should be treated as provisional until this
+is resolved**, since most of them were likely computed under the same
+unresolved guard.
+
+GPU: 0 (pure CPU; ~18 minutes wall-clock after the eigendecomposition
+rewrite).
+
+## 2026-08-18 — TASK C (fifth round): the dither cure works - exactly, completely, and confirms the pre-registered prediction with no hedging needed
+
+sha: (pending commit) | `docs/dither_cure_test.csv`
+
+**Implementability, decided before running anything, per instruction.**
+M3's S4 layer state is a linear recursion's hidden vector - no gating
+nonlinearity anywhere in M3 (no norm/activation/glu at all), unlike a
+GRU/LSTM's tanh-bounded state. A linear system's state space has no
+implicit manifold constraint; any point in that vector space is a
+mathematically valid state for the same step function, and this
+project's own `zero_states` helper (`s4dpc/diagnostics.py`) already
+treats it as a plain overwritable array (that's how cold-start `s0=0` is
+implemented everywhere). **Conclusion: genuinely independent random
+sampling of `s` is implementable here, not merely perturbation** - the
+one thing requiring care is the SCALE, calibrated below from the real
+empirical RMS of `s` reached during actual teacher-forced training
+(~0.32, measured directly), not an arbitrary range.
+
+**Method - no GPU, no gradient descent, per TASK A's exact-linearity
+result:** M3's x-prediction is exactly linear in `(Axx, Axs, Bx)` holding
+`s_t` fixed, so re-fitting this sub-block under a modified data
+presentation is ordinary least squares. Combined design matrix: the REAL
+on-manifold `(x_t, s_t, u_t) -> x_true_{t+1}` data (same trajectory M3
+actually trained on) plus `N_DITHER` synthetic off-manifold samples
+`(x_synth, s_synth, u_synth) -> x_true_next`, where `x_synth`/`u_synth`
+are drawn from realistic ranges and `s_synth` is drawn INDEPENDENTLY at
+the real empirical scale; the target is computed from the TRUE plant
+directly (`A_d@x_synth + B_d@u_synth`) - well-defined regardless of
+`s_synth` because the true plant has no internal state for `s` to stand
+in for. Re-solved OLS for `(Axx, Axs, Bx)` on the combined data; kept the
+real M3's own `(Asx, Ass, Bs, C)` - the S4 recursion itself - completely
+unchanged. Reduced from the originally-planned 5-point dither sweep to 2
+points (0, 2000) after timing: a single DARE solve at d1030 did not
+finish within 100s locally, and 150 solves (5 x 30 checkpoints) would
+have taken multiple hours; 2 points across all 6 cases x 5 seeds (60
+solves, ~2 hours) still answers the pre-registered question.
+
+**Result - exact, all 30 checkpoints, no exceptions:**
+
+```
+                median axx_rel_err   median ||Axs||   transfer-stable   median ratio
+n_dither=0      0.8037               0.681             6/30             4,548x
+n_dither=2000   0.0000 (2.8e-15)     0.000 (1.6e-14)   30/30             1.005x
+```
+
+**Pre-registered prediction confirmed exactly, not approximately:** with
+enough dither, `Axx -> A_d` and `Axs -> 0` to floating-point precision
+(2.8e-15, 1.6e-14 - machine noise, not "close"), and EVERY checkpoint
+transfers at essentially oracle-optimal cost (median 1.005x, i.e. 0.5%
+above the true LQR-optimal cost). This is not a partial improvement like
+every other mitigation tried this session (dimension reduction, the
+stability-hinge penalty) - it is a complete fix, and it follows directly
+from TASK A's exact-linearity result: with 2000 richly-independent
+synthetic samples dominating 100 real ones, the only `(Axx,Axs,Bx)`
+achieving near-zero residual on ALL of them simultaneously is the one
+where `Axs` carries no signal (since `s_synth` carries none) and `Axx,Bx`
+match the true plant exactly (since that's what the synthetic samples
+directly measure). Not a coincidence; the theorem from this round's TASK
+A entry predicts precisely this once `s`'s independence from `x` is
+actually enforced by the data.
+
+**Two things this result does NOT show, stated plainly so it isn't
+overclaimed:**
+
+1. **`Axs -> 0` effectively reduces M3's x-prediction, for this fully-
+   observed/Markov-in-x setting, to exactly M1's own linear regression**
+   (`Axx~A_d, Bx~B_d`, no memory contribution at all). The fix works by
+   making the surrogate stop using the very thing (S4 memory) that
+   distinguishes it from M1 - not by teaching the memory to be used
+   correctly. This is not a weakness of the finding (it's the CORRECT,
+   provably loss-consistent outcome once `s` genuinely can't help predict
+   `x_next` beyond what `x_t` itself already gives), but it means this
+   round's result validates the MECHANISM (dither restores
+   identifiability), not a general recipe for "how to make S4 memory
+   trustworthy" - for THIS class of plant, the theorem-optimal answer is
+   to not lean on memory for the x-readout at all.
+2. **The synthetic targets were computed directly from the known `A_d,
+   B_d`** - valid here because this project's "true plant" is a known,
+   queryable simulator (exactly the setting active system identification
+   with a digital twin, or hardware-in-the-loop testing, provides) - NOT
+   a recipe usable against a genuinely unknown black-box real plant from
+   passively-collected data alone, where dither would have to come from
+   actual richer physical experiments, not a formula.
+
+**SCOPE NOTE for the paper, per instruction - the real boundary this
+result sets up, not a footnote:** this works because every plant in this
+project is fully observed and Markov in `x` - the true state IS the
+6-dimensional physical state, so a memory path that carries nothing
+`x_t` doesn't already contain costs literally nothing to zero out.
+**For a partially observed system, `s` must carry genuine information
+(the part of the true state not visible in `x_t` alone) and cannot be
+randomized freely without destroying real signal - the cure as stated
+here is unavailable.** This makes the partially-observed case the actual
+open problem this session's results point toward, not a generalization
+of what's been fixed here.
+
+**Not yet done, natural next steps:** validating this via actual
+gradient-descent retraining of the full S4 model with dithered
+presentation (this entry used a closed-form OLS re-fit of just the
+readout block, which is the theorem-exact test but not yet confirmed to
+survive the messier, jointly-optimized, non-convex full-model setting);
+a finer dither sweep to find the minimum `N_DITHER` needed (only 0 and
+2000 were tested); and whether this generalizes to the generic linear
+SSM and dimension-swept S4 checkpoints from earlier this session, not
+only fullM3.
+
+GPU: 0 (pure CPU OLS + DARE solves; ~2 hours wall-clock, dominated
+entirely by 60 DARE solves at d1030, ~100-150s each - the same cost this
+session already established for every d1030 LQR-transfer construction).
+
+## 2026-08-18 — FRAMING CORRECTION for TASK C, before it goes anywhere near the paper
+
+Flagged by the user immediately after TASK C landed, before drafting -
+recorded as a correction to how the result is described, not a change to
+the result itself (the 30/30 exact-precision transfer numbers above
+stand unchanged).
+
+**The problem with the natural framing:** "Axs->0, Axx->A_d" makes M3's
+x-readout functionally equivalent to M1's plain linear regression (TASK
+C's own entry already said this). Described as "we fixed the learned
+surrogate," a reviewer has an immediate, correct rebuttal: the
+demonstrated cure for "an over-parameterized surrogate fails" is "make it
+behave like the minimal model" - classical order selection / model-order
+reduction, a solved problem, not a new result. Framed that way, TASK C
+would be claiming to have solved something system identification already
+solved decades ago.
+
+**The defensible claim, narrower and still real - write it this way, not
+the broader one:** this project did not discover that small models
+transfer better than big ones (already known, and this project's own
+dimension-sweep entry already found reducing SIZE alone does not fix
+this - 5-8.5 unstable modes essentially flat from d64 to d1030). What
+this session's TASK A/TASK C pair actually shows, and what a reviewer
+cannot wave away with "that's just order selection":
+
+1. **The missing constraint is identified precisely, not guessed at:**
+   `(Axx, Axs)` is EXACTLY non-identifiable from teacher-forced data for
+   every timestep after the first (TASK A, proven, not observed).
+2. **The objective has NO GRADIENT toward the safe point of that
+   ambiguity** - not "gradient descent failed to find it," but "the loss
+   surface is exactly flat along the entire orbit containing it," proven
+   by the same Gauss-Newton-null-space argument, not inferred from
+   training curves.
+3. **A MODIFIED objective (dither-augmented data) recovers the safe
+   point exactly** - this is the actual result: identifiability, once
+   restored, produces the safe gauge; the fact that the safe gauge here
+   happens to coincide with M1's model is a property of these particular
+   (fully-observed, Markov-in-`x`) plants, not the mechanism being
+   demonstrated.
+
+**Do not claim "we fixed learned surrogates."** The claim this project
+can defend is: a specific, provable identifiability failure in how these
+surrogates are trained explains a control-relevant failure mode that
+prediction-accuracy metrics cannot see, and restoring identifiability
+(by any means - dither here, truncation if TASK D below confirms it)
+removes the failure. That the restored model happens to be small is a
+consequence of these plants' structure, not the point being proven.
+
+**How this changes what TASK D (next entry) is actually testing:** not
+"does a smaller model work" (already answered, no) but "does restoring
+identifiability via a DIFFERENT mechanism (removing excess, unidentified
+content post-hoc via truncation, no retraining) ALSO produce the safe
+gauge, or is dither-based retraining the only route to it." Framed this
+way, TASK D is a genuine second test of the SAME mechanism, not a rerun
+of the dimension-sweep question.
+
+GPU: 0.
+
+## 2026-08-18 — TASK D: fidelity-matched truncation - the deferred experiment, run - the gauge is the whole explanation, and truncation is cleanly ruled out
+
+sha: (pending commit) | `docs/fidelity_matched_truncation.csv`, `docs/fidelity_matched_truncation_spectrum.csv`
+
+The experiment flagged as outstanding since the 2026-08-13 balanced-
+truncation entry ("the only experiment that would actually test the
+hypothesis - not yet run"), now framed precisely by the TASK C correction
+above: does removing EXCESS realization content (regardless of which
+gauge produced it) fix transfer, or is the gauge the whole story?
+
+**Method:** Hankel-SVD/ERA (`tools/balanced_truncation.py`'s machinery,
+reimplemented directly on the already-extracted `docs/nu_gap_export`
+matrices - no jax/flax needed). For each fullM3 checkpoint: `target_fidelity`
+= that SPECIFIC checkpoint's own max-abs Markov-parameter error vs the
+true plant, at FULL 1030 dimension, over the h=1..40 window
+(`N_HANKEL=20` requires `G_1..G_40`) - stated precisely because this
+number is NOT the "~1e-6" figure quoted elsewhere in this project (that
+figure is from a shorter horizon/different metric); at this h<=40 window
+it ranges ~0.018-0.70 across checkpoints (M3's own mild instability
+compounds error over 40 steps far more than over 1 or 10). Sweep
+truncation order `r=6..60`, take the smallest `r` whose ERA-reconstructed
+model reaches that target; run the identical observer/LQR-transfer
+construction used everywhere else this session on the truncated system.
+M1 (already 6-dim) and M0_S4 (`Abar[:6,6:]=0` exactly, so full-dimension
+fidelity is already near machine precision) as controls. **Bug found and
+fixed en route:** `balanced_truncation.py`'s `to_output_normal_form`
+assumed `Cr` square, only valid at `r=6` - crashed the moment any
+checkpoint needed `r>6`. Generalized to `to_partial_output_normal_form`
+(similarity transform so the first 6 coordinates of the reduced state
+read out as the physical output exactly, remaining `r-6` coordinates
+whatever basis completes it - standard construction, verified against
+the `r=6` case first).
+
+**Result - clean, decisive, matches the "gauge is the whole explanation"
+branch:**
+
+```
+          median r_chosen   transfer-stable   median ratio
+fullM3    6                 2/30              1.21e13
+M0_S4     6                 30/30             1.005x
+M1        6                 30/30             1.005x
+```
+
+26/30 checkpoints already reach their own fidelity target at `r=6` - the
+TRUE plant's own order, zero excess dimensions by definition; the
+remaining 4 need only `r=7, 7, 12, 20`. **Regardless of `r`, 28/30
+catastrophically fail** (ratios from ~280x up to 8.08e129), and the 2
+successes are themselves marginal (65.8x, 80.6x - both well above
+oracle-optimal, barely under the 100x success threshold). Since the
+fidelity target used here is LOOSER than the "~1e-6" figure elsewhere
+(making `r=6` easier to reach than a stricter target would), this is if
+anything a GENEROUS test in truncation's favor, and it still fails almost
+everywhere.
+
+**Verdict: excess realization content is not the culprit. A completely
+independent construction method (Hankel-SVD/ERA on Markov parameters,
+nothing to do with the (Axx,Axs) sub-block extraction TASK A/C worked
+with) applied at the MINIMAL possible order, fidelity-matched to M3's own
+achieved accuracy, reproduces the same catastrophic failure. This rules
+out truncation as a general-purpose second cure, cleanly - not "truncation
+didn't help enough," but "truncation, done as well as this project knows
+how, changes almost nothing."** This also generalizes TASK A's finding
+past the specific `(Axx,Axs)` gauge: the problem isn't confined to one
+particular decomposition of M3's parameters - ANY reduction of M3's own
+data to a compact realization, by any of the two independent methods this
+project has now tried, lands somewhere that doesn't transfer. TASK C's
+dither cure remains the one route that worked, and per the FRAMING
+CORRECTION above, that is because it directly restores identifiability
+(supplies the information teacher-forced data structurally cannot) - not
+because it happens to produce a small model. TASK D confirms the second
+half of that reasoning by elimination: producing a small, fidelity-matched
+model WITHOUT restoring identifiability does not work.
+
+GPU: 0 (pure CPU; ~4 minutes total for all 90 checkpoints x the full
+r-sweep - truncation orders stay small, so DARE solves are fast, unlike
+this session's d1030 solves).
