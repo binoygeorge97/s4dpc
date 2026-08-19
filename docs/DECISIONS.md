@@ -5144,3 +5144,122 @@ GPU: 0 (pure CPU throughout; ~75 minutes wall-clock, entirely from 30
 fresh d1030 DARE solves for the dither-cure correction - the
 LQR-transfer/free-response correction, TASK B below, reuses cached
 `K_lqr` and needed no new DARE solves at all).
+
+## 2026-08-19 — TASK B (bias-term round): original-vs-corrected side by side, all four affected scripts, 30 fullM3 checkpoints each - no verdict flips, magnitudes move 5-30% except one script that needed no correction at all
+
+sha: (pending commit) | `docs/bias_corrected_lqr_transfer.csv`, `docs/bias_corrected_free_response.csv`,
+`docs/bias_corrected_dither_cure.csv`, `docs/lqr_transfer_to_true_plant.csv` (orig),
+`docs/free_response_test.csv` (orig), `docs/dither_cure_test.csv` (orig),
+`docs/fidelity_matched_truncation.csv` (unmodified, no correction applies)
+
+Per instruction: put the original and `+c0`-corrected numbers next to
+each other, state plainly which headline numbers move. All four
+scripts, medians/extrema over the same 30 fullM3 checkpoints unless
+noted:
+
+| script | quantity | original | corrected | verdict |
+|---|---|---|---|---|
+| `lqr_transfer_to_true_plant.py` | `cost_ratio` median | 25,300x | 30,266x | unchanged: catastrophic failure, all 30 |
+| | `cost_ratio` max | 9.67e12 | 8.74e12 | unchanged |
+| | `rho>1` count | 30/30 | 30/30 | unchanged - closed loop is unstable, not merely offset |
+| | `\|\|z*\|\|` | n/a (not computed) | undefined for all 30 (`rho>=1`, no fixed point) | the correction this quantity was FOR does not even apply here - these diverge, they do not settle at an offset |
+| `free_response_test.py` | `err_t1` median | 0.7690 | 0.7526 | unchanged - ~77% first-step error is robust to the correction |
+| | `err_t200` median | 1.045 | 1.016 | unchanged |
+| | `err_t200` max | 2.57e10 | 2.14e10 | unchanged - same 2 checkpoints diverge astronomically in both |
+| `dither_cure_test.py` | `ratio_transfer`/`ratio_corrected` | 1.0050x (all 30) | 1.0050x (all 30) | **unchanged to 4 decimal places, exactly** - see TASK A above |
+| | `\|\|z*_x\|\|` | n/a | 0.000000 (all 30) | zero, not small - offset is exactly recovered away |
+| `fidelity_matched_truncation.py` | `ratio_transfer` (2 successes) | 65.8x, 80.6x | **no correction applies** | ERA is structurally bias-free (see TASK A above) - the "original" number already was the correct one |
+
+**What moves and what doesn't, stated plainly:** the LQR-transfer and
+free-response numbers shift 5-30% in either direction per checkpoint
+(visible in the underlying per-row CSVs) but every median, every
+extremum, and every pass/fail verdict is unchanged after correction.
+The dither cure needed correction least of all (identically 1.0050x)
+because its own re-fit already drives `c0_x` to machine-zero as part of
+the same procedure that fixes `Axx`/`Axs` (TASK C above) - there is no
+separate bias to correct for. Truncation needed no correction because
+ERA cannot produce a nonzero `c0` in the first place. **No conclusion
+in this session flips under the corrected accounting - only the LQR-
+transfer/free-response magnitudes move, and only within their own
+existing catastrophic-failure or robust-error ranges, never across a
+pass/fail boundary.**
+
+One incidental finding surfaced while assembling this table, not asked
+for but worth recording: `fidelity_matched_truncation.py`'s case4/seed3
+"success" (65.8x) has `rho_transfer=1.011 > 1` - i.e. that reduced
+closed loop is technically UNSTABLE, and its "success" cost is a
+finite-horizon artifact (the LQR cost horizon does not run long enough
+to reveal the divergence), not a converged low-cost trajectory. Only
+the other truncation success (case7/seed2, 80.6x, `rho_transfer=0.9994`)
+is a genuinely stable closed loop. This does not change TASK D's
+verdict (truncation is still ruled out as a general cure - 28/30 fail
+regardless), but it means only one of the two previously-reported
+"successes" was ever a clean one; the other was already a partial
+artifact of the evaluation horizon, independent of anything to do with
+`c0`.
+
+GPU: 0 (pure CPU; this entry assembles numbers already computed by TASK
+A above and by `tools/bias_corrected_reverify.py`/
+`tools/bias_corrected_dither_cure.py` - no new computation beyond
+summary statistics and the `rho_transfer` cross-check on the truncation
+CSV).
+
+## 2026-08-19 — BOOKKEEPING: the fifth artifact, and naming the pattern behind all five
+
+This session's affine-offset discovery (TASK 0 above) is the fifth
+time in this project's history that a result looked settled, then
+turned out to rest on an unstated assumption a different part of the
+project's own tooling had already measured and contradicted. Naming
+the pattern, per instruction, since it recurs:
+
+1. The kink hypothesis (§1's original claim) - LayerNorm curvature
+   looked like the mechanism because M3's near-machine-precision Markov
+   fidelity was read as "M3's dynamics are correct," when Markov
+   fidelity is a forced-response-from-rest quantity and says nothing
+   about free-running stability.
+2. M0_S4's exact-realization result - initially read as clearing the
+   S4/BPTT machinery AND the realization itself at once, when it
+   actually changed two things simultaneously (exact I/O and zero
+   `obs_norm`) and cleared only the first.
+3. The balanced-truncation experiment - initially called "cleanly
+   falsified" when it never matched M3's own achieved fidelity, so it
+   couldn't have tested the spurious-mode hypothesis either way.
+4. `Axx` vs `A_d` (91.7% off) - initially read as "the model learned
+   the wrong dynamics," when `S`'s own column space (already implied by
+   the training data, not a new measurement) made it a gauge/
+   non-identifiability fact instead.
+5. **This round: `equilibrium_drift`.** `s4dpc/diagnostics.py` has
+   computed `|F(0,0,s)|` since early in this project (`docs/DECISIONS.md`
+   line ~1200, values 1.08-2.97 logged during original identification
+   sweeps) and it is a VALIDATED diagnostic, not a new measurement -
+   yet four downstream analysis scripts (`lqr_transfer_to_true_plant.py`,
+   `free_response_test.py`, `dither_cure_test.py`,
+   `fidelity_matched_truncation.py`, all written and relied on across
+   this project's most recent several rounds) simulated the closed
+   loop as `z_next = z @ Acl.T`, silently assuming the fixed point is
+   the origin. The diagnostic had been reporting a median `c0_x` norm
+   of 0.83 the entire time these scripts were in use.
+
+**The common shape, stated once instead of five times:** in every
+case, the thing that was "missed" was not actually unmeasured - it was
+measured correctly in one place (a diagnostic, a training-data
+property, a construction detail) and silently assumed away in another
+(an analysis script, a framing paragraph, a decision rule). The fix
+each time was never a new experiment - it was cross-checking existing
+tools against each other before writing the conclusion down. Unlike
+1-4, this one, when checked (TASK A/B above), changed no verdict - the
+closest call so far to "measured correctly everywhere, assumed away
+nowhere that mattered."
+
+**Methodology-note-for-the-paper, as requested:** this project's
+diagnostic suite (`s4dpc/diagnostics.py`) and its analysis scripts
+(the `tools/*.py` one-off experiments layered on top across the
+project's life) were not written against a shared contract - a
+diagnostic can report a nonzero quantity for months before an analysis
+script that assumes it is zero gets written, with nothing to catch the
+mismatch except manual re-derivation. Worth a sentence in the paper's
+methodology section: the diagnostics were right the whole time; the
+gap was between subsystems that never checked each other's assumptions,
+not a modeling error in either one individually.
+
+GPU: 0 (bookkeeping only).

@@ -245,27 +245,48 @@ verified directly from `s4-nnx` source: conv mode hard-rejects any
 sequence length != l_max, and its `previous_state` argument is accepted
 but never used, confirmed empirically bit-identical across random
 states on every checkpoint).** Every result above that depends on this
-equivalence is safe. **Companion finding, not a threat to the above but
-requiring its own caveat: M3 is affine, not linear — `f(0,0)!=0`
-(`equilibrium_drift`, median norm 0.83 across the 30 checkpoints) — and
-`lqr_transfer_to_true_plant.py`, `free_response_test.py`,
+equivalence is safe. **Companion finding: M3 is affine, not linear —
+`f(0,0)!=0` (`equilibrium_drift`, median norm 0.83 across the 30
+checkpoints) — and `lqr_transfer_to_true_plant.py`, `free_response_test.py`,
 `dither_cure_test.py`, and `fidelity_matched_truncation.py` all
-propagate `z=z@Acl.T` with no `+c0` term.** Every EIGENVALUE-based
-verdict in this document (`rho_transfer`, `n_unstable`, PBH, the Hankel
-spectrum, the gauge-freedom theorem) is exactly unaffected — `c0` never
-enters an eigenvalue computation. Catastrophic-failure magnitudes stay
-qualitatively "astronomically bad" regardless (an unstable loop diverges
-whether or not a bounded forcing term is added) but their exact reported
-ratios haven't been re-verified with `c0` included. The controls (M0_S4,
-M1) are unaffected by construction (M0_S4's bias path is zeroed by hand;
-M1 and the true plant are both genuinely bias-free). **The numbers
-actually at risk are the near-100x-threshold marginal successes** —
-TASK C's dither-cured checkpoints (though the dither-cure's OWN re-fit
-targeted a genuinely bias-free quantity, so its risk is smaller and
-localized to the unchanged `Asx/Ass/Bs` path's own small residual bias),
-TASK A's one stability-hinge success (6.5x), and TASK D's two truncation
-successes (66x, 81x) — none of these were re-verified with `c0`
-included; treat their exact ratios as provisional pending that check.
+originally propagated `z=z@Acl.T` with no `+c0` term.** Every
+EIGENVALUE-based verdict in this document (`rho_transfer`, `n_unstable`,
+PBH, the Hankel spectrum, the gauge-freedom theorem) is exactly
+unaffected — `c0` never enters an eigenvalue computation. **RE-VERIFIED,
+2026-08-19 (`docs/DECISIONS.md`'s bias-term-round TASK A/B/C entries) —
+every headline claim in this document is confirmed unchanged after
+adding `+c0`, not merely "expected to be robust."** The correct impact
+bound is sharper than "eigenvalue verdicts survive": with an affine
+term the closed-loop fixed point is `z*=(I-Acl)^-1@c_open`, so a stable
+`rho<1` no longer implies regulation to the origin — it could mean
+convergence to a nonzero offset, which would not be a real success.
+Checked directly for every claimed success: the dither cure's 30/30
+near-oracle result recovers `c0_x` to machine-zero (range
+[1.1e-16,4.5e-15]) as part of the SAME re-fit that fixes `Axx`/`Axs`,
+giving `||z*_x||=0.000000` exactly on all 30 and `ratio_corrected`
+identical to 4 decimal places — the cure was never masking an offset.
+The two truncation successes (66x, 81x) need no correction at all —
+Hankel-SVD/ERA is structurally incapable of representing an additive
+term (verified by direct inspection of `era()`, not re-run), so its
+"original" ratio already was the `+c0`-correct one; a companion check
+also found one of those two (case4/seed3, 65.8x) has `rho_transfer>1`
+— i.e. was already an unstable-loop finite-horizon artifact, not a
+converged low-cost trajectory, independent of anything to do with
+`c0`. The LQR-transfer (median 25,300x → 30,266x) and free-response
+(median err_t1 0.769 → 0.753, err_t200 1.045 → 1.016) numbers shift
+5-30% per checkpoint but no median, extremum, or pass/fail verdict
+changes — `rho>1` for all 30 in both the original and corrected LQR-
+transfer accounting, meaning those trajectories diverge outright and
+never reach a fixed point to check for an offset in the first place.
+The one exception, honestly flagged rather than silently dropped: TASK
+A's stability-hinge success (6.5x, a single checkpoint from an earlier
+round) could not be re-derived, since that identification run never
+saved raw params and `c0` is not recoverable from the cached
+`Abar/Bbar/K_lqr` alone — re-deriving it would need new GPU time, which
+this correction round deliberately scoped out (CPU-only). The paper's
+actual positive claim (the dither cure) does not depend on that one
+result. **No conclusion in this document flips under the corrected
+accounting.**
 
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
