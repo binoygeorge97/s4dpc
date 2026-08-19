@@ -505,7 +505,7 @@ Set by config, never by branching code:
 | M1 | — | — | — | least-squares `(Â, B̂)` |
 | M3 | none | none | False | LTI S4 — is capacity the issue? |
 | M4 | none | gelu | True | activation curvature |
-| M5 | layer | none | False | **normalization (prime suspect)** |
+| M5 | layer | none | False | normalization / kink source (refuted as DPC cause — see correction below) |
 | M6 | layer | gelu | True | current full model |
 | M6_fix | static | gelu | True | fixed standardization (the proposed fix) |
 
