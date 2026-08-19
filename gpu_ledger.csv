@@ -50,3 +50,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-18,s4dpc-stability-smoke,T4,7.04
 2026-08-18,s4dpc-linear-ssm-baseline,T4,3.14
 2026-08-18,s4dpc-stability-constrained,T4,116.25
+2026-08-19,s4dpc-save-m6-checkpoints,T4,3.11

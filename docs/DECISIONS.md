@@ -5017,3 +5017,130 @@ standalone build was used instead of apt; ~41 minutes wall-clock for
 all 30 checkpoints, dominated by unjitted per-step Python loops x 200
 steps x free-running + teacher-forced + jacfwd extraction, not by any
 single expensive operation).
+
+## 2026-08-19 — TASK C (bias-term round): the affine offset is exactly non-identifiable too, same manifold, and the dither cure drives it to zero along with Axs - the cure story is strengthened, not incomplete
+
+sha: (pending commit)
+
+The Axx/Axs gauge-freedom theorem (fifth-round TASK A, earlier this
+session) concerned the LINEAR part of the one-step map only. Does the
+SAME manifold argument extend to `c0_x` (the affine offset just found
+to be real, substantial, and omitted from four established scripts)?
+
+**Extended the exact test, same construction as the original theorem:**
+for `t>=1` (99 of 100 real training samples), does `S`'s column space
+ALSO exactly reproduce the CONSTANT (all-ones) direction, not just
+arbitrary physical-state perturbation patterns? **Yes - median relative
+residual 3.98e-15, worst 1.03e-13, machine precision, all 30
+checkpoints.** `c0_x` is exactly as non-identifiable as `(Axx, Axs)`,
+by the identical argument: the training objective, restricted to
+`t>=1`, cannot distinguish "the model has a real nonzero equilibrium
+offset" from "that offset has been fully absorbed into `Axs`'s action
+on `s`" - a THIRD quantity on the same flat orbit, not a separate issue.
+
+**Does the dither cure ALSO drive `c0_x` to zero? Yes, exactly, at the
+same `n_dither=2000` that already drove `Axs->0`.** Re-ran
+`dither_cure_test.py`'s regression WITH an explicit intercept column
+(the original never fit one - forcing `c0_x=0` by omission of a term,
+not by result):
+
+```
+n_dither=0:    median ||c0_x_recovered|| = 0.338   (nonzero - the ambiguity is real without dither)
+n_dither=2000: median ||c0_x_recovered|| = 2.18e-15  (exactly zero, machine precision, all 30 checkpoints)
+```
+
+**This strengthens the cure story, per the user's own stated branch: the
+dither cure recovers the FULL correct point of the gauge orbit -
+`Axx->A_d`, `Axs->0`, AND `c0_x->0` - not two out of three.** The
+`n_dither=0` baseline's nonzero `c0_x` (median 0.338, smaller than real
+M3's own ~0.83 but still real and nonzero) confirms the ambiguity is
+genuine at this construction too, not merely theoretical: an
+intercept-free regression (like every established session script)
+implicitly fixes `c0_x=0` by NOT MODELING it at all, which happens to
+be closer to correct for a bias-free target than the alternative, but
+is not the same thing as the dither actually resolving an otherwise-real
+ambiguity - `n_dither=0`'s recovered value, once an intercept IS
+modeled, shows the ambiguity was there the whole time.
+
+**Carried through to the actual closed-loop cost (TASK A, next entry):
+the corrected dither-cure ratio is 1.0050x, identical to the original
+figure to 4 decimal places** - the small residual bias from the
+UNCHANGED `Asx/Ass/Bs` path (median norm ~0.06-0.13, not addressed by
+the dither cure since it never touches those parameters) turns out to
+contribute negligibly to the closed-loop fixed point for this
+construction, verified directly, not assumed.
+
+GPU: 0 (pure CPU, reusing the same training-trajectory regeneration and
+already-exported `Asx/Ass/Bs` this session's other CPU-only scripts use).
+
+## 2026-08-19 — TASK A (bias-term round): every claimed success re-verified with the affine offset included - the dither cure is completely unaffected, the two truncation successes need no correction (structurally cannot have one), the stability-hinge success could not be re-derived without new GPU work
+
+sha: (pending commit) | `docs/bias_corrected_dither_cure.csv`, `docs/bias_corrected_lqr_transfer.csv`, `docs/bias_corrected_free_response.csv`
+
+Per instruction: does a claimed "success" actually converge to the
+origin, or to a nonzero fixed point `z* = (I-Acl)^-1@c_open` that the
+uncorrected cost calculation never checked for? Every claimed success
+or near-success this session, checked in turn.
+
+**TASK C's dither cure re-fit (`Axx,Axs,Bx,c0_x` via OLS WITH an
+intercept, `n_dither=2000`) carried through to the actual closed-loop
+DARE synthesis and cost - result: EXACT, complete confirmation, all 30
+checkpoints, no exceptions:**
+
+```
+c0_x_recovered: every checkpoint in [1.1e-16, 4.5e-15] - machine precision, exactly zero
+rho: every checkpoint in [0.9987, 0.9999] - stable, matches original
+||z*_x||: 0.000000 for all 30 checkpoints - EXACT, not "small"
+ratio_corrected: 1.0050e+00 for all 30 checkpoints - IDENTICAL to the original figure to 4 decimals
+```
+
+This DOES need a fresh DARE solve per checkpoint (the intercept-corrected
+`Axx/Axs/Bx` is a genuinely different matrix from the original `Abar`'s
+x-block, so the cached `K_lqr` does not apply here - unlike the
+LQR-transfer/free-response correction below, which reuses `fullM3`'s
+own unchanged `Abar/Bbar` and therefore its cached gain) - 30 fresh
+d1030 DARE solves, ~75 minutes wall-clock, the dominant cost of this
+entry. The residual `c0_s` (the UNCHANGED `Asx/Ass/Bs` path's own small
+bias, median norm ~0.06-0.13) is included in the closed-loop simulation,
+not assumed away. **The user's own stated test -
+"if a success converges to a large offset, it is not a success" - comes
+back with the offset being EXACTLY zero, not merely small, for every
+one of the 30 checkpoints.** The dither cure's headline claim is
+unconditionally confirmed, not merely "probably fine."
+
+**The two truncation successes (66x, 81x, TASK D) need no correction,
+and this is a structural fact about the method, not a numerical
+result:** Hankel-SVD/ERA (`tools/balanced_truncation.py`'s `era()`)
+reconstructs `(Ar, Br, Cr)` PURELY from Markov parameters
+(`Cr@Ar^(h-1)@Br` matched to `C@Abar^(h-1)@Bbar`) via the Kung/ERA
+algorithm's own matrix formulas - there is no additive/intercept degree
+of freedom anywhere in that construction (verified by direct inspection
+of `era()`'s code, not re-run: `Ar`, `Br`, `Cr` are each built from
+`U`/`S`/`Vt` of the block-Hankel matrix alone). A truncated model built
+this way is bias-free BY CONSTRUCTION - `z=z@Acl.T` (no `+c0`) is the
+mathematically correct simulation for what ERA actually produces, not
+an omission. Worth noting as an independent, additional way truncation
+loses information about M3 beyond the already-established gauge/
+eigenvalue story (ERA cannot represent M3's own real, nonzero
+equilibrium at all, on top of everything else) - not investigated
+further, since it does not change TASK D's verdict either way.
+
+**The stability-hinge success (case1/seed3, 6.5x, TASK A second round)
+could NOT be re-derived exactly - stated as a real limitation, not
+skipped quietly.** `tools/identify_stability_constrained.py` never
+saved raw checkpoint params (only the extracted `Abar/Bbar/K_lqr` in
+`docs/stability_constrained/*.npz`) - `c0` is not recoverable from
+those alone (it is a separate quantity from the Jacobian, not implied
+by `Abar/Bbar`). Exactly re-deriving it would need re-running that
+identification with checkpoint saving added, real GPU time, which
+TASK B below deliberately scoped out ("CPU only, existing exports
+where possible"). Flagged for the user: this ONE result - a single
+marginal success (`rho_transfer=0.999812`, ratio 6.5x) already
+described as "the best of a bad set, not a clean win" when first
+reported - remains uncorrected; the paper's actual positive claim (the
+dither cure) does not depend on it.
+
+GPU: 0 (pure CPU throughout; ~75 minutes wall-clock, entirely from 30
+fresh d1030 DARE solves for the dither-cure correction - the
+LQR-transfer/free-response correction, TASK B below, reuses cached
+`K_lqr` and needed no new DARE solves at all).
