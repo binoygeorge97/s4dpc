@@ -50,10 +50,21 @@ if [[ ! -d "$VENV_DIR" ]]; then
   echo "ERROR: venv not found at $VENV_DIR - run launch/tacc/build_env.sh first (inside a GPU allocation)." >&2
   exit 1
 fi
+
+# A batch job's inherited module/library environment is not guaranteed to
+# match build_env.sh's - confirmed directly: the same venv reported Python
+# 3.12.13 under a contaminated inherited environment vs. the correct
+# 3.12.11 after this reset. Establish module state explicitly rather than
+# trusting whatever the submitting shell happened to have loaded (also
+# TACC's own documented recommendation for batch scripts).
+module reset
+module load python/3.12.11
+
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
 {
+  echo "python bin:           $(which python)"
   echo "python:               $(python --version 2>&1)"
   echo "jax devices:          $(python -c 'import jax; print(jax.devices())')"
 } | tee -a "$INFO_LOG"
