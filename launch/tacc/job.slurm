@@ -24,7 +24,20 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# NOT BASH_SOURCE: Slurm executes a spooled copy of this script, so
+# BASH_SOURCE[0] can point into Slurm's spool directory rather than the
+# repo checkout this job was submitted from (confirmed directly - smoke
+# job 3377181 failed in 2s with "fatal: not a git repository" because of
+# this). smoke_test.sh and submit_all.sh both `cd "$TACC_REPO_DIR"` before
+# `sbatch job.slurm ...`, so SLURM_SUBMIT_DIR is the correct source of
+# truth for where the repo actually is.
+REPO_ROOT="${SLURM_SUBMIT_DIR:-}"
+
+if [[ -z "$REPO_ROOT" || ! -d "$REPO_ROOT/.git" ]]; then
+  echo "ERROR: SLURM_SUBMIT_DIR is not a valid s4dpc git checkout: ${REPO_ROOT:-<unset>}" >&2
+  exit 1
+fi
+
 cd "$REPO_ROOT"
 
 VENV_DIR="${TACC_VENV_DIR:-$SCRATCH/venvs/s4dpc}"
@@ -42,6 +55,8 @@ LOCKFILE_SHA="$(sha256sum requirements.lock | awk '{print $1}' | cut -c1-12)"
   echo "SLURM_JOB_ID:         ${SLURM_JOB_ID:-unset}"
   echo "partition:            ${SLURM_JOB_PARTITION:-unset}"
   echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-unset}"
+  echo "submit dir:           ${SLURM_SUBMIT_DIR:-unset}"
+  echo "repo root:            $REPO_ROOT"
   echo "git_sha:              $GIT_SHA"
   echo "lockfile_sha:         $LOCKFILE_SHA"
 } | tee "$INFO_LOG"
