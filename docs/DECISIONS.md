@@ -4716,3 +4716,86 @@ model WITHOUT restoring identifiability does not work.
 GPU: 0 (pure CPU; ~4 minutes total for all 90 checkpoints x the full
 r-sweep - truncation orders stay small, so DARE solves are fast, unlike
 this session's d1030 solves).
+
+## 2026-08-19 — NU-GAP CLEANUP: finer grid resolves most of the flagged rows to clean integers; 7/90 stay indeterminate, mostly explained, and are dropped
+
+sha: (pending commit) | `docs/nugap_integer_check.csv` (N_FREQ=20000), `docs/nugap_integer_check_coarse_n2000.csv` (original N_FREQ=2000, kept for comparison)
+
+Full 90-checkpoint rerun at `N_FREQ=20000` (10x the original 2000),
+following spot checks (previous entry) that showed a MIXED picture at
+higher resolution - some flagged rows converging cleanly to integers,
+at least one drifting further away even at 100,000 points. This resolves
+which is which for the whole population, not just the 3 spot-checked
+rows.
+
+```
+                          n_freq=2000 (prior entry)   n_freq=20000 (this entry)
+rows failing the guard:   27/90                       27/90
+  (a) clean integer:       8/27                        20/27
+  (b) clean zero:           0/27                        0/27
+  (c) indeterminate:       19/27                        7/27
+```
+
+**Per the user's own decision rule, applied per-row since the actual
+result is mixed rather than uniform:** the 20 rows that now resolve
+cleanly (within 0.1 of a nonzero integer, several within 0.01-0.03) get
+the theory-backed reading - `delta_nu=1` is correct, reported at the
+refined grid. Full list in `docs/nugap_integer_check.csv`.
+
+**The remaining 7 stay non-integer even at 10x finer resolution - and
+spot checks pushing to 100,000 points (50x the original) on 3 of them
+confirm this is not "needs a bit more resolution":** case3/seed0 and
+case7/seed4 (both in the CLEAN group at n=20000) converged smoothly as
+resolution increased (11.90->11.97->12 and -2.17->-2.00->-2.00
+respectively); case1/seed0 (still indeterminate at n=20000) kept
+DRIFTING - 10.57 (n=2000) -> 16.44 (n=20000) -> 16.44 (n=50000) ->
+16.50 (n=100000), approaching 16.5 (the WORST possible position,
+maximally far from either 16 or 17), not settling near any single
+integer across a 50x resolution range, while `min_det` (how close the
+comparison curve passes to the origin) shrank monotonically the whole
+time (0.336 -> 0.114 -> 0.064 -> 0.043 -> 0.024) - consistent with a
+genuine near-singular point in the comparison that a finite, uniform
+grid cannot resolve at any practical resolution, not a numerical-
+precision issue that more points eventually fixes.
+
+**4 of the 7 indeterminate rows are ALL case1** (seeds 0,1,2,4 - only
+seed3 resolved cleanly). Not a coincidence: **case1's true plant
+(`A_d`) has THREE eigenvalues at EXACTLY `z=1`**, verified directly
+(`[0.9656, 1.0, 0.9656, 1.0, 0.9493, 1.0]`) - already flagged in
+`nu_gap_analysis.py`'s own existing comments as a known edge case (the
+half-step frequency-grid offset exists specifically to avoid landing
+exactly ON that pole). A marginal pole exactly on the unit circle is
+exactly the kind of feature that makes a winding-number integral
+numerically fragile near that frequency, regardless of grid density -
+this is a plausible, well-supported mechanism for case1's persistent
+non-convergence, not a mystery. The remaining 3 indeterminate rows
+(case3/seed2, case5/seed0, case5/seed4) don't share this specific
+explanation and are reported as indeterminate without a proposed cause.
+
+**Verdict, per instruction: report the theory-backed reading where the
+grid refinement earned it (20/27), report indeterminacy and drop
+`delta_nu=1` where it didn't (7/27 - listed by name below), and put
+every binned value in the appendix regardless.** `docs/nu_gap_analysis.csv`
+(this project's original, still-uncorrected nu-gap output, used
+elsewhere) should be treated as reflecting the coarse-grid,
+UNRESOLVED numbers for these same rows - if `nu_gap_analysis.csv`'s
+figures are cited anywhere in the paper, they need the same correction
+applied (a fresh run at the refined grid, or exclusion of the affected
+rows), not a blanket "provisional" caveat as this session's previous
+entry left it.
+
+**Indeterminate rows, drop `delta_nu=1` for these specifically:**
+fullM3/case1/seed0 (cond=16.44, dist 0.44), fullM3/case1/seed1
+(cond=10.25, dist 0.25), fullM3/case1/seed2 (cond=5.32, dist 0.32),
+fullM3/case1/seed4 (cond=5.50, dist 0.50 - the worst case, exactly
+between two integers), fullM3/case3/seed2 (cond=1.11, dist 0.11),
+fullM3/case5/seed0 (cond=-1.14, dist 0.14), fullM3/case5/seed4
+(cond=-4.23, dist 0.23).
+
+GPU: 0 (pure CPU; the fine-grid rerun took materially longer than the
+coarse one - not precisely timed due to two `/tmp`-clearing environment
+restarts interrupting earlier attempts, restarted with `nohup`+`disown`
+to survive a third; the per-frequency-point Python loop, not the
+per-checkpoint eigendecomposition, is the dominant cost at high
+`n_freq` and would be the next thing to vectorize if an even finer grid
+is ever needed).
