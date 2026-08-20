@@ -182,128 +182,142 @@ def augmented_operator(graphdef, params, D_X_local: int, d_model: int, N: int):
     return Abar, Bbar, c0
 
 
+VARIANT_CONFIGS = {
+    # (checkpoint filename prefix, architecture used to build the graphdef -
+    # M0_S4 is an M6-ARCHITECTURE model (LayerNorm/GELU/GLU all present, just
+    # specific weights hand-zeroed) per tools/controller_m0_s4.py's own
+    # construction, NOT the M3 architecture - using the wrong one would fail
+    # to load the checkpoint's param tree shapes at all, not silently misload)
+    "fullM3": ("M3", "M3"),
+    "M0_S4": ("M0_S4", "M6"),
+    "M6": ("M6", "M6"),
+}
+
+
 def main() -> None:
     # single-threaded per this repo's reproducibility convention (env vars set
     # at module import, before any jax op, above) - JIT itself stays on: JIT'd
     # XLA execution is already deterministic given a fixed thread count, and
     # disabling it would make no accuracy difference here, only a large speed one.
-    block_config = BlockConfig(d_model=16, N=32, l_max=HORIZON_CONV, **VARIANTS["M3"])
     n_layers = 1
     d_model, N = 16, 32
 
     rows = []
     step_curve_rows = []
 
-    for case in CASES:
-        inputs200, _ = generate_microgrid_trajectory(
-            batch_size=1, length=HORIZON_FULL, seed=DATA_SEED, system_case=case, dt=0.01,
-            aprbs_low=-10.0, aprbs_high=10.0)
-        inputs200 = inputs200[0]  # (200, 9)
-        inputs100 = inputs200[:HORIZON_CONV]
+    for variant_label, (ckpt_prefix, arch) in VARIANT_CONFIGS.items():
+        block_config = BlockConfig(d_model=16, N=32, l_max=HORIZON_CONV, **VARIANTS[arch])
 
-        for seed in range(N_SEEDS):
-            path = CKPT_DIR / f"M3_case{case}_seed{seed}.msgpack"
-            if not path.exists():
-                continue
-            key = jax.random.PRNGKey(0)  # construction key doesn't matter once state is overwritten
-            model_conv, model_step = build_models(block_config, n_layers, key)
-            template_state = nnx.state(model_conv, nnx.Param)
-            loaded_state = load_checkpoint_state(template_state, path)
-            nnx.update(model_conv, loaded_state)
-            nnx.update(model_step, loaded_state)
+        for case in CASES:
+            inputs200, _ = generate_microgrid_trajectory(
+                batch_size=1, length=HORIZON_FULL, seed=DATA_SEED, system_case=case, dt=0.01,
+                aprbs_low=-10.0, aprbs_high=10.0)
+            inputs200 = inputs200[0]  # (200, 9)
+            inputs100 = inputs200[:HORIZON_CONV]
 
-            # ---- (A) conv vs step, s0=0, steps 1..100 ----
-            s0_conv = zero_states(model_conv)
-            conv_out, _ = model_conv(jnp.asarray(inputs100), s0_conv)
-            conv_out = np.asarray(conv_out)
+            for seed in range(N_SEEDS):
+                path = CKPT_DIR / f"{ckpt_prefix}_case{case}_seed{seed}.msgpack"
+                if not path.exists():
+                    continue
+                key = jax.random.PRNGKey(0)  # construction key doesn't matter once state is overwritten
+                model_conv, model_step = build_models(block_config, n_layers, key)
+                template_state = nnx.state(model_conv, nnx.Param)
+                loaded_state = load_checkpoint_state(template_state, path)
+                nnx.update(model_conv, loaded_state)
+                nnx.update(model_step, loaded_state)
 
-            s0_step = zero_states(model_step)
-            step_out_100, state_after_100 = run_step_mode(model_step, inputs100, s0_step)
+                # ---- (A) conv vs step, s0=0, steps 1..100 ----
+                s0_conv = zero_states(model_conv)
+                conv_out, _ = model_conv(jnp.asarray(inputs100), s0_conv)
+                conv_out = np.asarray(conv_out)
 
-            abs_diff = np.abs(conv_out - step_out_100)
-            rel_diff = abs_diff / (np.abs(conv_out) + 1e-300)
-            max_abs = float(abs_diff.max())
-            max_rel = float(rel_diff.max())
-            argmax_step = int(abs_diff.max(axis=-1).argmax())
+                s0_step = zero_states(model_step)
+                step_out_100, state_after_100 = run_step_mode(model_step, inputs100, s0_step)
 
-            print(f"[case{case}/seed{seed}] (A) conv-vs-step steps1-100: "
-                  f"max_abs={max_abs:.6e}  max_rel={max_rel:.6e}  at_step={argmax_step}")
+                abs_diff = np.abs(conv_out - step_out_100)
+                rel_diff = abs_diff / (np.abs(conv_out) + 1e-300)
+                max_abs = float(abs_diff.max())
+                max_rel = float(rel_diff.max())
+                argmax_step = int(abs_diff.max(axis=-1).argmax())
 
-            # ---- (B) conv mode ignores previous_state - empirical confirmation ----
-            rng_state = np.random.RandomState(case * 100 + seed)
-            s_rand1 = [jnp.asarray((rng_state.randn(d_model, N) + 1j * rng_state.randn(d_model, N)).astype(complex))]
-            s_rand2 = [jnp.asarray((rng_state.randn(d_model, N) + 1j * rng_state.randn(d_model, N)).astype(complex))]
-            conv_out_s1, _ = model_conv(jnp.asarray(inputs100), s_rand1)
-            conv_out_s2, _ = model_conv(jnp.asarray(inputs100), s_rand2)
-            conv_state_invariance = float(jnp.max(jnp.abs(conv_out_s1 - conv_out_s2)))
+                print(f"[{variant_label}/case{case}/seed{seed}] (A) conv-vs-step steps1-100: "
+                      f"max_abs={max_abs:.6e}  max_rel={max_rel:.6e}  at_step={argmax_step}")
 
-            # ---- (C) FREE-RUNNING step mode to 200 steps vs closed-form Abar/Bbar
-            # prediction - matching rollout_learned's actual construction (x fed back
-            # from the model's own prior output), NOT teacher-forced like check (A)/conv
-            # mode - a teacher-forced comparison here would be apples-to-oranges, since
-            # every control-side/LQR-transfer result in this project uses free-running
-            # decode=True, never teacher-forced deployment. ----
-            u_seq_200 = inputs200[:, D_X:]
-            x0_zero = np.zeros(D_X, dtype=np.float64)
-            step_out_200, _ = run_step_mode_free_running(
-                model_step, x0_zero, u_seq_200, zero_states(model_step))
+                # ---- (B) conv mode ignores previous_state - empirical confirmation ----
+                rng_state = np.random.RandomState(case * 100 + seed)
+                s_rand1 = [jnp.asarray((rng_state.randn(d_model, N) + 1j * rng_state.randn(d_model, N)).astype(complex))]
+                s_rand2 = [jnp.asarray((rng_state.randn(d_model, N) + 1j * rng_state.randn(d_model, N)).astype(complex))]
+                conv_out_s1, _ = model_conv(jnp.asarray(inputs100), s_rand1)
+                conv_out_s2, _ = model_conv(jnp.asarray(inputs100), s_rand2)
+                conv_state_invariance = float(jnp.max(jnp.abs(conv_out_s1 - conv_out_s2)))
 
-            step_graphdef, step_params = nnx.split(model_step, nnx.Param)
-            Abar, Bbar, c0 = augmented_operator(step_graphdef, step_params, D_X, d_model, N)
-            # independent PURE-NUMPY simulation - never calls model_step again,
-            # so this is a genuine external check, not the same computation twice.
-            # Two variants: WITHOUT c0 (matching how established session scripts
-            # actually built z=z@Acl.T) and WITH c0 (the mathematically complete
-            # affine relationship) - reporting both makes the bias-term finding's
-            # impact directly visible, not asserted.
-            z_nobias = np.zeros(Abar.shape[0], dtype=np.float64)
-            z_withbias = np.zeros(Abar.shape[0], dtype=np.float64)
-            closed_form_x_nobias, closed_form_x_withbias = [], []
-            for t in range(HORIZON_FULL):
-                u_t = inputs200[t, D_X:]
-                z_nobias = Abar @ z_nobias + Bbar @ u_t
-                z_withbias = Abar @ z_withbias + Bbar @ u_t + c0
-                closed_form_x_nobias.append(z_nobias[:D_X].copy())
-                closed_form_x_withbias.append(z_withbias[:D_X].copy())
-            closed_form_x_nobias = np.stack(closed_form_x_nobias)
-            closed_form_x = np.stack(closed_form_x_withbias)
+                # ---- (C) FREE-RUNNING step mode to 200 steps vs closed-form Abar/Bbar
+                # prediction - matching rollout_learned's actual construction (x fed back
+                # from the model's own prior output), NOT teacher-forced like check (A)/conv
+                # mode - a teacher-forced comparison here would be apples-to-oranges, since
+                # every control-side/LQR-transfer result in this project uses free-running
+                # decode=True, never teacher-forced deployment. ----
+                u_seq_200 = inputs200[:, D_X:]
+                x0_zero = np.zeros(D_X, dtype=np.float64)
+                step_out_200, _ = run_step_mode_free_running(
+                    model_step, x0_zero, u_seq_200, zero_states(model_step))
 
-            abs_diff_200_nobias = np.abs(step_out_200 - closed_form_x_nobias)
-            max_abs_200_nobias = float(abs_diff_200_nobias.max())
+                step_graphdef, step_params = nnx.split(model_step, nnx.Param)
+                Abar, Bbar, c0 = augmented_operator(step_graphdef, step_params, D_X, d_model, N)
+                # independent PURE-NUMPY simulation - never calls model_step again,
+                # so this is a genuine external check, not the same computation twice.
+                # Two variants: WITHOUT c0 (matching how established session scripts
+                # actually built z=z@Acl.T) and WITH c0 (the mathematically complete
+                # affine relationship) - reporting both makes the bias-term finding's
+                # impact directly visible, not asserted.
+                z_nobias = np.zeros(Abar.shape[0], dtype=np.float64)
+                z_withbias = np.zeros(Abar.shape[0], dtype=np.float64)
+                closed_form_x_nobias, closed_form_x_withbias = [], []
+                for t in range(HORIZON_FULL):
+                    u_t = inputs200[t, D_X:]
+                    z_nobias = Abar @ z_nobias + Bbar @ u_t
+                    z_withbias = Abar @ z_withbias + Bbar @ u_t + c0
+                    closed_form_x_nobias.append(z_nobias[:D_X].copy())
+                    closed_form_x_withbias.append(z_withbias[:D_X].copy())
+                closed_form_x_nobias = np.stack(closed_form_x_nobias)
+                closed_form_x = np.stack(closed_form_x_withbias)
 
-            abs_diff_200 = np.abs(step_out_200 - closed_form_x)
-            rel_diff_200 = abs_diff_200 / (np.abs(closed_form_x) + 1e-300)
-            max_abs_200 = float(abs_diff_200.max())
-            max_rel_200 = float(rel_diff_200.max())
-            max_abs_200_post100 = float(abs_diff_200[100:].max())
+                abs_diff_200_nobias = np.abs(step_out_200 - closed_form_x_nobias)
+                max_abs_200_nobias = float(abs_diff_200_nobias.max())
 
-            c0_x_norm = float(np.linalg.norm(c0[:D_X]))
-            print(f"                (C) step-vs-closed-form WITH c0, steps1-200: "
-                  f"max_abs={max_abs_200:.6e}  max_rel={max_rel_200:.6e}  "
-                  f"max_abs[100:200]={max_abs_200_post100:.6e}  |  "
-                  f"WITHOUT c0: max_abs={max_abs_200_nobias:.6e}  |  ||c0_x||={c0_x_norm:.4f}")
+                abs_diff_200 = np.abs(step_out_200 - closed_form_x)
+                rel_diff_200 = abs_diff_200 / (np.abs(closed_form_x) + 1e-300)
+                max_abs_200 = float(abs_diff_200.max())
+                max_rel_200 = float(rel_diff_200.max())
+                max_abs_200_post100 = float(abs_diff_200[100:].max())
 
-            # ---- (D) nonzero s0 for step mode: does it change the output? ----
-            s_nonzero = [jnp.asarray(((rng_state.randn(d_model, N) + 1j * rng_state.randn(d_model, N)) * 0.32).astype(complex))]
-            step_out_nonzero, _ = run_step_mode(model_step, inputs100, s_nonzero)
-            step_s0_sensitivity = float(np.max(np.abs(step_out_nonzero - step_out_100)))
+                c0_x_norm = float(np.linalg.norm(c0[:D_X]))
+                print(f"                (C) step-vs-closed-form WITH c0, steps1-200: "
+                      f"max_abs={max_abs_200:.6e}  max_rel={max_rel_200:.6e}  "
+                      f"max_abs[100:200]={max_abs_200_post100:.6e}  |  "
+                      f"WITHOUT c0: max_abs={max_abs_200_nobias:.6e}  |  ||c0_x||={c0_x_norm:.4f}")
 
-            print(f"                (B) conv state-invariance (should be ~0): {conv_state_invariance:.3e}  "
-                  f"(D) step s0-sensitivity (should be >>0): {step_s0_sensitivity:.3e}")
+                # ---- (D) nonzero s0 for step mode: does it change the output? ----
+                s_nonzero = [jnp.asarray(((rng_state.randn(d_model, N) + 1j * rng_state.randn(d_model, N)) * 0.32).astype(complex))]
+                step_out_nonzero, _ = run_step_mode(model_step, inputs100, s_nonzero)
+                step_s0_sensitivity = float(np.max(np.abs(step_out_nonzero - step_out_100)))
 
-            rows.append({
-                "case": case, "seed": seed,
-                "A_max_abs": max_abs, "A_max_rel": max_rel, "A_argmax_step": argmax_step,
-                "B_conv_state_invariance": conv_state_invariance,
-                "C_max_abs_200": max_abs_200, "C_max_rel_200": max_rel_200,
-                "C_max_abs_post100": max_abs_200_post100,
-                "C_max_abs_200_NO_C0": max_abs_200_nobias, "c0_x_norm": c0_x_norm,
-                "D_step_s0_sensitivity": step_s0_sensitivity,
-            })
+                print(f"                (B) conv state-invariance (should be ~0): {conv_state_invariance:.3e}  "
+                      f"(D) step s0-sensitivity (should be >>0): {step_s0_sensitivity:.3e}")
 
-            for t in range(HORIZON_CONV):
-                step_curve_rows.append({"case": case, "seed": seed, "step": t,
-                                         "abs_diff_conv_vs_step": float(abs_diff[t].max())})
+                rows.append({
+                    "variant": variant_label, "case": case, "seed": seed,
+                    "A_max_abs": max_abs, "A_max_rel": max_rel, "A_argmax_step": argmax_step,
+                    "B_conv_state_invariance": conv_state_invariance,
+                    "C_max_abs_200": max_abs_200, "C_max_rel_200": max_rel_200,
+                    "C_max_abs_post100": max_abs_200_post100,
+                    "C_max_abs_200_NO_C0": max_abs_200_nobias, "c0_x_norm": c0_x_norm,
+                    "D_step_s0_sensitivity": step_s0_sensitivity,
+                })
+
+                for t in range(HORIZON_CONV):
+                    step_curve_rows.append({"variant": variant_label, "case": case, "seed": seed, "step": t,
+                                             "abs_diff_conv_vs_step": float(abs_diff[t].max())})
 
     for name, data_rows in [("task0_parity_summary.csv", rows),
                              ("task0_parity_stepcurve.csv", step_curve_rows)]:
@@ -313,28 +327,33 @@ def main() -> None:
         out_path.write_text("\n".join(lines))
         print(f"wrote {out_path} ({len(data_rows)} rows)")
 
-    print("\n=== SUMMARY across all checkpoints ===")
-    a_abs = [r["A_max_abs"] for r in rows]
-    a_rel = [r["A_max_rel"] for r in rows]
-    c_abs = [r["C_max_abs_200"] for r in rows]
-    c_abs_post100 = [r["C_max_abs_post100"] for r in rows]
-    b_inv = [r["B_conv_state_invariance"] for r in rows]
-    d_sens = [r["D_step_s0_sensitivity"] for r in rows]
-    print(f"(A) conv-vs-step [0,100): max_abs median={np.median(a_abs):.3e} max={max(a_abs):.3e}  "
-          f"max_rel median={np.median(a_rel):.3e} max={max(a_rel):.3e}")
-    print(f"(B) conv state-invariance: median={np.median(b_inv):.3e} max={max(b_inv):.3e} "
-          f"(expect exactly 0 or machine-eps)")
-    print(f"(C) step-vs-closed-form [0,200): max_abs median={np.median(c_abs):.3e} max={max(c_abs):.3e}  "
-          f"max_abs restricted to [100,200): median={np.median(c_abs_post100):.3e} max={max(c_abs_post100):.3e}")
-    print(f"(D) step s0-sensitivity: median={np.median(d_sens):.3e} min={min(d_sens):.3e} "
-          f"(expect >> 0, confirming conv/step disagree whenever s0!=0)")
+    for variant_label in VARIANT_CONFIGS:
+        vrows = [r for r in rows if r["variant"] == variant_label]
+        if not vrows:
+            print(f"\n=== SUMMARY, {variant_label}: no checkpoints found ===")
+            continue
+        print(f"\n=== SUMMARY, {variant_label} ({len(vrows)} checkpoints) ===")
+        a_abs = [r["A_max_abs"] for r in vrows]
+        a_rel = [r["A_max_rel"] for r in vrows]
+        c_abs = [r["C_max_abs_200"] for r in vrows]
+        c_abs_post100 = [r["C_max_abs_post100"] for r in vrows]
+        b_inv = [r["B_conv_state_invariance"] for r in vrows]
+        d_sens = [r["D_step_s0_sensitivity"] for r in vrows]
+        print(f"(A) conv-vs-step [0,100): max_abs median={np.median(a_abs):.3e} max={max(a_abs):.3e}  "
+              f"max_rel median={np.median(a_rel):.3e} max={max(a_rel):.3e}")
+        print(f"(B) conv state-invariance: median={np.median(b_inv):.3e} max={max(b_inv):.3e} "
+              f"(expect exactly 0 or machine-eps)")
+        print(f"(C) step-vs-closed-form [0,200): max_abs median={np.median(c_abs):.3e} max={max(c_abs):.3e}  "
+              f"max_abs restricted to [100,200): median={np.median(c_abs_post100):.3e} max={max(c_abs_post100):.3e}")
+        print(f"(D) step s0-sensitivity: median={np.median(d_sens):.3e} min={min(d_sens):.3e} "
+              f"(expect >> 0, confirming conv/step disagree whenever s0!=0)")
 
-    c_abs_nobias = [r["C_max_abs_200_NO_C0"] for r in rows]
-    c0_norms = [r["c0_x_norm"] for r in rows]
-    print(f"\nBIAS-TERM FINDING: WITHOUT c0, step-vs-closed-form max_abs median="
-          f"{np.median(c_abs_nobias):.3e} (max {max(c_abs_nobias):.3e}) - WITH c0, median="
-          f"{np.median(c_abs):.3e} (max {max(c_abs):.3e}). ||c0_x|| (equilibrium_drift norm) "
-          f"median={np.median(c0_norms):.4f}, range=[{min(c0_norms):.4f}, {max(c0_norms):.4f}].")
+        c_abs_nobias = [r["C_max_abs_200_NO_C0"] for r in vrows]
+        c0_norms = [r["c0_x_norm"] for r in vrows]
+        print(f"BIAS-TERM: WITHOUT c0, step-vs-closed-form max_abs median="
+              f"{np.median(c_abs_nobias):.3e} (max {max(c_abs_nobias):.3e}) - WITH c0, median="
+              f"{np.median(c_abs):.3e} (max {max(c_abs):.3e}). ||c0_x|| median="
+              f"{np.median(c0_norms):.4f}, range=[{min(c0_norms):.4f}, {max(c0_norms):.4f}].")
 
 
 if __name__ == "__main__":

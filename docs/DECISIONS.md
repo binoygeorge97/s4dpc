@@ -5263,3 +5263,111 @@ gap was between subsystems that never checked each other's assumptions,
 not a modeling error in either one individually.
 
 GPU: 0 (bookkeeping only).
+
+## 2026-08-19 — TASK 0 EXTENSION: M6's conv/step parity does NOT hold to machine precision like fullM3's does - real, systematic, on all 30 trained checkpoints. STOPPING per the standing decision rule to report this precisely before anything else.
+
+sha: (pending commit) | `docs/task0_parity_summary.csv` (90 rows: 30 fullM3 + 30 M0_S4 + 30 M6), `docs/task0_parity_stepcurve.csv`
+
+**Why this check is only happening now:** the original Task 0 run
+(`docs/DECISIONS.md`'s TASK 0 entry above) covered fullM3 only - M6 and
+M0_S4 checkpoints didn't exist as saved artifacts until this session's
+checkpoint-reproducibility work (TASK D). A combined fullM3+M0_S4+M6
+sweep was launched afterward, but the sweep process had already been
+started (and had the module's `VARIANT_CONFIGS` loaded into memory)
+BEFORE the M6 entry was added to that dict on disk - Python doesn't
+hot-reload a running process's source, so that run silently only ever
+covered fullM3+M0_S4 (60 rows, confirmed by inspecting the completed
+output), despite the file on disk already listing all three. Re-run as
+an M6-only pass (same script, same real checkpoints, same x64/single-
+thread settings) to get the missing 30 rows; merged into the real
+`docs/task0_parity_summary.csv`/`stepcurve.csv`, now 90 rows total.
+
+**The result, all 30 real M6 checkpoints, x64, teacher-forced conv-vs-
+step over the first 100 steps (check (A), same construction that gave
+fullM3 ~1e-13 across the board):**
+
+```
+A_max_abs:  median=3.168e-05  min=3.726e-06  max=5.881e-04
+A_max_rel:  median=9.367e-04  max=1.332e-01 (13.3%)
+distribution: 2/30 checkpoints > 5% relative error, 5/30 > 1%, 13/30 > 0.1%
+A_argmax_step: median=81.5 (error concentrates in the LATTER half of the 100-step window, not at t=0)
+```
+
+fullM3, same check, same 30-checkpoint population size, for direct
+comparison: `A_max_abs` median 2.598e-13, max 1.886e-12 - **M6's median
+is ~8 orders of magnitude looser, and this is not one or two outlier
+checkpoints: all 30 M6 checkpoints sit above fullM3's max.** (B) and
+(D) - conv-mode's own state-invariance and step-mode's own nonzero-s0
+sensitivity - behave exactly as expected for M6 too (0.000 and >>0
+respectively), so this is specifically a conv-vs-step DISAGREEMENT, not
+a sign either check itself is broken.
+
+**This is not an artifact of the `model.init_state()` dtype bug the
+just-pulled TACC-branch commit (`9b695b0`) happened to fix in
+`s4dpc/model.py` - checked directly, not assumed:**
+`tools/task0_decode_mode_parity.py` has always used
+`s4dpc.diagnostics.zero_states(model)` (which already defaulted to
+`complex128` and was written specifically to route around that bug)
+for every state construction in this script, never `model.init_state()`
+itself - grepped to confirm before writing this entry. The result above
+was computed identically before and after pulling that fix.
+
+**What the newly-pulled commit DOES make relevant, and appears to
+partially explain the mechanism (not yet confirmed as the full
+explanation):** the same commit updated
+`tests/test_control_decode_parity.py` with a new docstring stating
+"the Cauchy-kernel evaluation in kernel_DPLR is known to be numerically
+sensitive (roots-of-unity evaluation points can land close to a
+channel's poles)" and reports, for a model trained only 50 epochs
+(barely off random init): M3 ~1.0e-1 and M6 ~1.3e-2 relative mismatch
+under float32, both collapsing to ~1e-14/~1e-15 under x64. **Our real
+M6 checkpoints are trained for 40,000 epochs (identify.py's real
+recipe) and show max relative error up to 13.3% UNDER x64** - roughly
+the same magnitude as that test's FLOAT32 case for a barely-trained
+model, not its x64 floor. The natural reading: extensive training
+pushes some channel's pole toward a numerically sensitive Cauchy-kernel
+configuration that a near-random-init model never reaches, and M6's
+LayerNorm/GELU/GLU stack (present) vs. fullM3's absence of all three
+is what makes this specific to M6 - fullM3 trains for the same 40,000
+epochs on the same identify.py pipeline and shows no such effect. This
+is a plausible, not yet directly tested, mechanism - stated as a
+hypothesis, not a finding.
+
+**What this means for the paper, stated precisely per the standing
+decision rule ("if they disagree anywhere, STOP and report precisely,
+do not proceed"):** the VERIFIED INVARIANT in `CLAUDE.md` is scoped to
+fullM3 and is NOT invalidated - it never claimed to cover M6. But the
+broader goal stated when M6/M0_S4 checkpoints were added to Task 0
+("the verified invariant covers the models the paper actually relies
+on rather than fullM3 alone") is NOT yet satisfied - M6 is exactly the
+"full model" cell of the variant ladder the paper's headline DPC-
+failure numbers are drawn from, and `rollout_learned` (decode=True,
+every control/LQR-transfer result) is now demonstrated to deploy a
+measurably different function than `identify.py` trained it as
+(decode=False conv mode) for M6 specifically, by up to 13% on the worst
+of 30 real checkpoints. **This does not on its own explain the M6 DPC-
+failure magnitude** (M6's established failure is 2-6 orders of
+magnitude, this discrepancy is at most ~13% on the worst checkpoint and
+~0.1% at the median) - it is far too small to be the mechanism this
+paper's central claim rests on, but it is large enough that a reviewer
+who checks train/deploy parity as a first-principles sanity check
+(exactly what this test file exists to do) would find a real, non-
+machine-precision gap for M6 that the fullM3-only invariant does not
+speak to. **Not yet checked:** whether A_max_rel or A_max_abs
+correlates with the per-checkpoint DPC cost-ratio severity (the same
+question TASK C above asked and left open for the free-response error);
+whether this is present in the dither-cured model's inherited
+`Asx/Ass/Bs` path (unlikely to apply - that path is copied from fullM3,
+not M6, per `tools/save_dither_cured_checkpoints.py`'s docstring, so
+should be unaffected, but not directly verified here).
+
+**Stopping here per instruction rather than proceeding to Tasks 1-4.**
+This is a genuine, reproducible, previously-uncaught disagreement on
+real trained checkpoints for a model this paper's central claim
+depends on - it needs the user's read on whether it's worth chasing
+(e.g., correlating with DPC severity, or re-deriving the M6 control
+numbers under corrected/native-precision Cauchy kernel evaluation)
+before treating M6's story as fully settled.
+
+GPU: 0 (CPU-only re-run of the M6 phase of the already-CPU-only Task 0
+sweep, ~35 minutes wall-clock).
