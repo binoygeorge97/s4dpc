@@ -26,6 +26,13 @@ docs/linear_ssm_baseline/
 launch/colab/*.log
 launch/colab/*_status.json
 
+# TACC: local user config (host/path/partition only, but still not shared -
+# tacc.env.example is the tracked template) + raw Slurm stdout/stderr, which
+# job.slurm writes into the repo checkout itself on TACC.
+launch/tacc/tacc.env
+slurm-*.out
+slurm-*.err
+
 # local staging for `kaggle kernels output -p ./out` (§4) and any one-off
 # comparison pulls (e.g. ./out-cpu/)
 /out*/
