@@ -1,0 +1,15 @@
+{
+  "variant": "M4",
+  "case": 3,
+  "seed": 1,
+  "teacher_mse": 6.373516953317448e-05,
+  "config": {
+    "epochs": 40000,
+    "d_model": 16,
+    "N": 32,
+    "n_layers": 1,
+    "l_max": 100
+  },
+  "git_sha": "bf171b5",
+  "lockfile_sha": "aeaac02b0546"
+}
