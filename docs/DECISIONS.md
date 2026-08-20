@@ -5371,3 +5371,89 @@ before treating M6's story as fully settled.
 
 GPU: 0 (CPU-only re-run of the M6 phase of the already-CPU-only Task 0
 sweep, ~35 minutes wall-clock).
+
+## 2026-08-19 — TASK A (ninth round, code-reading half) + TASK B: the Cauchy-kernel numerics reading is doubted correctly - here is the structural picture, and the closed-loop-trajectory check the user asked for as a cross-check
+
+sha: (pending commit) | `s4_nnx/s4.py` (read, not modified), `s4dpc/blocks.py` (read),
+`docs/task_b_m6_closedloop/trajectory.npz`, `parity_stepcurve.csv`, `parity_summary.csv`
+
+**Code-reading, per instruction, before any more speculation.**
+`ConfigurableBlock.__call__` (s4dpc/blocks.py) is IDENTICAL PYTHON CODE
+regardless of `decode` - norm, GELU, GLU, and the residual are all
+applied POINTWISE IN TIME (LayerNorm over the last/feature axis per
+timestep, GELU/GLU elementwise, residual an elementwise add), so none
+of them contain a decode-mode branch or a differently-shaped tensor
+between conv and step. The ONLY code that branches on `decode` is
+inside `S4LayerEnsemble.__call__` (s4_nnx/s4.py) itself: conv mode
+evaluates the transfer function at `L` roots-of-unity frequency points
+via a Cauchy-matrix product (`kernel_dplr`) and inverse-FFTs the result
+into a time-domain kernel; step mode instead bilinear-discretizes the
+same continuous DPLR parameters (`discrete_dplr`, forward/backward
+Euler with the low-rank Woodbury correction) and runs `jax.lax.scan`.
+These are two ARITHMETICALLY DIFFERENT PROCEDURES for the same exact
+discrete LTI system - identical in exact arithmetic, but not
+guaranteed identical under floating point, and this applies to M3
+equally (M3 uses the exact same `S4LayerEnsemble` core M6 does - the
+architectural difference is entirely in what `ConfigurableBlock` wraps
+around it). **This confirms the numerics-sensitivity mechanism is
+architecturally PRESENT in every variant, not M6-specific by
+construction - which is exactly why the user's skepticism about it
+being the WHOLE explanation is well-founded: M3's own conv/step gap is
+~1e-13 on the identical S4 core, so whatever amplifies M6's gap to
+13% has to be something ConfigurableBlock adds, not the core itself.**
+Given the norm/act/glu code is pointwise and decode-invariant, the
+most likely amplification path (not yet tested directly) is LayerNorm's
+division by a per-timestep standard deviation: if that std is small at
+some timestep, a tiny (S4-core-level, ~1e-13) discrepancy between conv
+and step gets divided by a small number and comes out large -
+consistent with a SMOOTH severity distribution across checkpoints
+(matching what was actually measured) rather than the sporadic,
+all-or-nothing signature a pole-near-a-specific-root-of-unity story
+would predict. Stated as a hypothesis pending TASK A's empirical
+M4/M5 result (separate entry, pending that run's completion), not
+asserted as settled.
+
+**TASK B, run to completion, decisive: the discrepancy does NOT grow
+under real closed-loop excitation - the "too small to explain M6's
+failure" scoping claim is earned, not merely assumed.** Trained one
+real GRU-DPC controller (BPTT, full curriculum, same recipe as
+`tools/task2b_m6_reality_gap.py`) against the actual committed
+`M6_case3_seed0` checkpoint (verified NOT to match that old script's
+uncommitted `results/all_cases/ckpt` weights before reusing anything -
+replay check showed ~4-6 abs diff at step 1, so a fresh GPU run was
+needed for a self-consistent check; ~18 min, Kaggle T4). Controller
+converged normally (curriculum loss 599→112) and stabilizes cleanly
+against the surrogate it was trained on (cost 121.5, `||x||` stays in
+[2.0, 12.6] throughout - no blowup). For 10 of the 100 eval x0's,
+replayed the REAL recorded `(x_t, u_t)` pairs teacher-forced through
+both conv and step mode (two independent 100-step segments, steps
+0-100 and 100-200, each from `s0=0` - the same construction check(A)
+used, generalized from the APRBS identification trajectory to a
+genuine closed-loop one):
+
+```
+max_abs:  median=5.638e-05  min=4.857e-05  max=6.963e-05   (tightly clustered - NOT growing between the two 100-step halves)
+max_rel:  median=3.204e-03  min=2.956e-04  max=2.023e-01   (one outlier: member8/half1 at 20.2%)
+4/20 segments > 1% relative error, 1/20 > 5%
+```
+
+Compare to check(A)'s original in-distribution (APRBS) result for the
+SAME checkpoint population: `A_max_abs` median 3.168e-05, max 5.881e-04;
+`A_max_rel` median 9.367e-04, max 1.332e-01. **The closed-loop numbers
+sit in the same order of magnitude, not a new regime** - `max_abs` is
+actually MORE tightly bounded here (never exceeds 7e-5, versus check A's
+population max of 5.9e-4) and `max_rel`'s single 20.2% outlier is only
+~1.5x check A's own worst-case 13.3%, not a qualitative jump. The
+argmax step location also replicates check A's pattern exactly (errors
+concentrate in the LATTER part of each 100-step window: steps 84-99 for
+half 0, 192-199 for half 1) - the same underlying behavior, not a
+different one triggered by leaving the identification support. **Per
+the user's own decision rule: it stayed bounded, so the scoping claim
+("too small to explain M6's 2-6-order-of-magnitude DPC failure") is
+earned and kept**, not weakened - a single 20% relative-error segment
+noted honestly but not chased further, since it does not change the
+order-of-magnitude comparison against the 2-6-orders-of-magnitude
+quantity it was being scoped against.
+
+GPU: 16.84 min (Kaggle T4, one GRU-DPC controller trained via BPTT,
+full 6-phase curriculum, single case/seed).

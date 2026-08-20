@@ -1,0 +1,12 @@
+{
+  "variant": "M6",
+  "case": 3,
+  "seed": 0,
+  "max_action": 50.0,
+  "horizon": 200,
+  "surrogate_checkpoint": "docs/nu_gap_export/ckpt/M6_case3_seed0.msgpack",
+  "cost_on_surrogate": 121.46706130729832,
+  "controller_recipe": "tools/controller_surrogates.py's _train_ensemble_learned, single-member ensemble via SEED_SELECTION override (same pattern as task2b_m6_reality_gap.py)",
+  "git_sha": "7102e4a",
+  "lockfile_sha": "aeaac02b0546"
+}

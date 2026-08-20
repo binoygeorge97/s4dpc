@@ -52,3 +52,4 @@ date,kernel_slug,accelerator,minutes
 2026-08-18,s4dpc-stability-constrained,T4,116.25
 2026-08-19,s4dpc-save-m6-checkpoints,T4,3.11
 2026-08-19,s4dpc-save-m4-m5-checkpoints,T4,4.13
+2026-08-19,s4dpc-task-b-m6-closedloop,T4,16.84
