@@ -36,6 +36,30 @@ only copy of anything paper-critical.
 | `status.sh` | EE-119537 → ssh → TACC | One-shot `squeue`/`sacct` snapshot |
 | `pull_results.sh` | EE-119537 → rsync → TACC | Pull durable CSVs/logs back (checkpoints excluded by default) |
 
+## Validated status
+
+Full narrative, exact numbers, and the "context for future AI sessions"
+handoff summary live in the top-level [README.md](../../README.md)'s
+"TACC / Lonestar6 execution layer" section — read that first if you're
+picking this up cold. Short version:
+
+- **End-to-end proven**: smoke job `3377245` (commit `c0706cb`)
+  completed on `gpu-a100-dev` in 1m35s, wrote a real CSV row + checkpoint
+  via `python -m s4dpc.sweep`, and `pull_results.sh` copied it back to
+  `EE-119537`.
+- **x64 is mandatory for real sweeps**, not optional bookkeeping — S4
+  conv/recurrent parity was off by ~0.67 (M3) / ~0.089 (M6) under
+  float32 on the A100, collapsing to ~1e-13/~1e-14 under x64 once
+  `StackedModel.init_state()` was fixed to follow `jax_enable_x64`.
+- **Two infra bugs, both fixed, do not regress either**: (1) a batch
+  job's inherited module state could silently swap the venv's Python
+  3.12.11 for 3.12.13 — `job.slurm` now runs `module reset && module
+  load python/3.12.11` before activating the venv; (2) `job.slurm` used
+  to derive its repo root from `BASH_SOURCE[0]`, which pointed into
+  Slurm's spooled copy of the script rather than the real checkout —
+  fixed by using `$SLURM_SUBMIT_DIR` instead (validated as a real git
+  checkout before `cd`-ing in).
+
 ## Authentication
 
 TACC SSH login is always interactive: you type your password and 6-digit
@@ -43,6 +67,21 @@ MFA code directly at the terminal prompt when `ssh`/`rsync` asks. No script
 here uses `sshpass`, stores a password, or automates MFA. Once `sbatch`
 returns a job ID the ssh connection can close — Slurm owns the job from
 there.
+
+**In practice**, this means TACC-touching commands are normally run by
+the human directly in their own terminal (e.g. the VS Code integrated
+terminal) rather than through an agent's non-interactive shell, which
+has no real TTY for the password/MFA prompt to land on. A working
+pattern: start `script -q -f /tmp/tacc-session.log` in that terminal,
+run the ssh/TACC commands there as usual, then let the agent `tail`/read
+that log to check results and diagnose failures after being told a step
+finished — the agent never handles the credentials itself.
+
+Separately, **GitHub** push access from an agent's own sandbox is a
+different credential path: configuring `gh auth login` followed by `gh
+auth setup-git` once on `EE-119537` lets `git push` succeed through
+`gh`'s credential helper from that sandbox — no token or password is
+ever pasted into chat or stored in this repo.
 
 ## First-time TACC setup
 

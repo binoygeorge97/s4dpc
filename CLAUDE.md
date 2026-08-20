@@ -712,3 +712,22 @@ Also holds, same as every other golden rule in this file:
 - Resource escalation — a bigger queue (`gpu-a100`/`gpu-h100`), more nodes,
   longer walltime, or more concurrent jobs than already approved — requires
   explicit user approval before Claude submits it.
+
+**Validated 2026-08-19 (full narrative + exact numbers in the top-level
+README.md's "TACC / Lonestar6 execution layer" section) — three more
+invariants specific to the TACC execution path, load-bearing, do not
+revert:**
+
+- Real sweeps require `jax_enable_x64=True` — S4 conv/recurrent parity
+  was off by ~0.67 (M3) / ~0.089 (M6) under float32 on TACC's A100s,
+  collapsing to ~1e-13/~1e-14 under x64. Float32 is not a supported
+  production mode for this codebase's S4 path.
+- `launch/tacc/job.slurm` must run `module reset && module load
+  python/3.12.11` before activating the venv — a batch job's inherited
+  module state was found to silently swap the venv's Python 3.12.11 for
+  3.12.13 otherwise.
+- `launch/tacc/job.slurm` must derive its repo root from
+  `$SLURM_SUBMIT_DIR`, never `BASH_SOURCE` — Slurm executes a spooled
+  copy of the batch script, so `BASH_SOURCE[0]` pointed into the spool
+  directory rather than the actual checkout (this is exactly what made
+  smoke job 3377181 fail immediately with "fatal: not a git repository").
