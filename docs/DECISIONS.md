@@ -6277,3 +6277,92 @@ is not, at either data volume.
 
 GPU: 0 (CSV arithmetic only, no reruns - both source CSVs already
 existed).
+
+## 2026-08-25 — TASK A2, interim: K_s'=0 is a theorem (proven, not observed), the requested discriminating variant already exists as TASK 4(b), and the block-triangular decomposition at case1/seed2 is verified exactly
+
+sha: (pending commit) | `docs/lqr_cache/fullM3_axszeroed_*.npz` (partial, run in progress),
+`docs/task4a_kx_only_rho.csv`, `docs/lqr_transfer_warmstart.csv`
+
+Interim entry - TASK A2's full 30-checkpoint run is still in progress
+(a live rerun with unbuffered output logging, after an earlier attempt
+died silently mid-run with fully-buffered stdout and lost its progress -
+noted as its own small process lesson, not repeated here). Three points
+resolved from partial data before the full distribution is available.
+
+**K_s'=0 is a theorem, not a discovery - restated correctly, per
+instruction.** With `A_xs=0` in the DARE synthesis matrix, the latent
+states affect neither the physical dynamics (no `A_xs` term feeding
+`x`'s update) nor the cost (`Q` only penalizes `x`) - the Riccati
+problem's `s`-block is entirely unconstrained by anything the objective
+sees, so the optimal `K_s` is exactly zero by the structure of the
+problem, not an empirical finding to be surprised by. (Confirmed
+numerically to ~1e-13, consistent with this being an exact algebraic
+fact hitting floating-point noise, not an approximate near-zero.)
+**Consequence, also per instruction: TASK A2 as originally posed cannot
+test what it was meant to** - with `K_s'=0`, the control input has no
+dependence on `s` at all, so there is no channel left for a warm-started
+latent state to inject anything into the cost, independent of the
+coupling dynamics being tested.
+
+**The requested discriminating variant - zero `A_xs` only in the sense
+that matters (the transfer matrix's direct `s->x` term, which is
+ALWAYS zero in this construction, real physics has no such term),
+while keeping the FULL, unzeroed-synthesis `K` (`K_s != 0`), under a
+warm start - already exists and was already run: this is exactly
+`tools/lqr_transfer_warmstart.py`'s construction (TASK 4(b) above).**
+Confirmed by direct code inspection: `K_lqr, _ =
+solve_lqr_cached("fullM3", case, seed, A, B, C)` there uses the real,
+UNZEROED augmented `A` (so `K_s != 0`), and the transfer matrix
+`A_open = [[A_true, 0], [Asx, Ass]]` structurally has no direct
+`s -> x` term in every construction in this project, TASK 4(b)
+included. **TASK 4(b)'s result answers the discriminating question
+directly: cost got WORSE under a warm start on every one of 30
+checkpoints (median 25,300x cold -> 55,123x warm), not better or
+unchanged - confirming the `s -> u -> x` channel (through a genuinely
+nonzero `K_s`) IS live and DOES let a warm-started latent state inject
+additional cost.** No new run was needed for this - it was already on
+record, just not previously connected to this specific question.
+
+**`rho=1.004250` at `fullM3` case1/seed2 (TASK A2, `A_xs` zeroed,
+`K_s'=0`) - the block-triangular prediction verified EXACTLY, not just
+approximately.** With `A_xs=0` (transfer matrix, always) and `K_s'=0`
+(this checkpoint's zeroed-synthesis gain), the closed-loop matrix
+`Acl = A_open + B_open @ [-K_x', 0]` is exactly block lower triangular
+- `eig(Acl) = eig(A_true - B_true@K_x') UNION eig(A_ss)`. Since TASK 3
+already established `A_ss` has zero unstable eigenvalues on every
+checkpoint tested, `rho` for a block-triangular checkpoint like this
+one must come ENTIRELY from `eig(A_true - B_true@K_x')`. **Checked
+directly, not assumed: `np.linalg.eigvals(A_true - B_true@K_x')` for
+this exact checkpoint gives `1.0042499...`, matching TASK A2's own
+reported `rho=1.004250` to every displayed digit.** Cross-checked
+against TASK 4(a)'s `rho(A_t + B_t@K_x)` for the SAME checkpoint (using
+the ORIGINAL, un-zeroed-synthesis `K_x`, not `K_x'`): `1.002397`- close
+to but not identical to `1.004250`, a ~0.18% relative difference,
+consistent with `K_x` and `K_x'` being similar-but-not-identical gains
+(different DARE problems - zeroing `A_xs` perturbs the whole solution,
+even though the perturbation to the `K_x` COMPONENT specifically turns
+out to be small while the perturbation to `K_s` is total). **This
+confirms a second, distinct failure mode, independent of latent
+involvement: on checkpoints where the zeroed-synthesis system is still
+unstable, the cause is entirely `A_xx` estimation error destabilizing
+the true plant under `K_x` alone (`A_t + B_t@K_x`) - not a coupling
+effect at all, since the block-triangular structure means `A_ss`
+(confirmed always stable) cannot be contributing anything to that
+specific checkpoint's instability.**
+
+**Pending**: the full 30-checkpoint distribution of `ratio_cold_zeroed`/
+`ratio_warm_zeroed` and how many checkpoints (like case1/seed2) land
+unstable even after zeroing - to be reported in full once TASK A2
+completes, compared explicitly against the external group's reported
+"356x -> 1.0013x" figure. That comparison is limited by what this
+project's own record actually contains about the external
+construction: the only detail on record is "at synthesis... no
+retraining, no other weight touched" (`docs/DECISIONS.md`'s retraction
+entry) - whether their zeroing was B=1 or B=320, and whether their own
+`K_s` was zero, is NOT recorded anywhere in this repository and cannot
+be answered from it; this will be stated plainly rather than
+approximated when the full comparison is written up.
+
+GPU: 0 (block-triangular verification and cross-checks are pure linear
+algebra on already-cached matrices; TASK A2's own DARE solves are the
+only GPU-free but CPU-heavy work still running).
