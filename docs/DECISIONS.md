@@ -5878,3 +5878,151 @@ GPU: 31.89 T4-min (identify_b320.py's full run) + ~4.0 T4-min (timing
 test + env-probe estimates) - LQR-transfer analysis itself was CPU-only
 (30 fresh 1030-dim DARE solves, ~50 min wall-clock, run twice due to
 the bug above).
+
+## 2026-08-25 — TASK 1+2 (gate, both PASSED): the correction floor holds everywhere, zero surviving tautology contamination, and a regression test now exists
+
+sha: (pending commit) | code-reading + arithmetic verification, no new experiments this entry
+
+Per instruction: Tasks 1 and 2 gate everything else. Both are reported
+here; neither's kill criterion fired, so Tasks 3 and 4 (following
+entries) proceeded.
+
+**TASK 1a - term-by-term audit, not divisor-inference.** The concern:
+an off-by-one in the SUMMATION RANGE could cancel an off-by-one in the
+DIVISOR, so the two must be checked independently. Verified empirically
+(a toy closed-loop system run through both code paths, matched to
+machine precision, `np.isclose(..., rtol=1e-12)` True) as well as by
+direct inspection of every Family-B script (all copy-paste-identical in
+this respect):
+
+| side | function | index range summed | n terms | terminal state used | divisor |
+|---|---|---|---|---|---|
+| numerator | `simulate_cost`/`simulate_transfer_cost`/`simulate_cost_biased` | `i=0..199` (stage loop) | 200 | `z` after 200 updates (=state 200) | `EVAL_HORIZON` = **200** |
+| denominator | `true_quadratic_cost` (fed by `rollout_lqr_true`) | `x_hist[:-1]` = indices `0..199` | 200 | `x_hist[-1]` = state 200 | `x_hist.shape[0]` = **201** |
+
+Both sides sum the IDENTICAL 200 stage terms (states/controls at steps
+0-199) plus the IDENTICAL single terminal term (state at step 200) - no
+range mismatch. The only difference is the divisor: 200 vs 201. Exact
+correction factor: `corrected = original * (200/201)`.
+
+**Corrected ratio table, every affected number, before → after:**
+
+| source | orig (median) | corrected (median) | orig range | corrected range |
+|---|---|---|---|---|
+| `lqr_transfer_to_true_plant.csv` / M1 | 1.005000x | **1.000000x** | [1.0050, 1.0050] | [1.00000000, 1.00000000] |
+| `lqr_transfer_to_true_plant.csv` / M0_S4 | 1.005000x | **1.000000x** | [1.0050, 1.0050] | [1.00000000, 1.00000000] |
+| `lqr_transfer_to_true_plant.csv` / fullM3 | 25,299.5x | 25,173.7x | [11.14, 9.67e12] | [11.09, 9.62e12] |
+| `fidelity_matched_truncation.csv` / M1, M0_S4 | 1.005000x | **1.000000x** | (same, all 30 rows each) | (same, all 30 rows each) |
+| `fidelity_matched_truncation.csv` / fullM3 | 1.206e13 | 1.200e13 | [66.5, 8.04e129] | [66.2, 8.00e129] |
+| `dither_cure_test.csv` (n_dither=2000) | 1.005000x | **1.000000x**, exact on all 30 | — | — |
+| `bias_corrected_dither_cure.csv` | 1.005000x | **1.000000x**, exact on all 30 | — | — |
+| `bias_corrected_lqr_transfer.csv` | 30,266x | 30,116x | [10.51, 8.70e12] | [10.46, 8.65e12] |
+| `identify_stability_constrained.csv` (best row, case1/seed3) | 6.5160x | 6.4836x | — | — |
+| `linear_ssm_baseline_summary.csv` | 13,735x | 13,667x | [1.42, 1.35e147] | [1.41, 1.35e147] |
+| `dimension_sweep_summary.csv` | 3,307x | 3,290x | [2.79, 6.26e14] | [2.78, 6.23e14] |
+
+**Kill criterion: corrected ratio < 1 - 1e-9 anywhere.** Checked across
+all 8 affected CSVs, every finite row (390 rows total). **Zero
+violations.** Every corrected ratio is >= 1.000000 to machine precision -
+the LQR-optimality floor holds everywhere it should. TASKS 3/4 proceed.
+
+**Which family produced "M1 and M0_S4 transfer at ~1.000x"? Resolved:
+the AFFECTED family** (`lqr_transfer_to_true_plant.py`'s own M1 branch
+calls `simulate_cost(A_true, B_true, -K1_direct, ...)` directly;
+`fidelity_matched_truncation.py`'s M1/M0_S4 branches are the same
+construction). **Their corrected values are not "close to 1" - they
+are EXACTLY 1.000000x, on all 30 checkpoints, for both.** This is
+exactly what should happen and is not itself surprising once seen: M1's
+gain is derived from an (A,B) estimate accurate to ~1e-14 (this
+project's own established M1 floor), and M0_S4's augmented system
+realizes the true plant to ~1e-17 by hand construction with `Axs=0`
+exactly - both gains ARE (to numerical precision) the oracle gain, so
+transferring them costs exactly the oracle cost. The correction doesn't
+change any conclusion about M1/M0_S4 - it replaces an approximate
+"looks like the oracle" reading with an exact one.
+
+**The dither cure - superseding the previous entry's "may be entirely
+this bug" with the stronger, now-confirmed statement, per instruction:**
+`dither_cure_test.csv`'s 1.0050x and `bias_corrected_dither_cure.csv`'s
+1.0050x both correct to EXACTLY 1.0000000x on all 30 checkpoints (not
+approximately - checked to `1e-9`, genuinely 1.0 to the limits of the
+underlying float64 computation). **This is the optimality floor, not a
+near-miss, and it is the mechanically expected consequence of `Axx`
+recovering to machine precision under the dither cure's OLS refit: the
+refit reproduces the plant, so the transferred gain IS the oracle gain,
+by the same logic as M1/M0_S4 above.** (Separately, per the earlier
+retraction entry, the closed-form-OLS construction itself remains
+retracted as unrealizable by any actual S4 network - this correction
+changes what the ORIGINAL number meant, not whether the construction
+generalizes to a real retrained model.)
+
+**TASK 2 - contamination sweep for the tautological-stability pattern
+(closing the loop on the model's own dynamics instead of the true
+plant).** Grepped every call site of `robust_margin_and_rho`/
+`simulate_cost`/`simulate_transfer_cost`/`simulate_cost_biased` across
+`tools/*.py` and inspected each one's `A_open`/`B_open` (or direct
+`A_true`/`B_true`) construction. **Result: every established script
+already correctly substitutes the true plant's `(A_d, B_d)`** into the
+physical-state block before the transfer check
+(`bias_corrected_dither_cure.py:197`, `bias_corrected_reverify.py:200`,
+`dimension_sweep.py:229`, `linear_ssm_baseline.py:270`,
+`eigenmode_decomposition.py:55`, `identify_stability_constrained.py:311`,
+`fidelity_matched_truncation.py:270`, `dither_cure_test.py:240`,
+`lqr_transfer_to_true_plant.py:200` - all `np.block([[A_true, 0],
+[Asx, Ass]])` or equivalent). Several scripts ALSO compute a
+deliberately-labeled `b_own`/`rho_own` diagnostic
+(`dimension_sweep.py:217`, `linear_ssm_baseline.py:266`,
+`identify_stability_constrained.py:308`) using the model's own
+`Abar`/`Bbar` directly - this is NOT contamination, it is a clearly-
+named, different diagnostic (does the model's gain stabilize the
+model's OWN identified dynamics), never reported in `DECISIONS.md` as
+a transfer/true-plant claim (checked: the one `b_own` mention in this
+document, line ~3519, is correctly captioned "M3's own closed loop").
+
+**The only contaminated site found: this session's own new
+`tools/lqr_transfer_b320.py`, in its first draft** (already reported
+and fixed in the prior TASK 4 entry, before any number from it was
+treated as a standing result) - the false 30/30-stable/~31x-median
+result it briefly produced was retracted in the same entry it was
+reported in, not left as a separate claim needing correction here.
+**No `DECISIONS.md` number needs an "unverified - tautological check"
+tag** - the sweep found no surviving contamination. Per instruction
+("this bug can only manufacture successes... failures (0/30) are
+safe"): every 0/30-stable claim in this project's history remains
+exactly as trustworthy as it was.
+
+**Regression test added:** `tests/test_lqr_transfer_tautology_guard.py`
+constructs a synthetic `(A_true, A_model)` pair where a model-designed
+gain is provably unstable on the true plant (`A_true` has a genuinely
+unstable mode the model wrongly believes is already stable at 0.5) and
+calls the REAL, production `robust_margin_and_rho` (imported from
+`tools/lqr_transfer_to_true_plant.py`, not reimplemented) to assert the
+correct construction reports it unstable - with a companion assertion
+that the SAME gain looks tautologically stable against the model's own
+(wrong) dynamics, proving the scenario actually discriminates the two
+constructions rather than just testing "is K a bad gain." A future
+regression that swaps the true plant for the model's own dynamics in
+any transfer check would flip this test from pass to fail. Deliberately
+avoids needing `python-control` (see next paragraph) by only calling
+`robust_margin_and_rho` on its rho>=1 (short-circuiting) branch and
+computing the tautological sanity check's `rho` directly via
+`np.linalg.eigvals` - verified this matters, not assumed: the test was
+first written calling `robust_margin_and_rho` on both sides and failed
+immediately when `control` was import-blocked, since the STABLE side
+does reach `import control`. Confirmed passing both normally and with
+`control` import-blocked. Full suite: 20 passed, 8 skipped (was 19/8
+before this test was added).
+
+**Bookkeeping finding, incidental to writing the regression test:
+`python-control` is an undocumented, unpinned dependency.** Every
+Family-B script's `robust_margin_and_rho` does `import control` on its
+stable branch, but `control` is NOT in `requirements.lock` - it was
+installed ad hoc into this session's working venv. Not fixed this
+entry (out of scope for a Task 1/2 gate-check), but a real
+reproducibility gap: a fresh machine following `docs/ENVIRONMENTS.md`'s
+setup exactly would have every Family-B script silently crash the
+first time it hit a stable (rho<1) checkpoint, unless it happened to
+install `control` separately as this session did. Flagged for a future
+`requirements.lock` update.
+
+GPU: 0 (arithmetic verification and code-reading only).
