@@ -113,6 +113,20 @@ launched anything recently.
    makes sense (a device list, no import errors) before trusting anything
    this machine produces.
 
+8. **Install the sync-protocol git hooks** (CLAUDE.md §13) — tracked in
+   `.githooks/`, but hooks don't clone with the repo, so this is a
+   one-time, per-machine step:
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+   This activates a `pre-push` guard (refuses to push `main` when local
+   `main` is behind `origin/main`) and a `pre-commit` guard (flags a
+   staged CSV whose `machine` column doesn't match this machine's own
+   hostname). Both are skippable per-invocation
+   (`S4DPC_SKIP_SYNC_CHECK=1 git push`, `S4DPC_SKIP_MACHINE_CHECK=1 git
+   commit`, or git's own `--no-verify`) — they're meant as a speed bump
+   against forgetting to sync, not a hard gate.
+
 ### 3.1 Why the Linux filesystem, not `/mnt/c`
 
 Two independent reasons, both concrete, not theoretical:
@@ -165,17 +179,55 @@ asserted against a reference automatically — it's a fingerprint you compare
 by eye against another machine's run, exactly as this project's own
 docstring says ("Run this before trusting any result from a new machine").
 
-**Baseline captured on the ThinkPad P53 (this machine), 2026-08-25** — see
-`docs/env_probes/thinkpad_p53.json` for the full JSON. Headline facts:
+**Three-way baseline captured 2026-08-25 — local CPU, local GPU (this
+machine, the ThinkPad P53), and Kaggle T4** — full JSON in
+`docs/env_probes/thinkpad_p53.json` (`.gpu`/`.cpu` keys) and
+`docs/env_probes/kaggle_t4.json`. Headline digests (truncated to 12 hex
+chars for readability — full values in the JSON):
 
 ```
-python_version: 3.11.15
-platform: Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.35
-jax: 0.7.2, jaxlib: 0.7.2, flax: 0.11.2, optax: 0.2.8, s4_nnx: 0.1.0
-jax_backend: gpu   jax_devices: ["cuda:0"]
-model_canary.param_count: 3942   (matches the external reproduction's stated M6 count exactly)
-cnn_rnn_max_abs_diff: 5.19e-06   (float32 default — NOT the x64 regime real sweeps run under; expected to be loose, see CLAUDE.md's TACC x64 notes)
+              backend  matmul        fwd_digest_cnn  fwd_digest_rnn  grad_digest
+local CPU     cpu      ee9f0ab0064f  b5a876b4c7fe    89bb8310be31    2719f9e9d3ac
+local GPU     gpu      9b042a3047a2  e69ac8d8852d    8b614469bf83    5b669b8668c0
+Kaggle T4     gpu      eb3fd0e19539  061c073f7d8c    8b614469bf83    4f16366eb9aa
 ```
+
+`param_tree_sha`/`param_count` (3942, matching the external
+reproduction's stated M6 count exactly) agree across all three — expected,
+architecture-only. Everything numeric diverges between CPU and either
+GPU, unsurprising. **The one genuinely interesting result: `fwd_digest_rnn`
+(the step-mode/`scan` forward pass) is BIT-IDENTICAL between local GPU and
+Kaggle T4** — different physical GPUs, different driver stacks, same
+digest — while `fwd_digest_cnn` (the conv-mode/FFT forward pass) differs
+between every pair, local-vs-local included (next paragraph). Read
+narrowly: this is one fixed-seed, freshly-initialized, float32,
+100-step canary — not a general portability guarantee, and specifically
+NOT the x64 regime real sweeps run under (`cnn_rnn_max_abs_diff` here is
+~5e-6, expected to be loose at float32 per CLAUDE.md's TACC x64 notes) —
+but it's a genuine, reproducible directional signal that the recurrent
+path travels better across GPU hardware than the convolutional one, on
+top of everything else this project has already found about that same
+conv/FFT path's sensitivity (`docs/DECISIONS.md`'s "TASK 0 EXTENSION").
+
+**A second, independent local-GPU-specific hazard, confirmed directly
+this round: this machine's local GPU is not deterministic with ITSELF
+across separate process launches, isolated specifically to the
+conv-mode path.** Running `env_probe.py` twice in a row (same code, same
+seed) gave two different `fwd_digest_cnn`/`grad_digest` values but an
+IDENTICAL `fwd_digest_rnn` and `matmul_sha256` both times. Confirmed this
+is a process-boundary effect, not general GPU nondeterminism: building
+the conv-mode model twice WITHIN one Python process gives bit-identical
+output; local CPU gives bit-identical output across separate process
+launches too. Measured magnitude: max abs diff `4.77e-07` (relative
+`1.46e-07`) between two conv-mode outputs from separate launches — float32-
+machine-epsilon scale, not large, but real. Likely cause (not
+investigated further): XLA/cuFFT algorithm-selection autotuning picking
+a different kernel on different cold starts. Practical consequence: if
+identification (`identify.py`'s conv-mode training) ever ran on this
+machine's local GPU across multiple process launches — e.g. a killed-
+and-resumed job — the result would not be guaranteed bit-reproducible
+even with identical code and seed, unlike Kaggle's presumably more
+uniform per-job environment (not independently verified either way).
 
 **One correction to a prior assumption, worth recording explicitly:** an
 earlier ad-hoc venv on this SAME machine, built by hand-installing
@@ -188,8 +240,10 @@ after a manual/improvised install is not evidence of missing hardware;
 rebuild the venv from the lock file before concluding that.
 
 **When the Lab PC and Home PC are set up**, run this same command there and
-save `docs/env_probes/{machine}.json` next to this one — the point of this
-section is a three-way diff, not a single baseline sitting unused.
+save `docs/env_probes/{machine}.json` next to this one — three of the
+likely four+ backends this project touches (local CPU, local GPU, Kaggle
+T4) are now on record; TACC's A100 and the other two local machines are
+not yet.
 
 ---
 

@@ -831,3 +831,35 @@ Empty `git status --short` output = clean tree. `0	0` from the last
 command = local `main` and `origin/main` are identical (no unpushed local
 commits, nothing to pull). Anything else — investigate before running
 `sweep.py`, launching a Kaggle/TACC job, or committing.
+
+**Enforced, not just documented**, since 2026-08-25: `.githooks/pre-push`
+refuses to push `main` when local `main` is behind `origin/main`;
+`.githooks/pre-commit` flags a staged CSV whose `machine` stamp doesn't
+match the committing machine's hostname. Neither clones with the repo —
+run `git config core.hooksPath .githooks` once per machine
+(`docs/ENVIRONMENTS.md` §3 step 8). Both skip with an explicit env var
+(`S4DPC_SKIP_SYNC_CHECK=1`, `S4DPC_SKIP_MACHINE_CHECK=1`) or git's own
+`--no-verify` — a speed bump, not a wall.
+
+**Local GPU and Kaggle T4 are DIFFERENT BACKENDS — confirmed directly,
+2026-08-25 (`docs/ENVIRONMENTS.md` §5), not assumed from the general
+principle alone.** `env_probe.py`'s conv-mode digest (`fwd_digest_cnn`)
+differs between this project's own local GPU and Kaggle's T4, AND
+between two separate process launches on the SAME local GPU (the
+step-mode/`scan` digest, by contrast, is bit-identical between local GPU
+and Kaggle T4, though not investigated at the x64/real-training scale).
+**This means CLAUDE.md §3 rule 4 ("never split one experiment arm across
+platforms") now applies WITHIN a single machine, not just across
+machines** — training half a checkpoint sweep on this machine's local
+GPU and resuming it after a restart is not guaranteed to reproduce the
+same numbers, independent of which machine or which remote backend is
+involved at all.
+
+**Where each scale of run belongs:** local GPU (any machine that has
+one) is for development and diagnostics — smoke-testing a script change,
+iterating on a one-off analysis, anything whose result isn't going into
+a table. **Anything that produces a number destined for a paper table or
+a `docs/DECISIONS.md` entry runs on Kaggle** (or TACC, per §12), never
+local GPU — matching the existing Kaggle-for-parity-testing/production-
+sweeps-elsewhere split in §4, extended to now explicitly exclude local
+GPU from the "produces a result" category as well.

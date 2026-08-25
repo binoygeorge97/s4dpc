@@ -1,48 +1,99 @@
 {
-  "python_version": "3.11.15",
-  "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
-  "packages": {
-    "jax": "0.7.2",
-    "jaxlib": "0.7.2",
-    "flax": "0.11.2",
-    "optax": "0.2.8",
-    "numpy": "2.0.2",
-    "scipy": "1.16.3",
-    "pandas": "2.3.3",
-    "s4_nnx": "0.1.0"
-  },
-  "jax_backend": "gpu",
-  "jax_devices": [
-    "cuda:0"
-  ],
-  "jax_device_count": 1,
-  "numerics_canary": {
-    "seed": 0,
-    "shape": [
-      512,
-      512
-    ],
-    "dtype": "float32",
-    "matmul_sha256": "9b042a3047a23d693f3166e3840fc97c61f8d0f64fabeda1f097d953b647c235",
-    "matmul_sum": 18692.5703125
-  },
-  "model_canary": {
-    "seed": 0,
-    "config": {
-      "d_model": 16,
-      "N": 32,
-      "n_layers": 1,
-      "l_max": 100,
-      "d_input": 9,
-      "d_output": 6
+  "gpu": {
+    "python_version": "3.11.15",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+    "packages": {
+      "jax": "0.7.2",
+      "jaxlib": "0.7.2",
+      "flax": "0.11.2",
+      "optax": "0.2.8",
+      "numpy": "2.0.2",
+      "scipy": "1.16.3",
+      "pandas": "2.3.3",
+      "s4_nnx": "0.1.0"
     },
-    "param_tree_sha": "2df0eecc49e8e9871bdbf0ff7952eb8ea8ab1dedfd893b82d32e1134ebceff6c",
-    "param_count": 3942,
-    "fwd_digest_cnn": "e8996028e45bbcc240126e03793fede177f47690458a69fe2b2a6b58364450c9",
-    "fwd_digest_rnn": "8b614469bf83987301358aebe72665e62907df0f2d9d622cc182d1fbc606c937",
-    "cnn_rnn_max_abs_diff": 5.066394805908203e-06,
-    "cnn_rnn_rmse": 1.123280412684835e-06,
-    "cnn_rnn_rel_l2": 1.1719224630724057e-06,
-    "grad_digest": "e26dd10a9a711d4ea28d3cf2f7be17f762224b47b33a634db60d0c6bef0641a5"
-  }
+    "jax_backend": "gpu",
+    "jax_devices": [
+      "cuda:0"
+    ],
+    "jax_device_count": 1,
+    "numerics_canary": {
+      "seed": 0,
+      "shape": [
+        512,
+        512
+      ],
+      "dtype": "float32",
+      "matmul_sha256": "9b042a3047a23d693f3166e3840fc97c61f8d0f64fabeda1f097d953b647c235",
+      "matmul_sum": 18692.5703125
+    },
+    "model_canary": {
+      "seed": 0,
+      "config": {
+        "d_model": 16,
+        "N": 32,
+        "n_layers": 1,
+        "l_max": 100,
+        "d_input": 9,
+        "d_output": 6
+      },
+      "param_tree_sha": "2df0eecc49e8e9871bdbf0ff7952eb8ea8ab1dedfd893b82d32e1134ebceff6c",
+      "param_count": 3942,
+      "fwd_digest_cnn": "e69ac8d8852d1df65b70211702dd1f2603992dcae2d5cf79f4c98ff33d1e4554",
+      "fwd_digest_rnn": "8b614469bf83987301358aebe72665e62907df0f2d9d622cc182d1fbc606c937",
+      "cnn_rnn_max_abs_diff": 5.185604095458984e-06,
+      "cnn_rnn_rmse": 1.1288908581263968e-06,
+      "cnn_rnn_rel_l2": 1.1777758572861785e-06,
+      "grad_digest": "5b669b8668c03b2c91a0b6324d36b34a00a643480121a67d00f71cc95cbceb03"
+    }
+  },
+  "cpu": {
+    "python_version": "3.11.15",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+    "packages": {
+      "jax": "0.7.2",
+      "jaxlib": "0.7.2",
+      "flax": "0.11.2",
+      "optax": "0.2.8",
+      "numpy": "2.0.2",
+      "scipy": "1.16.3",
+      "pandas": "2.3.3",
+      "s4_nnx": "0.1.0"
+    },
+    "jax_backend": "cpu",
+    "jax_devices": [
+      "TFRT_CPU_0"
+    ],
+    "jax_device_count": 1,
+    "numerics_canary": {
+      "seed": 0,
+      "shape": [
+        512,
+        512
+      ],
+      "dtype": "float32",
+      "matmul_sha256": "ee9f0ab0064fa23597d0d655c9f133eb24e0bf2d91e6ed3274239e624ba83186",
+      "matmul_sum": 18692.564453125
+    },
+    "model_canary": {
+      "seed": 0,
+      "config": {
+        "d_model": 16,
+        "N": 32,
+        "n_layers": 1,
+        "l_max": 100,
+        "d_input": 9,
+        "d_output": 6
+      },
+      "param_tree_sha": "2df0eecc49e8e9871bdbf0ff7952eb8ea8ab1dedfd893b82d32e1134ebceff6c",
+      "param_count": 3942,
+      "fwd_digest_cnn": "b5a876b4c7fed90396e90a76a467fbcd341bbe660e09e1ff2539e3eece6eec89",
+      "fwd_digest_rnn": "89bb8310be316113137b31add7c9aad516713fb200747a3708f96e4f0dd1130c",
+      "cnn_rnn_max_abs_diff": 2.3245811462402344e-06,
+      "cnn_rnn_rmse": 5.857572205059114e-07,
+      "cnn_rnn_rel_l2": 6.076800218579592e-07,
+      "grad_digest": "2719f9e9d3ac5cf2e45a336c0fd46ae8dc9477d498179a3c93c3ff88d04ef4b8"
+    }
+  },
+  "_note": "Local GPU (cuda:0) shows run-to-run nondeterminism ACROSS SEPARATE PROCESS LAUNCHES specifically in the conv-mode/FFT path (fwd_digest_cnn, grad_digest) - confirmed NOT present within a single process (two model builds in one Python session are bit-identical), and NOT present on local CPU (fwd_digest_cnn/grad_digest match exactly across two separate CPU process launches). Magnitude measured directly: max abs diff 4.77e-07 (rel 1.46e-07) between two conv-mode forward outputs from separate process launches, same seed - float32-machine-epsilon scale, not large, but real and reproducible. fwd_digest_rnn (step-mode) is stable across process launches on this GPU. Likely cause: XLA/cuFFT algorithm-selection autotuning choosing a different kernel on different cold starts - not investigated further this round."
 }

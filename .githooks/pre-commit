@@ -1,0 +1,21 @@
+#!/bin/bash
+# s4dpc multi-machine provenance guard (CLAUDE.md §13). Checks that any
+# staged CSV's `machine` column (s4dpc.logging.write_csv's stamp) matches
+# this machine's own hostname - catches accidentally committing a result
+# file produced elsewhere under a commit made here.
+#
+# Speed bump, not a wall: skip with S4DPC_SKIP_MACHINE_CHECK=1, or git's
+# own `--no-verify` always works too.
+#
+# Install (per machine, once - hooks don't clone with the repo):
+#   git config core.hooksPath .githooks
+
+set -euo pipefail
+
+if [ -n "${S4DPC_SKIP_MACHINE_CHECK:-}" ]; then
+    echo "pre-commit: S4DPC_SKIP_MACHINE_CHECK set, skipping machine-stamp check"
+    exit 0
+fi
+
+repo_root=$(git rev-parse --show-toplevel)
+python3 "$repo_root/.githooks/check_machine_stamp.py"

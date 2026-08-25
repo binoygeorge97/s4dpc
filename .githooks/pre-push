@@ -1,0 +1,43 @@
+#!/bin/bash
+# s4dpc multi-machine sync guard (CLAUDE.md §13). Refuses to push `main`
+# when the local branch is behind origin/main - the failure mode this
+# guards against is a machine pushing on top of stale history because
+# nobody remembered to `git pull --ff-only` first (easy to forget across
+# three local machines + Kaggle/Colab/TACC all touching the same repo).
+#
+# Speed bump, not a wall: skip with S4DPC_SKIP_SYNC_CHECK=1, or git's own
+# `--no-verify` always works too (standard git escape hatch, not
+# special-cased here).
+#
+# Install (per machine, once - hooks don't clone with the repo):
+#   git config core.hooksPath .githooks
+
+set -euo pipefail
+
+if [ -n "${S4DPC_SKIP_SYNC_CHECK:-}" ]; then
+    echo "pre-push: S4DPC_SKIP_SYNC_CHECK set, skipping sync check"
+    exit 0
+fi
+
+current_branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
+if [ "$current_branch" != "main" ]; then
+    exit 0
+fi
+
+remote_name="${1:-origin}"
+
+git fetch "$remote_name" main --quiet 2>/dev/null || {
+    echo "pre-push: could not fetch $remote_name/main - skipping sync check (offline?)"
+    exit 0
+}
+
+behind=$(git rev-list --count HEAD.."$remote_name"/main 2>/dev/null || echo 0)
+
+if [ "$behind" -gt 0 ]; then
+    echo "pre-push: BLOCKED - local main is $behind commit(s) behind $remote_name/main."
+    echo "  Run: git pull --ff-only"
+    echo "  Skip this check: S4DPC_SKIP_SYNC_CHECK=1 git push"
+    exit 1
+fi
+
+exit 0
