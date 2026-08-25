@@ -59,6 +59,13 @@ picking this up cold. Short version:
   Slurm's spooled copy of the script rather than the real checkout —
   fixed by using `$SLURM_SUBMIT_DIR` instead (validated as a real git
   checkout before `cd`-ing in).
+- **Network reachability from P53/WSL, confirmed 2026-08-25**:
+  `nc -vz ls6.tacc.utexas.edu 22` succeeded from the P53 ThinkPad's WSL
+  Ubuntu (resolved to `129.114.62.201`, port 22 open) with no campus VPN
+  active. TACC's login nodes are reachable from that network as-is. This
+  resolves the "untested off the lab network" caveat for P53
+  specifically — it says nothing about the home PC, which has no WSL
+  installed yet and remains completely untested.
 
 ## Authentication
 

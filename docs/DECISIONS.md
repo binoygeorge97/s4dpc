@@ -6206,3 +6206,74 @@ than assuming it is "the nonlinearity" as an unexamined category.
 
 GPU: 0 (all four sub-analyses are pure linear algebra on already-saved
 matrices/checkpoints - no training, no GPU, per instruction).
+
+## 2026-08-25 — TASK A3: the "356x -> 25,300x" comparison as labeled does not exist in this project's record - reporting the corrected comparison instead, per instruction, without publishing the requested trend
+
+sha: (pending commit) | `docs/lqr_transfer_to_true_plant.csv`, `docs/b320/lqr_transfer_b320.csv`
+
+Per instruction: confirm the "B=1 356x" and "B=320 median 25,300x"
+figures use the identical cost function/divisor/horizon/normalization
+before publishing any trend; if they do not correspond to a genuine
+like-for-like pair, report the corrected comparison instead and do not
+publish the trend.
+
+**They do not correspond to what's labeled - checked against this
+project's actual record, not assumed:**
+
+- **"356x" appears exactly once in this repository** (`docs/DECISIONS.md`
+  line ~5567, `CLAUDE.md`'s retraction-entry text), in both cases as
+  part of the SAME sentence describing the EXTERNAL group's OWN
+  reported result: "Zeroing A_xs at synthesis... converts a 356x
+  failure into 1.0013x." This is not a number this project has ever
+  computed itself, and the phrasing ("a 356x failure," singular) reads
+  as one checkpoint's figure, not a population median - it is not
+  labeled as "B=1" anywhere in this project's own record either; that
+  association exists only in the instruction, not in the repo.
+- **"25,300x" is this project's OWN B=1 fullM3 population median**
+  (`docs/lqr_transfer_to_true_plant.csv`, all 30 checkpoints,
+  `median=25,299.5x`, corrected `25,173.7x` per the TASK 1 entry above)
+  - it is a B=1 number, not a B=320 number as labeled in the
+  instruction.
+
+**Reporting the corrected comparison instead, per instruction - our own
+real B=1 vs B=320 fullM3 LQR-transfer cost ratios, both now on the
+identical, fully corrected construction:**
+
+`docs/b320/lqr_transfer_b320.csv` was written before the TASK 1 bug
+audit (previous entries this round) and was never itself corrected -
+checked directly: `tools/lqr_transfer_b320.py`'s numerator (line 99,
+`/ EVAL_HORIZON`) has the identical bug as every other Family-B script;
+its `oracle_cost` denominator was already correct (`/
+x_hist.shape[0]`). Applying the same `*200/201` correction:
+
+| | median (orig) | median (corrected) | corrected range | n_stable |
+|---|---|---|---|---|
+| B=1 (fullM3, n=30) | 25,299.5x | **25,173.7x** | [11.09, 9.62e12] | 0/30 |
+| B=320 (M3_b320, n=30) | 167.9x | **167.0x** | [31.99, 1.50e5] | 0/30 |
+
+Same cost function (`simulate_cost`/`true_quadratic_cost`, identical
+`Q_X=5.0, R_U=0.1, Q_F=50.0`), same `EVAL_HORIZON=200`, same corrected
+`/201` normalization on both sides now, same 100-IC eval batch
+construction, same oracle-cost denominator convention. This IS a
+genuine like-for-like B=1-vs-B=320 pair - just not the one the
+instruction named.
+
+**Result: transfer does NOT degrade as identification improves -
+it gets ~150x BETTER (median cost ratio drops from 25,174x to 167x),
+though it remains a total, 0/30-stable failure at both B=1 and B=320.**
+This is the OPPOSITE direction from the "transfer degrades ~70x as
+identification improves" pattern the instruction asked to check for.
+**Per instruction, that trend is NOT published - the corrected
+comparison is reported instead.** This is consistent with, not in
+tension with, this project's already-established finding
+(`docs/DECISIONS.md`'s TASK 4 entry) that the coupling ratio stays flat
+across B=1/B=320 while `Axx`/`equilibrium_drift` shrink by orders of
+magnitude - a smaller `Axx` error and smaller drift plausibly explain
+SOME of the reduced cost-ratio severity (a "less wrong" physical block
+gives a somewhat less catastrophic closed loop even though the
+coupling that ultimately destabilizes it is unchanged), without
+implying the underlying coupling-driven failure is fixed - which it
+is not, at either data volume.
+
+GPU: 0 (CSV arithmetic only, no reruns - both source CSVs already
+existed).
