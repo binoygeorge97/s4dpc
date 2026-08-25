@@ -863,3 +863,23 @@ a `docs/DECISIONS.md` entry runs on Kaggle** (or TACC, per §12), never
 local GPU — matching the existing Kaggle-for-parity-testing/production-
 sweeps-elsewhere split in §4, extended to now explicitly exclude local
 GPU from the "produces a result" category as well.
+
+**The cross-process conv-mode nondeterminism above CAN be pinned,
+confirmed directly, 2026-08-25.** Setting
+`XLA_FLAGS="--xla_gpu_autotune_level=0 --xla_gpu_deterministic_ops=true"`
+before launching Python and re-taking the same two-separate-process
+`fwd_digest_cnn` comparison gives bit-identical output (`0.0` max abs
+diff, versus `4.77e-07` without the flags) — consistent with the
+working theory that XLA's cuFFT/conv autotuning was picking a different
+kernel on different cold starts, and these flags disable that
+autotuning. **This does NOT lift the ban above.** The flags fix
+THIS machine's THIS-canary's cross-process reproducibility; they say
+nothing about whether this local GPU's numerics match Kaggle T4's (the
+`fwd_digest_cnn` values still differ between local GPU and Kaggle T4
+even with the flags on — not re-tested this round, but nothing about
+disabling autotuning would be expected to change that), and matching
+Kaggle is the actual requirement for anything that produces a result.
+Local GPU stays development/diagnostics-only regardless; these flags
+are a documented option for someone doing iterative local-GPU
+debugging who wants their OWN reruns to at least agree with each
+other, not a route to promoting local GPU to table-row status.

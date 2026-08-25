@@ -6026,3 +6026,183 @@ install `control` separately as this session did. Flagged for a future
 `requirements.lock` update.
 
 GPU: 0 (arithmetic verification and code-reading only).
+
+## 2026-08-25 — TASK 3: n_unstable disambiguated - the latent block A_ss is NEVER unstable in isolation on any of 60 checkpoints; all full-Abar instability comes from coupling. TASK 4: both falsification tests survived - K_x alone fails exactly as predicted, and warm-starting refutes "transient, not margin." XLA determinism flags pin local-GPU cross-process reproducibility. One item queued, not chased.
+
+sha: (pending commit) | `tools/characterize_n_unstable.py`, `docs/n_unstable_characterization.csv`,
+`tools/task4a_kx_only_rho.csv` (data), `tools/lqr_transfer_warmstart.py`, `docs/lqr_transfer_warmstart.csv` -
+all pure linear algebra on saved matrices, no training, no GPU, per instruction
+
+**TASK 3a - disambiguation, confirmed by direct code comparison, not
+assumed.** `n_unstable` (the figure this project has quoted since the
+RECONCILED entry, 2026-08-18) counts eigenvalues of the FULL augmented
+`Abar` (D_X physical rows + n_s S4-latent rows, 1030 total dims for
+d_model=16/N=32), threshold `|lambda|>1.0` strictly - confirmed
+identical in `tools/identify_stability_constrained.py:298-300` and this
+session's `tools/identify_b320.py`. This entry additionally isolates
+the latent block `A_ss = Abar[D_X:, D_X:]` (1024x1024) on its own, for
+both B=1 (30 real `fullM3` checkpoints) and B=320 (30 checkpoints,
+this session's TASK 4 entry).
+
+**Result - clean and decisive:**
+
+| | n_unstable_full (median/range) | max\|λ\|(Abar) | n_unstable_Ass | n_near_circle_Ass (0.99,1] | max\|λ\|(A_ss) |
+|---|---|---|---|---|---|
+| B=1 (n=30) | 8.5 / [2,19] | 1.023-1.150 | **0/0/0 (all 30)** | median 275 [166,608] | 0.999326 (max 0.999881) |
+| B=320 (n=30) | 40.0 / [21,56] | 1.025-1.042 | **0/0/0 (all 30)** | median 324 [178,662] | 0.999438 (max 0.999975) |
+
+`|lambda(A_ss)|` histogram, pooled over each 30-checkpoint population
+(30,720 total eigenvalues each):
+
+```
+B=1:   [0,0.5)=634  [0.5,0.9)=6150  [0.9,0.99)=15260  [0.99,0.999)=8410  [0.999,0.9999)=266  [0.9999,1.0)=0  [1.0,inf)=0
+B=320: [0,0.5)=582  [0.5,0.9)=6570  [0.9,0.99)=13958  [0.99,0.999)=9174  [0.999,0.9999)=430  [0.9999,1.0)=6  [1.0,inf)=0
+```
+
+**The latent block A_ss is NEVER unstable in isolation, on any of the
+60 checkpoints tested (both B=1 and B=320, all cases/seeds).** The
+`[1.0, inf)` bin is exactly 0 in both populations - not a single one of
+61,440 pooled `A_ss` eigenvalues exceeds the unit circle. **This means
+the margin identity `rho = 1 - max|eig(A_ss)|` stays POSITIVE (well-
+defined, not the negative-margin failure mode the instruction asked to
+check for) on every checkpoint - the conditional does not fire.** The
+margin gets extremely thin, not negative: as small as `1-0.999975 ~=
+2.5e-5` on the worst B=320 checkpoint. **The "462 modes near the
+circle" framing is not wrong in the direction it worried about
+(understating instability) - it is, if anything, understated in a
+DIFFERENT way: every checkpoint's worst A_ss margin is thin enough to
+call "razor-thin," not merely "near."**
+
+**The sharper, previously-unstated finding this comparison makes
+visible: ALL of the instability counted by `n_unstable` (the full-Abar
+figure) comes from the COUPLING blocks (`A_xs`, `A_sx`), not from the
+latent recursion's own dynamics.** `n_unstable_full` is substantially
+nonzero (median 8.5 at B=1, 40 at B=320) while `n_unstable_Ass` is
+identically zero in the same checkpoints - the full augmented system
+develops eigenvalues outside the unit circle ONLY when the physical and
+latent blocks are combined; `A_ss` alone, every single time, does not.
+This sharpens rather than contradicts the adopted A_xs mechanism from
+the retraction entry - it is now a DIRECT, checkpoint-level fact
+that instability is a coupling phenomenon, not a property of the S4
+recursion considered on its own.
+
+**TASK 3b - S4 parameterization inspection: does it structurally
+permit Re(Lambda)>=0? No - confirmed directly from `s4-nnx`'s source,
+not inferred.** `s4_nnx/s4.py`'s `S4LayerEnsemble.__call__`:
+```python
+lambd = jnp.clip(self.Lambda_re.value, None, -1e-4) + 1j * self.Lambda_im.value
+```
+Every per-mode continuous-time pole's real part is HARD-CLIPPED to
+`<=-1e-4` (strictly negative) on every forward pass. This is NOT
+canonical S4's usual smooth reparameterization (storing
+`log(-Re(Lambda))` and exponentiating, giving a continuously
+differentiable positive quantity everywhere) - it is a direct
+`jnp.clip` on a raw trainable parameter, with a structural consequence
+worth flagging: `jnp.clip`'s gradient is exactly zero in the clipped
+region, so once a mode's raw `Lambda_re` drifts past `-1e-4`, training
+has no gradient signal to pull it back - a real, if secondary,
+difference from an exp-based reparameterization. **Given this, every
+individual continuous-time mode is unconditionally, structurally
+stable (Re(Lambda)<=-1e-4<0, always) - the simplest possible
+explanation for discrete instability (one pole crossing into the
+right half-plane) is RULED OUT by the parameterization itself.**
+Combined with TASK 3a's finding, the only remaining route to `A_ss`
+eigenvalues approaching the unit circle is the DPLR low-rank
+correction (`P`, `Q` in `discrete_dplr`'s bilinear/Tustin transform) -
+a per-mode-stable continuous system, discretized with a rank-1-per-
+channel correction that COUPLES the otherwise-independent modes, can
+and (per the histogram above) does produce discrete eigenvalues close
+to, though on every tested checkpoint not past, the unit circle.
+
+**TASK 4a - falsification test on the A_xs mechanism, pure linear
+algebra on cached matrices.** Prediction: `rho(A_t + B_t K_x)` (the true
+plant under ONLY the physical-block gain `K_x`, discarding `K_s`
+entirely) should be `>1` for M3 (Riccati co-designed `K_x`/`K_s` for a
+plant that doesn't exist, so `K_x` alone was never stabilizing) and
+`<1` for M1/M0_S4 (no meaningful coupling to co-design against).
+Kill criterion: M3 giving `<1` would mean the mechanism as stated is
+wrong.
+
+```
+M1:     30/30 stable (rho<1)   median rho=0.9805  range [0.9478, 0.9934]
+M0_S4:  30/30 stable (rho<1)   median rho=0.9805  range [0.9478, 0.9934]  (numerically ~identical to M1 - expected, Axs=0 exactly by construction)
+fullM3:  0/30 stable            median rho=1.0266  range [1.0024, 1.3679]
+```
+
+**M3 gives rho>1 for every single one of 30 checkpoints - the
+prediction is confirmed, not falsified. The mechanism survives this
+test.** M1 and M0_S4's near-identical `rho` values are themselves a
+clean cross-check: M0_S4's `Axs=0` by hand construction should make its
+`K_x`-only behavior indistinguishable from M1's D_X-only problem, and
+it is (medians agree to 4 decimal places).
+
+**TASK 4b - the "transient, not margin" rival hypothesis, closed.**
+With `l_max=100` and `A_ss` eigenvalues near `1-1e-2`, a cold (`s0=0`)
+initial-condition transient decays over roughly the same order as this
+project's own identification horizon - so the established 0/30-stable,
+catastrophic-cost LQR-transfer result COULD in principle be an artifact
+of always starting the internal state cold, not a real persistent
+margin problem. Tested directly: warm-start `s` from a genuine model
+rollout on the REAL identification trajectory (`Asx@x_t + Ass@s_t +
+Bs@u_t`, driven by `case_data`'s actual 100-step `(x,u)` sequence,
+`s0=0 -> s_100`), then rerun the identical LQR-transfer construction
+with `z_0 = [x0_eval; s_100]` instead of `[x0_eval; 0]`, all 30
+`fullM3` checkpoints.
+
+```
+cold (established):  median 25,300x   min 11.14x   max 9.67e12x
+warm (s_100 from real rollout, ||s_100|| range [7.1, 41.5] across checkpoints):
+                      median 55,123x   min 13.75x   max 3.60e14x
+```
+
+**Every single one of 30 checkpoints gets WORSE with a warm start, none
+improve.** `rho` itself is exactly unchanged (a property of the closed-
+loop matrix alone, independent of initial condition, as expected) - the
+warm-started run diverges from the SAME unstable eigenstructure, just
+starting from a state with real, nonzero energy in it instead of zero,
+which the near-unit-circle modes amplify just as readily. **This
+directly refutes the transient hypothesis: if the failure were a cold-
+start artifact, warm-starting should have helped. It made every
+checkpoint's cost worse, by roughly 2x at the median.** This closes the
+question the instruction asked it to close, and it corroborates,
+independently, an entry from earlier in this project's history
+(CLAUDE.md §1: "warm-starting the S4 hidden state on genuine burned-in
+history makes M3's free-running prediction monotonically WORSE, not
+better") - arrived at from a completely different angle (free-running
+prediction accuracy, not LQR-transfer cost) and now confirmed again
+here.
+
+**XLA determinism flags for local GPU - tested, they work, ban stays in
+place regardless.** `XLA_FLAGS="--xla_gpu_autotune_level=0
+--xla_gpu_deterministic_ops=true"` before launching Python, then the
+same two-separate-process-launch `fwd_digest_cnn` comparison
+(`docs/ENVIRONMENTS.md` §5) that previously showed `4.77e-07` max abs
+diff now gives exactly `0.0` - bit-identical. Consistent with the
+working theory (XLA/cuFFT autotuning selecting different kernels on
+different cold starts) and confirms disabling it fixes THIS specific
+hazard. Recorded in `CLAUDE.md` §13 as a documented, available option -
+but the ban on local GPU for table-row results stays exactly as
+written: these flags fix cross-process agreement WITH ITSELF, they say
+nothing about whether local GPU numerics match Kaggle T4's (not
+re-tested with the flags on; nothing about disabling autotuning would
+be expected to close that gap either).
+
+**Queued, not chased, per instruction:** M6's conv/step teacher-forced
+disagreement (~3e-5 relative, `docs/DECISIONS.md`'s "TASK 0 EXTENSION"
+entry) against M3's ~1e-13 floor on the identical S4 core is NOT
+explained by nonlinearity in the way an earlier entry in this document
+speculated - pointwise nonlinearities (LayerNorm over the feature axis
+per timestep, GELU/GLU elementwise, the residual add) applied AFTER a
+linear SSM preserve conv/step equivalence EXACTLY: if the SSM core's
+per-timestep output agrees between conv and step, applying the same
+deterministic pointwise function to that same value in either mode
+produces the same result, by construction - there is no mechanism by
+which composing pointwise ops with an already-agreeing sequence could
+introduce a NEW disagreement. The intended diagnostic, to be run in a
+future round: a layer-stack bisect - measure conv/step agreement for
+the SSM output alone, then +GLU, then +LayerNorm, isolating exactly
+which composition step (if any) is where the gap actually opens, rather
+than assuming it is "the nonlinearity" as an unexamined category.
+
+GPU: 0 (all four sub-analyses are pure linear algebra on already-saved
+matrices/checkpoints - no training, no GPU, per instruction).
