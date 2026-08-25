@@ -53,3 +53,6 @@ date,kernel_slug,accelerator,minutes
 2026-08-19,s4dpc-save-m6-checkpoints,T4,3.11
 2026-08-19,s4dpc-save-m4-m5-checkpoints,T4,4.13
 2026-08-19,s4dpc-task-b-m6-closedloop,T4,16.84
+2026-08-25,s4dpc-env-probe,T4,1.50
+2026-08-25,s4dpc-identify-b320-timingtest,T4,2.50
+2026-08-25,s4dpc-identify-b320-full,T4,31.89

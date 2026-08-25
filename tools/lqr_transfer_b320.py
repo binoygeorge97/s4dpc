@@ -140,9 +140,30 @@ def main() -> None:
             data = np.load(path)
             A, B, C = data["A"], data["B"], data["C"]
             K_lqr, dare_time = solve_lqr_cached(VARIANT, case, seed, A, B, C)
+            K_x, K_s = K_lqr[:, :D_X], K_lqr[:, D_X:]
 
-            b, rho = robust_margin_and_rho(A, B, -K_lqr)
-            res = simulate_cost(A, B, -K_lqr, x0_eval, oracle_cost)
+            # TRANSFER construction, exactly matching
+            # tools/lqr_transfer_to_true_plant.py's fullM3/M0_S4 branch:
+            # the (0,0) block is the TRUE plant (A_true/B_true), not the
+            # model's own learned Axx/Bx - DARE is solved on the model's
+            # own (A,B) to get K_lqr (what the model would design), but
+            # the closed loop being tested runs true physical dynamics
+            # with the model's own internal-state estimator (Asx,Ass,Bs)
+            # riding along. An earlier version of this script used A/B
+            # directly for both DARE and the transfer step, which is
+            # tautological (a model's own LQR gain trivially stabilizes
+            # the model's own dynamics) - caught and fixed 2026-08-25
+            # after it produced a spurious 30/30-stable result.
+            Asx = A[D_X:, :D_X]
+            Ass = A[D_X:, D_X:]
+            Bs = B[D_X:, :]
+            n_s = Ass.shape[0]
+            A_open = np.block([[A_true, np.zeros((D_X, n_s))], [Asx, Ass]])
+            B_open = np.vstack([B_true, Bs])
+            K_direct = np.hstack([-K_x, -K_s])
+
+            b, rho = robust_margin_and_rho(A_open, B_open, K_direct)
+            res = simulate_cost(A_open, B_open, K_direct, x0_eval, oracle_cost)
             print(f"{case:<5d} {seed:<5d} {b:>10.4f} {rho:>10.6f} "
                   f"{res['cost_ratio']:>12.4e} {str(res['finite']):>7s}  (DARE {dare_time:.0f}s)")
             rows.append({"variant": VARIANT, "case": case, "seed": seed, "b": b, "rho": rho,

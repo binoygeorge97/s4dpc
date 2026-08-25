@@ -5,6 +5,7 @@ venv/
 *.msgpack
 !tests/fixtures/*.msgpack
 !docs/nu_gap_export/ckpt/*.msgpack
+!docs/b320/ckpt/*.msgpack
 
 # raw per-(variant,case,seed) nu-gap export artifacts (large, intermediate -
 # the analysis-ready output is docs/nu_gap_export_summary.csv, which IS
@@ -20,6 +21,14 @@ docs/nu_gap_export/*
 !docs/nu_gap_export/dither_cured/
 docs/n1000_case3/
 docs/lqr_cache/
+
+# TASK 4 (2026-08-25): B=320 identification. The per-checkpoint A/B/C
+# npz exports (docs/b320/*.npz, 8.2MB each - the same size class as
+# docs/nu_gap_export/'s large Abar/Bbar exports) are regeneratable from
+# the small msgpack checkpoints (docs/b320/ckpt/) via
+# tools/identify_b320.py's augmented_operator() - not committed. The
+# checkpoints and analysis-ready CSVs (docs/b320/*.csv) ARE tracked.
+docs/b320/*.npz
 docs/dimension_sweep/
 docs/stability_constrained/
 docs/linear_ssm_baseline/

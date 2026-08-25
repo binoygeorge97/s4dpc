@@ -5778,3 +5778,103 @@ negligible correction to a real near-miss. Not fixed this entry -
 verification and mapping only, per instruction.
 
 GPU: 0 (code-reading only).
+
+## 2026-08-25 — TASK 4: B=320 identification reproduces the external group's numbers closely - the pipelines agree, and the mechanism can be built on. One self-caught bug (a tautological 30/30-stable false positive) and one genuinely new, unexplained finding (n_unstable up 5x, not down) along the way.
+
+sha: (pending commit) | `tools/identify_b320.py`, `tools/lqr_transfer_b320.py`,
+`docs/b320/b320_summary.csv`, `docs/b320/lqr_transfer_b320.csv`, 30 checkpoints in `docs/b320/ckpt/`
+
+Per instruction: rerun M3 identification at B=320 (320 independent
+trajectories, 32,000 transitions, `generate_microgrid_trajectory`'s own
+`batch_size` parameter already draws independent realizations - no new
+data-generation code needed) instead of B=1, same cases/seeds/epochs
+(40000) as every other real checkpoint in this project, for direct
+comparability. New training function `train_ensemble_multi_traj`
+(`tools/identify_b320.py`) mirrors `s4dpc.identify._train_ensemble`
+exactly, adding one inner `jax.vmap` over the trajectory-batch axis
+inside each ensemble member's loss - `s4dpc/identify.py` itself is
+untouched, matching this project's established pattern of standalone
+`tools/*.py` scripts for one-off identification variants
+(`dimension_sweep.py`, `linear_ssm_baseline.py`, etc.).
+
+**Timing, validated before committing to the full run:** a 2000-epoch/
+full-30-checkpoint-ensemble timing test on Kaggle T4 took 108.9s
+(3.63s/checkpoint) - extrapolated to 40000 epochs (~36 min), and the
+full run's actual identification wall time was 1913.2s (31.89 min, from
+the kernel log directly). Logged in `gpu_ledger.csv`
+(`s4dpc-identify-b320-full`, 31.89 T4-min; the timing test and the
+env-probe kernel from the prior round logged as estimates, their exact
+kernel logs having already been cleaned up locally when this was
+written).
+
+**Result, all 30 checkpoints, compared against both our own B=1 numbers
+and the external group's reported B=320 numbers:**
+
+| metric | our B=1 | our B=320 (median) | external B=1 | external B=320 |
+|---|---|---|---|---|
+| `axx_rel_err` | ~0.917 | **3.54e-3** (range 6.0e-4 - 1.70e-2) | 0.698 | ~3.2e-3 |
+| `equilibrium_drift` | ~0.83 | **7.68e-4** (range 1.59e-4 - 3.11e-3) | 1.076 | ~3.9e-4 |
+| coupling `‖A_xs‖/‖A_xx‖` | 5-15 | **6.93** (range 4.05-14.19) | 5.08-16.20 | unchanged |
+| transfer stable count | 0/30 | **0/30** | - | still failing |
+| `rho(A_cl)` | >1 (unstable) | **1.010-1.032** (all >1) | ~1.0206 | ~1.0172 |
+| cost_ratio (LQR-transfer) | median ~25,300x | **167.9x** (min 32.1x, max 1.51e5x) | - | - |
+
+**Our pipeline reproduces the external group's B=320 numbers closely on
+every axis they reported.** `axx_rel_err` and `equilibrium_drift` land
+within a factor of ~2 of their figures (well within checkpoint-to-
+checkpoint spread - our own range spans a full order of magnitude on
+`axx_rel_err` alone), the coupling ratio sits inside their reported
+5.08-16.20 band and visibly does NOT move from the B=1 range (matching
+their "coupling unchanged" claim), and transfer still fails at 0/30
+with `rho` just over 1 in almost the same place they report (1.010-1.032
+here vs their ~1.0172-1.0206). **Per the standing decision rule: we
+reproduce their finding, so our pipeline and theirs agree, and the
+A_xs/margin mechanism from the retraction entry above is safe to build
+on**, not merely an untested external claim anymore.
+
+**A real bug in THIS ROUND's own code, caught before being reported -
+worth recording precisely, same discipline as everything else this
+project has caught this way.** The first `tools/lqr_transfer_b320.py`
+run reported **30/30 STABLE** (`rho<1` for every checkpoint,
+cost_ratio median ~31x) - immediately suspicious since it directly
+contradicted the external group's "still failing" claim. Root cause:
+the script ran the transfer simulation on the model's own learned
+`Abar`/`Bbar` directly, instead of substituting the TRUE plant's
+`(A_d, B_d)` into the physical-state block the way
+`tools/lqr_transfer_to_true_plant.py`'s original fullM3/M0_S4
+construction does (`A_open = block([[A_true, 0], [Asx, Ass]])` - DARE
+is solved on the model's own `(A,B)` to get `K_lqr`, matching what the
+model would design, but the TRANSFER test has to run on the true
+physical dynamics or it isn't testing transfer at all). Using the
+model's own `Abar` for both steps is tautological - a model's own LQR
+gain trivially stabilizes the model's own dynamics, for any
+stabilizable pair, regardless of whether the model matches reality.
+Fixed to match the established construction exactly; the DARE cache
+(keyed on the model's own `(A,B,C)`, unaffected by the fix) was
+expected to still be valid but the corrected rerun re-solved anyway
+(~50 min, not investigated - possibly a cache-path mismatch between
+the two script versions, cosmetic either way since the DARE solve
+itself was unaffected by the bug or its fix). Corrected result is the
+0/30-stable table above.
+
+**A genuinely new, unexplained finding from this round, NOT part of
+the external group's report - flagged honestly rather than folded in
+silently:** `n_unstable` (open-loop `Abar` eigenvalues with `|lambda|>1`,
+before any control) has a B=320 median of **40** (range 21-56) -
+roughly 5x this project's earlier-established B=1 baseline of ~8.5
+(the RECONCILED-round finding, `docs/DECISIONS.md`, 2026-08-18). Every
+other metric in the table above moves in the expected direction with
+more data (Axx/drift shrink toward the true values; coupling stays
+flat) - `n_unstable` moves the OPPOSITE way, growing substantially
+worse. Not chased further this round per instruction (no new
+experiments beyond what was asked). Worth flagging for whoever picks
+this up: given the adopted mechanism ties the whole stability margin
+to `rho = 1 - max|eig(A_ss)|` at zero coupling, a large increase in
+open-loop instability at B=320 is exactly the kind of thing that could
+matter for that story, or could be a separate, unrelated artifact of
+higher data volume interacting with training dynamics - genuinely open.
+
+GPU: 31.89 T4-min (identify_b320.py's full run) + ~4.0 T4-min (timing
+test + env-probe estimates) - LQR-transfer analysis itself was CPU-only
+(30 fresh 1030-dim DARE solves, ~50 min wall-clock, run twice due to
+the bug above).

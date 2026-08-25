@@ -1,0 +1,16 @@
+{
+  "variant": "M3_b320",
+  "case": 7,
+  "seed": 1,
+  "teacher_mse": 2.710575469553755e-06,
+  "axx_rel_err": 0.0011725151176246297,
+  "equilibrium_drift": 0.00016452548459480916,
+  "coupling_ratio": 8.57864159684663,
+  "n_unstable": 39,
+  "n_traj": 320,
+  "epochs": 40000,
+  "git_sha": "640d517",
+  "lockfile_sha": "aeaac02b0546",
+  "machine": "f4d33a60e397",
+  "backend": "gpu"
+}
