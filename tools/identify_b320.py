@@ -219,6 +219,14 @@ def main() -> None:
         pure_dict = _stringify_keys(member_state.to_pure_dict())
         (ckpt_dir / f"{stem}.msgpack").write_bytes(serialization.msgpack_serialize(pure_dict))
         np.savez(ckpt_dir / f"{stem}_operator.npz", Abar=Abar, Bbar=Bbar, c0=c0)
+        # ALSO in the exact {variant}_{case}_{seed}.npz / A,B,C format
+        # tools/lqr_transfer_to_true_plant.py expects (matching
+        # docs/nu_gap_export/fullM3_*.npz's own convention: C extracts the
+        # physical-state block, [I_Dx | 0]) - lets that script's LQR-
+        # transfer construction run against these checkpoints unmodified.
+        n_s = Abar.shape[0] - D_X
+        C_out = np.hstack([np.eye(D_X), np.zeros((D_X, n_s))])
+        np.savez(EXPORT_DIR / f"M3_b320_{case}_{seed}.npz", A=Abar, B=Bbar, C=C_out)
 
         row = {
             "variant": "M3_b320", "case": case, "seed": seed,
