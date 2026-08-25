@@ -5665,3 +5665,116 @@ has no reason to find the SPECIFIC zero-`A_xs` direction).
 
 GPU: 0 (this entry is a written record of an external report plus
 direct code-reading verification on our own side - no reruns).
+
+## 2026-08-25 — TASK 1: the 201/200 bug audit, every reported ratio in this project, mapped by numerator/denominator function - two clean families, no partial cases
+
+sha: (pending commit) | code-reading only, no data this entry
+
+Per instruction: for every reported ratio, does the numerator and
+denominator use the SAME cost function or DIFFERENT ones. Two clean
+families emerged - every script fell entirely into one or the other,
+no mixed cases.
+
+**FAMILY A - SAME function both sides, bug CANCELS, numbers unaffected:**
+
+- **The 310x-family DPC numbers** (`tools/controller_oracles.py`,
+  `tools/controller_surrogates.py` - the ORIGINAL BPTT/GRU-DPC "Task 3
+  sweep", real trained neural controllers, not the LQR-transfer
+  construction). Numerator: `tools/controller_oracles.py:190-193`'s
+  `_evaluate()` calls `true_quadratic_cost` (imported from
+  `s4dpc.control`) at line 193. Denominator:
+  `tools/controller_oracles.py:231` / `tools/controller_surrogates.py:291`
+  both call the SAME `co.true_quadratic_cost`. Identical function, same
+  `x_hist.shape[0]` normalization on both sides - no bug.
+- **The horizon sweep** (4.16x/2.55x/1.45x/1.04x/1.02x and the M3
+  column - `tools/horizon_sweep_oracle.py`,
+  `tools/horizon_sweep_surrogate.py`). Denominator:
+  `horizon_sweep_oracle.py:68` / `horizon_sweep_surrogate.py:134`, both
+  `co.true_quadratic_cost`. Numerator: `result["cost"]` from the same
+  `co._evaluate()` as above (`horizon_sweep_oracle.py:94`,
+  `horizon_sweep_surrogate.py:183` divide `result["cost"]` by
+  `oracle_costs[case]`). Identical function - no bug.
+
+**FAMILY B - DIFFERENT functions, bug APPLIES, exact factor 201/200 =
+1.005 (or the checkpoint-specific residual around it from the two
+controllers not being bit-identical):**
+
+- **The 25,300x LQR transfer** (`tools/lqr_transfer_to_true_plant.py`) -
+  already found and reported last round. Numerator: `simulate_cost`,
+  lines 110-133, normalizes by `EVAL_HORIZON` (line 131, =200).
+  Denominator: `true_quadratic_cost`, lines 155-158, normalizes by
+  `x_hist.shape[0]` (line 158, =201, since `rollout_lqr_true`'s
+  `xs=[x0]` then appends `horizon_N` more).
+- **The truncation results** (`tools/fidelity_matched_truncation.py`).
+  Numerator: `simulate_cost`, lines 149-165, `/ EVAL_HORIZON` at line
+  163. Denominator: `true_quadratic_cost`, lines 178-181, `/
+  x_hist.shape[0]` at line 181. Same bug, same file structure as
+  `lqr_transfer_to_true_plant.py` (copy-pasted pattern).
+- **The stability-hinge row (6.5x)**
+  (`tools/identify_stability_constrained.py`). Numerator:
+  `simulate_transfer_cost`, lines 154-172, `/ horizon_N` at line 170
+  (`horizon_N` defaults to 200). Denominator: `true_quadratic_cost`,
+  lines 148-151, `/ x_hist.shape[0]` at line 151. Same bug.
+- **The dither rows, both the original and the bias-corrected version**
+  (`tools/dither_cure_test.py`, `tools/bias_corrected_dither_cure.py`).
+  Numerator: `simulate_cost`/`simulate_cost_biased`, `/ EVAL_HORIZON`
+  (`dither_cure_test.py:176`, `bias_corrected_dither_cure.py:114`).
+  Denominator: `true_quadratic_cost`, `/ x_hist.shape[0]`
+  (`dither_cure_test.py:192`, `bias_corrected_dither_cure.py:130`).
+  **Worth stating plainly: the dither cure's headline "1.0050x, not
+  quite 1.0" figure is now suspect as being driven ENTIRELY by this
+  bug** - `Axx` recovers to machine precision in that construction, so
+  genuinely-oracle-quality control would read as ~1.000x if computed
+  correctly; "1.0050x" is exactly what a perfect match would read as
+  UNDER this specific normalization mismatch. This doesn't change the
+  retraction from the previous entry (the OLS-readout construction
+  itself is not achievable by any real S4 model regardless), but it
+  means even the closed-form number was never showing "very close to
+  oracle, not exact" - it may have been showing "exactly oracle,
+  measured with a biased ruler."
+- **The bias-corrected LQR-transfer figure (25,300x -> 30,266x)**
+  (`tools/bias_corrected_reverify.py`). Numerator:
+  `simulate_cost_biased`, `/ EVAL_HORIZON` (line 102). Denominator:
+  `true_quadratic_cost`, `/ x_hist.shape[0]` (line 82). Same bug on
+  BOTH the "original" and "corrected" figure equally (both computed by
+  this same script's functions) - the 5-30% shift documented between
+  them is a real effect of adding `+c0`, not related to this bug, since
+  the bug's own ~0.5% contribution is present identically in both.
+- **The generic-linear-SSM-baseline and dimension-sweep comparisons**
+  (`tools/linear_ssm_baseline.py`, `tools/dimension_sweep.py`) -
+  identical structure: `simulate_transfer_cost(..., horizon_N=200)` (`/
+  horizon_N`) vs `true_quadratic_cost` (`/ x_hist.shape[0]`), same line
+  numbers as `identify_stability_constrained.py` (all three files share
+  near-identical copy-pasted bodies). Same bug.
+
+**Root cause, stated once instead of per-file:** this project has two
+GENERATIONS of evaluation code. Generation 1
+(`controller_oracles.py`/`controller_surrogates.py`/`horizon_sweep_*.py`)
+evaluates a REAL trained GRU-DPC controller via
+`evaluate_controller_on_true` + `s4dpc.control.true_quadratic_cost` on
+BOTH the surrogate-trained and oracle controllers uniformly - safe by
+construction, since there's only one cost function in play. Generation
+2 (`lqr_transfer_to_true_plant.py` and everything that copy-pasted its
+body: `fidelity_matched_truncation.py`, `identify_stability_constrained.py`,
+`dither_cure_test.py`, `bias_corrected_dither_cure.py`,
+`bias_corrected_reverify.py`, `linear_ssm_baseline.py`,
+`dimension_sweep.py`) is the pure-linear-algebra LQR-transfer
+construction (no neural controller, direct `Acl` propagation) -
+introduced its OWN locally-defined `simulate_cost`/
+`simulate_transfer_cost` for the numerator (normalizing by the loop
+count, matching `s4dpc.control.rollout_linear`/`rollout_learned`'s
+TRAINING-time convention) while reusing `true_quadratic_cost` for the
+denominator (normalizing by array length, `s4dpc.control`'s own
+EVALUATION-time convention) - two conventions that already coexist,
+legitimately, elsewhere in this codebase (`s4dpc/control.py` itself has
+both), mixed inconsistently within one ratio in every Generation-2
+script.
+
+**What this changes, stated plainly:** nothing qualitative. Every
+Family-B ratio is a large-magnitude failure (6.5x to 9.67e12x) where a
+0.5% multiplicative bias changes no verdict - except the dither cure,
+where the bug may be the ENTIRE story behind "1.0050x" rather than a
+negligible correction to a real near-miss. Not fixed this entry -
+verification and mapping only, per instruction.
+
+GPU: 0 (code-reading only).
