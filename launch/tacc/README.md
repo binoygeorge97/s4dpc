@@ -15,6 +15,7 @@ port is wrong — fix `s4dpc/sweep.py` instead, don't fork it here.
 | | |
 |---|---|
 | Local orchestration | `EE-119537` (Ubuntu 22.04.5), repo at `~/Documents/Github/s4dpc` |
+| Local orchestration (2) | P53 ThinkPad, Windows + WSL2 Ubuntu, repo at `~/projects/s4dpc` — set up 2026-08-25, see the P53/WSL section near the end of this file for machine-specific findings |
 | GitHub | `https://github.com/binoygeorge97/s4dpc`, `main` is approved science |
 | TACC | `ls6.tacc.utexas.edu`, user `binoygeorge`, allocation `IRI26016` |
 
@@ -223,3 +224,100 @@ net if invoked bare; real submissions always pass `-p`/`-t` explicitly via
 `smoke_test.sh`/`submit_all.sh`. Moving to `gpu-a100`/`gpu-h100`, or raising
 node count/walltime/concurrency beyond what's requested, requires explicit
 user approval — none of these scripts do it automatically.
+
+**Observed 2026-08-25**: `gpu-a100-dev` only has 2 nodes total (table
+above), and both were occupied by OTHER users' long-running interactive
+`idev` sessions when a smoke job was submitted from P53 — `squeue
+--start` estimated a ~1 hour wait despite the job being first in this
+user's own queue. Not a bug or misconfiguration, just real contention on
+a small shared dev partition — if a smoke test seems to hang in
+`PENDING`, check `squeue -p gpu-a100-dev` before assuming something is
+wrong.
+
+## P53/WSL-specific findings (2026-08-25)
+
+Everything above this section is machine-independent — it applies the
+same way regardless of which local machine is orchestrating. This
+section is specifically what differed, or needed verifying, on the P53
+ThinkPad (Windows + WSL2 Ubuntu, repo at `~/projects/s4dpc`) the first
+time TACC was set up there. Nothing here contradicts the
+machine-independent steps; treat this as an addendum for that one
+machine, not a second procedure.
+
+- **No VPN needed.** `nc -vz ls6.tacc.utexas.edu 22` succeeded directly
+  from P53's WSL network with no campus VPN active (resolved to
+  `129.114.62.201` for that specific check). TACC's login nodes are
+  reachable from this network as-is.
+- **`mkdir -p ~/.ssh/sockets && chmod 700 ~/.ssh/sockets` is mandatory,
+  not optional, for the multiplexing setup below** — `ssh` will NOT
+  create the `ControlPath` directory itself, and fails **silently**
+  (falls back to a normal, non-multiplexed connection with no error)
+  if that directory doesn't already exist. Create it before the first
+  connection, not after something seems not to be working.
+- **The `Host` line in `~/.ssh/config` must match the exact string
+  used on the command line.** This repo's scripts all connect via
+  `ssh "${TACC_USER}@${TACC_HOST}"` where `TACC_HOST=ls6.tacc.utexas.edu`
+  (from `tacc.env`) — the `~/.ssh/config` entry must key on that exact
+  hostname (`Host ls6.tacc.utexas.edu`), not an alias or shortened form,
+  or the multiplexing config silently won't match and every script
+  reverts to prompting for password/MFA again.
+  ```
+  Host ls6.tacc.utexas.edu
+      User binoygeorge
+      ControlMaster auto
+      ControlPath ~/.ssh/sockets/%r@%h-%p
+      ControlPersist 4h
+      ServerAliveInterval 60
+      ServerAliveCountMax 3
+  ```
+- **Socket verification (`ssh -O check ls6.tacc.utexas.edu`) must run
+  on the LOCAL machine, in a second terminal — not inside the TACC ssh
+  session itself.** The control socket is a local-machine artifact
+  (`~/.ssh/sockets/binoygeorge@ls6.tacc.utexas.edu-22` on P53); checking
+  for it or querying it from inside the remote TACC shell checks the
+  wrong filesystem entirely and will report it missing even when it's
+  working correctly.
+- **Lonestar6 round-robins its login nodes.** The interactive login that
+  established the control socket landed on `login2.ls6`
+  (`129.114.62.202`) — a different node than the one the earlier plain
+  reachability check (`nc -vz`) happened to hit (`.201`). This did not
+  cause any problem: once the control master is established, EVERY
+  subsequent multiplexed connection (confirmed directly — a
+  non-interactive `ssh` call from Claude Code's own shell, 0.59s, no
+  prompt) reuses that same already-open connection to whichever node was
+  hit first, so round-robin variance only matters for the very first,
+  interactive connection — it cannot cause a later script to land on a
+  different, inconsistent node mid-session.
+- **`$SCRATCH` is purge-eligible — venv presence must be checked every
+  session, never assumed present from a prior session on a DIFFERENT
+  local machine.** `$SCRATCH`/`$WORK` are tied to the TACC account, not
+  to which local machine is orchestrating, so a venv built from
+  `EE-119537` genuinely does persist and get reused from P53 — but only
+  until `$SCRATCH` purges it, which can happen independent of any local
+  machine's knowledge. Check with `ls -d $SCRATCH/venvs/s4dpc` before
+  deciding whether `build_env.sh`/`idev` are needed; when the venv IS
+  present, this is the difference between a ~2-minute start (activate
+  and go) and a real `gpu-a100-dev` queue wait for a fresh `idev`
+  allocation (see the observed ~1 hour wait noted above) — don't request
+  `idev` reflexively.
+- **Step 4 (`git clone`) is really "clone if absent, otherwise
+  fast-forward"**, not a one-time step — `$WORK/s4dpc` is the SAME
+  checkout shared across every local machine that orchestrates this
+  TACC account, so a second (or third) machine setting up for the first
+  time will find the repo already cloned and should `git fetch && git
+  checkout main && git merge --ff-only origin/main` instead of cloning
+  fresh (`sync_tacc.sh` already does exactly this — clone only if the
+  `.git` directory is absent, fast-forward otherwise).
+- **Clock drift after laptop sleep, corrected**: WSL2's clock lagging
+  after a Windows host suspend/resume cannot break TOTP-based MFA
+  itself — the 6-digit code is generated and validated against TACC's
+  own clock via your separate authenticator device, not against
+  anything on the WSL machine. What WSL clock drift CAN break is TLS
+  certificate-validity checks for HTTPS operations this procedure does
+  use (`git clone https://...`, `pip install`) — a sufficiently drifted
+  local clock can make a valid remote certificate look expired or not-
+  yet-valid. Check `date` after a laptop sleep/resume, before assuming
+  an HTTPS failure is a network problem.
+
+**Not yet done**: the home PC has no WSL installed and remains
+completely untested for any part of this procedure.
