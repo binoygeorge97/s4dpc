@@ -288,6 +288,68 @@ actual positive claim (the dither cure) does not depend on that one
 result. **No conclusion in this document flips under the corrected
 accounting.**
 
+**RETRACTED, 2026-08-25, by an independent reproduction — the entire
+gauge/non-identifiability/dither-cure mechanism chapter above (every
+paragraph from "Reframed and proven" through "TRUNCATION RULED OUT" that
+rests on `Axx`, `equilibrium_drift`, or the dither cure) — full record in
+`docs/DECISIONS.md`'s "EXTERNAL REPRODUCTION" entry, retracted with the
+same standard as the kink refutation, not softened.** An outside group
+reimplemented this project from scratch and independently CONFIRMED the
+central failure (0/30 stable transfers, coupling `||A_xs||/||A_xx||`
+5-16) — that claim stands and is now stronger, not weaker. But they
+train identification on 320 trajectories; this codebase trains on
+`batch_size=1` — ONE 100-step trajectory, 100 samples against a
+1024-dim latent (confirmed directly, `s4dpc/identify.py`'s
+`case_data`/`run_identify`) — and at B=1, `rank(S)>=rank(X))`
+automatically, making `Axx` formally unidentifiable by construction.
+Our 91.7% `Axx` error and 0.83 `equilibrium_drift` figures reproduce
+almost exactly at their B=1 setting and shrink by orders of magnitude
+at B=320 — they are B=1 data-volume artifacts, not properties of what
+M3 learned. The gauge-freedom proof's linear algebra was not wrong, but
+its reading was: "the internal state's column space contains an exact
+compensation" is, at one sample per timestep, just "a nonzero vector in
+R^1024 absorbs any vector in R^6" — true for pure noise, not evidence
+of a meaningful learned symmetry. The dither cure inherits both
+problems, plus a separate, independently fatal one neither our record
+nor the external group's caught until now: an unconstrained `(6,1024)`
+`Axs` from an OLS refit corresponds to no set of S4 weights at all — a
+realisable `Axs` has `rank<=6` with rigid block structure — so the
+dither cure's 30/30 near-oracle result was never achievable by an
+actual retrained network. **Critically, none of this explains away the
+failure — transfer fails at every B tested (`rho` 1.0206→1.0172, B=1
+to B=320) and the coupling ratio never moves; more data cures the
+symptoms we measured and leaves the disease untouched.**
+
+**THE MECHANISM WE ARE ADOPTING INSTEAD (external claim, not yet
+independently re-verified on our side — flagged as such until it is):**
+the `A_xs` coupling block itself, not identifiability. Zeroing `A_xs` at
+synthesis (no retraining) converts 356x into 1.0013x; discarding `K_s`
+instead makes it WORSE (1.6e113x) — refuting a "wasted gain" reading,
+since Riccati co-designs `K_x`/`K_s` jointly for a plant that doesn't
+exist and neither half works alone. The margin identity: at zero
+coupling the augmented closed loop is block-triangular, so
+`rho = 1 - max|eig(A_ss)|` exactly (matches to 1.33e-15) — the entire
+margin available to absorb `A_xs` IS the least-damped S4 mode's own
+damping, and HiPPO places 462 of 1024 modes within `1e-2` of the unit
+circle. Their proposed cure — a scale-normalized `||C||^2` penalty
+during TRAINING (not a post-hoc linear-algebra readout) — reportedly
+hits 30/30 at oracle cost while improving one-step MSE by 24 orders of
+magnitude. Not yet run here.
+
+**Two of our own bugs found and verified during this correction, kept
+distinct from the retraction above since they are real, independent of
+the mechanism story:** (1) the M1/M0_S4 "1.005x" figure throughout this
+document is a genuine bug, not noise — `tools/lqr_transfer_to_true_plant.py`'s
+numerator (`simulate_cost`) normalizes by `EVAL_HORIZON=200`, its
+denominator (`true_quadratic_cost` via `rollout_lqr_true`) normalizes
+by `x_hist.shape[0]=201` — `201/200=1.005` exactly, matching the
+reported figures to the residual digit. Verified, not yet fixed. (2)
+M6's conv/step parity gap (`docs/DECISIONS.md`'s "TASK 0 EXTENSION"
+and follow-on "TASK A"/"TASK B" entries, 2026-08-19) is UNAFFECTED by
+any of this retraction — it is an independent numerics finding about
+`s4-nnx`'s Cauchy-kernel-vs-scan code paths, not part of the gauge/
+dither chapter, and stays on the record as-is.
+
 Plants are 7 discrete-time linear systems, all `A: (6,6)`, `B: (6,3)`. Ground truth
 `A_d`, `B_d`, Markov parameters and an oracle LQR controller are all computable, which
 is the entire reason for using linear plants.

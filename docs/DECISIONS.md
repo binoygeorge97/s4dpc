@@ -5457,3 +5457,211 @@ quantity it was being scoped against.
 
 GPU: 16.84 min (Kaggle T4, one GRU-DPC controller trained via BPTT,
 full 6-phase curriculum, single case/seed).
+
+## 2026-08-25 — EXTERNAL REPRODUCTION: the central failure is independently confirmed; our explanation of it is retracted. New mechanism: the A_xs block and the margin identity. Two bugs in our own code found and verified. No new experiments run this entry - recorded from the external report pending our own re-verification.
+
+sha: (pending commit) | no new data this entry - `tools/lqr_transfer_to_true_plant.py`,
+`s4dpc/control.py`, `s4dpc/identify.py` (read, not modified, to verify the claims below)
+
+An independent group reimplemented this project from scratch (same
+plants, Tustin dt=0.01, d_model=16/N=32/n_layers=1/l_max=100, matching
+param counts - 3638 M3 / 3942 M6, confirmed against this machine's own
+`env_probe.py` model_canary below - same variant ladder, same
+LQR-transfer construction: `A_open=[[A_d,0],[A_sx,A_ss]]`, `s0=0`,
+`u=-K_x x - K_s s`, DARE ignoring `c0`, `Q=5I`, `R=0.1I`, `Qf=50`,
+horizon 200, 100 ICs, `rho(A_cl)<1`, n=30 as 6 cases x 5 seeds, case 6
+excluded). This entry is written from their report, not a re-run on
+our side - per instruction, no new experiments this round.
+
+**WHAT REPLICATED, independently: the central failure is real.** 0/30
+stable transfers. Coupling `||A_xs||/||A_xx||` 5.08-16.20 against our
+own 5-15. This is now confirmed by a from-scratch reimplementation, not
+resting on this codebase alone.
+
+**WHAT DID NOT REPLICATE, AND WHY - our explanation of the failure was
+wrong.** They train on 320 trajectories (32,000 transitions); we train
+on `batch_size=1` - ONE 100-step trajectory, 100 samples (confirmed
+directly this entry - see TASK 4 below). At B=320 they get `A_xx` rel
+err 3.2e-3 and drift 3.9e-4. At B=1 they reproduce OUR numbers almost
+exactly (0.572 and 1.027 vs our 0.698 and 1.076). **Our `A_xx` and
+`equilibrium_drift` figures are artifacts of training on a single
+trajectory, not properties of what M3 learned.** With N=100 samples
+against a 1024-dim latent, `rank(S) >= rank(X)` automatically, so `Axx`
+is formally unidentifiable at B=1 - our own gauge-freedom proof said
+exactly this, correctly, but its INTERPRETATION was wrong: "the internal
+state's column space contains an exact compensation for 99 of 100
+timesteps" reduces, at one sample per timestep, to "a nonzero vector in
+R^1024 absorbs any vector in R^6" - true for ANY `s`, including pure
+noise. It is not evidence of a meaningful learned gauge symmetry; it is
+a restatement of a linear-algebra fact about severely underdetermined
+regression. `rank(S)` saturates near 429, so identifiability returns at
+B>=5. **Critically, this does not explain away the failure - it only
+retracts our explanation of it:** transfer fails at EVERY B tested
+(`rho` 1.0206 -> 1.0172 from B=1 to B=320), and the coupling
+`||A_xs||/||A_xx||` never moves. More data cures the SYMPTOM we
+measured (`Axx` error, drift) and leaves the disease (the transfer
+failure itself) untouched.
+
+**FORMAL RETRACTIONS, per instruction - retracted, not softened, same
+standard as the kink refutation (§1's "REFUTATION" entry):**
+
+1. **The 91.7% `Axx` vs `A_d` relative-error figure** (`docs/DECISIONS.md`
+   line 4150, "TASK A (fourth round)") **is RETRACTED as evidence about
+   what M3 learned.** The raw measurement may be reproducible at B=1,
+   but it does not characterize M3's dynamics - it characterizes what an
+   underdetermined regression on 100 samples against a 1024-dim latent
+   does, which is not a property of the model, the architecture, or the
+   training objective in any way that would persist at reasonable data
+   volume.
+
+2. **The `equilibrium_drift=0.83` figure** (`docs/DECISIONS.md` line
+   4803, "TASK 0", and CLAUDE.md §1's "affine, not linear" finding)
+   **is RETRACTED as evidence of a real, dynamically meaningful
+   displaced equilibrium.** Same reasoning as (1) - `c0` is read off the
+   same severely underdetermined fit. The underlying fact that `f(0,0)`
+   was computed and is nonzero at B=1 is not disputed; what is retracted
+   is treating that number as characterizing the model's true
+   equilibrium rather than a B=1 identification artifact.
+
+3. **The gauge-freedom proof as currently worded** (`docs/DECISIONS.md`
+   line 4292, "TASK A (fifth round)") **is RETRACTED as an argument
+   about the model, and should be read going forward as a fact about
+   the DATA regime only.** The linear algebra is not wrong - `S`'s
+   column space genuinely does contain an exact compensation at B=1 -
+   but stated as "the model has an exploitable gauge symmetry" it
+   overclaims: the identical proof holds for a state vector containing
+   nothing but noise, so it demonstrates non-identifiability of the
+   REGRESSION PROBLEM at N=100, not a property discovered about S4 or
+   about what training does. `rank(S)` saturating near 429 at higher B
+   means this is a data-volume statement, not an architectural one.
+
+4. **The dither cure as described** (`docs/DECISIONS.md` line 4475,
+   "TASK C (fifth round)", extended at line 5021/5076 with the affine
+   offset) **is RETRACTED as a cure for the actual mechanism.** Two
+   independent problems, both fatal to the claim as stated: (a) it was
+   built and verified to solve the B=1 non-identifiability specifically
+   (dithering the regressor to break the exact rank-deficiency at
+   B=1) - since that non-identifiability is now understood to be a
+   B=1 artifact rather than the real disease, curing it does not
+   address transfer failure at realistic data volumes, where the
+   external group's own B=320 result shows the disease persists
+   regardless (`rho` still >1, coupling unchanged); (b) more
+   fundamentally, per the external group's note (which we did not
+   catch ourselves): an unconstrained `(6,1024)` `Axs` produced by an
+   OLS refit corresponds to NO SET OF S4 WEIGHTS - a realisable `Axs`
+   is constrained to `rank<=6` with rigid block structure inherited
+   from the S4 recursion, not a free `6x1024` matrix. **The
+   network-level version of the dither cure (re-training the actual
+   S4 weights, not an unconstrained linear-algebra readout of
+   `(Axx,Axs,Bx)`) was never run** - both our own record and the
+   external group's notes agree on this. Every dither-cure result in
+   this document (30/30 near-oracle, `c0_x -> 0`, etc.) describes a
+   closed-form OLS construction that is NOT achievable by any actual
+   S4 model, and should not be read as evidence a retrained network
+   would transfer.
+
+**THE MECHANISM WE SHOULD ADOPT INSTEAD, per the external group's
+report (not yet independently re-verified by us - flagged as external
+until we do):** the cause is the `A_xs` block specifically, not a
+gauge/identifiability story at all. Zeroing `A_xs` at synthesis time -
+no retraining, no other weight touched - converts a 356x failure into
+1.0013x (near-oracle). Discarding `K_s` instead (dropping the gain on
+the S4-state channel, keeping `K_x` only) makes it WORSE (1.6e113x),
+which refutes the "gain wasted on a phantom state" reading this
+project floated earlier: Riccati co-designs `K_x` and `K_s` jointly for
+a plant that does not exist (the augmented `(A,B)` fit to B=1 data),
+and neither half of that joint design is usable alone once you remove
+the coupling it was designed against. **The margin identity:** at
+`alpha=0` (meaning: coupling zeroed) the augmented closed-loop system
+is block-triangular, so `rho = 1 - max|eig(A_ss)|` exactly - reported
+to match to `1.33e-15`. Read plainly: the ENTIRE stability margin
+available to absorb the `A_xs` coupling IS the damping of the
+least-damped S4 internal mode, and S4's own HiPPO-derived spectrum
+places 462 of 1024 modes within `1e-2` of the unit circle - a system
+with almost no spare margin to give away. Their proposed cure is a
+scale-normalized `||C||^2` penalty applied DURING TRAINING (not a
+post-hoc linear-algebra readout): reported 30/30 at oracle cost while
+ALSO improving one-step MSE by 24 orders of magnitude - i.e., a cure
+that does not trade fidelity for stability, unlike this project's own
+earlier "explicit internal-stability hinge" attempt
+(`docs/DECISIONS.md`'s RECONCILED entry, 2026-08-18), which reduced
+`n_unstable` but left transfer at 1/30. **This has NOT been run on our
+side.** Per instruction, no reruns this entry - the record is being
+set straight first.
+
+**TASK 2, verified directly: the M1/M0_S4 "1.005x" figure is a real
+bug, not floating-point noise, and the external group's diagnosis is
+exactly right - numerator and denominator DO come from different code
+paths.** In `tools/lqr_transfer_to_true_plant.py`:
+- **Numerator** (`simulate_cost`, lines 110-133): propagates the closed-
+  loop matrix directly (`z = z @ Acl.T`) for `EVAL_HORIZON=200` steps,
+  normalizes at line 131: `cost = (stage + terminal) / EVAL_HORIZON`
+  - divides by **200**.
+- **Denominator** (`oracle_cost`, computed at line 169 via
+  `true_quadratic_cost(x_hist_lqr, u_hist_lqr, ...)`, the local
+  function defined at lines 155-158): consumes `x_hist_lqr` from
+  `rollout_lqr_true` (lines 144-152), whose `xs = [x0]` then appends
+  one entry per step, giving `x_hist.shape[0] = EVAL_HORIZON + 1 =
+  201`. Line 158 normalizes by `x_hist.shape[0]` - divides by **201**.
+
+`201 / 200 = 1.005` exactly, matching the reported "1.0050000000000003"
+/ "1.0049999999999997" / "1.0050000000002886" figures (small residuals
+beyond the exact 1.005 come from M1/M0_S4's own gain not being bit-
+identical to the oracle's, not from anything else). This is not a
+one-off slip either - `s4dpc/control.py` itself already carries BOTH
+conventions simultaneously: `rollout_linear`/`rollout_learned` (the
+actual TRAINING-time loss, lines 129 and 198) normalize by
+`horizon_N` (200 - the numerator's convention), while `control.py`'s
+OWN canonical `true_quadratic_cost` (lines 240-247, the function
+`tools/lqr_transfer_to_true_plant.py`'s denominator re-implements
+locally) normalizes by `x_hist.shape[0]` (201 - the denominator's
+convention). `tools/lqr_transfer_to_true_plant.py` mixed the two
+established-but-different conventions within one ratio. **Every
+M1/M0_S4 "near-1.0x" claim in this project's history that used this
+construction is off by a confirmed, exact, quotable 0.5% multiplicative
+factor** - not large enough to change any qualitative verdict this
+project has drawn (M1/M0_S4 were never claimed to be anything but
+"near-oracle," and 1.000x vs 1.005x doesn't change that), but a real
+bug, now on the record. Not fixed this entry - verification only, per
+instruction.
+
+**TASK 4, confirmed directly from source: identification really does
+use `batch_size=1`.** `s4dpc/identify.py:44-54`'s `case_data()` calls
+`generate_microgrid_trajectory(batch_size=1, length=l_max, ...)` and
+returns `batch_inputs[0], batch_targets[0]` - a single trajectory, not
+a batch. `run_identify` (`s4dpc/identify.py:299` on) confirms this is
+exactly what real training sees: `data = {c: case_data(c, l_max, ...)
+for c in cases}` builds ONE trajectory per case, and
+`inputs_grid = jnp.stack([data[c][0] for c in flat_cases])` STACKS THE
+SAME single trajectory once per seed-member of the vmapped ensemble -
+every seed within a case trains on the identical 100-sample trajectory,
+differing only in weight initialization. **This is a documented,
+load-bearing limitation, not a bug to fix reflexively:** the whole
+identification recipe this project has used throughout - all 30 fullM3
+checkpoints, M0_S4, M4, M5, M6, the dither-cured artifacts - is built
+on this single-trajectory convention. Any claim resting on `Axx`,
+`equilibrium_drift`, or the OLS-based dither/gauge constructions
+inherits this limitation; any claim resting on the LQR-transfer
+failure itself, the coupling ratio, or the margin identity does not
+(those are properties of the augmented `(A,B)` regardless of how it
+was identified, and the external group's B=320 result shows the
+failure survives the data-volume fix).
+
+**What this changes and what it doesn't, stated plainly per
+instruction:** the paper's central empirical claim - learned S4
+surrogates fail DPC transfer catastrophically despite good one-step
+fidelity - is UNCHANGED and now independently strengthened. What
+changes is the MECHANISM chapter: the gauge/non-identifiability/dither-
+cure narrative (this project's entire 2026-08-18 "fifth-round" through
+"bias-term-round" arc) is retracted as the explanation, replaced by a
+coupling/margin story (`A_xs` causally implicated, margin identity,
+HiPPO spectral placement) that is currently an EXTERNAL, not yet
+independently re-verified, claim. The truncation result (TASK D,
+"excess realization content is not the culprit") is UNAFFECTED by any
+of this - it never depended on the gauge proof or the dither cure, and
+zeroing `A_xs` (the new mechanism) is consistent with, not
+contradicted by, truncation failing (a generic order-reduction method
+has no reason to find the SPECIFIC zero-`A_xs` direction).
+
+GPU: 0 (this entry is a written record of an external report plus
+direct code-reading verification on our own side - no reruns).
