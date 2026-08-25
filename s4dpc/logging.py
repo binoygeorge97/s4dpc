@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import platform
 import subprocess
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -34,6 +35,32 @@ def get_lockfile_sha(lockfile: Path | str | None = None) -> str:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
     except FileNotFoundError:
+        return "unknown"
+
+
+def get_machine_id() -> str:
+    """Hostname, CLAUDE.md §12/multi-machine provenance: one experiment
+    arm must never split across platforms because Kaggle GPU, Kaggle CPU
+    and local CPU produce different forward digests from identical code
+    (docs/DECISIONS.md) - now that multiple LOCAL machines are also in
+    play (docs/ENVIRONMENTS.md), git_sha/lockfile_sha alone can't tell
+    two runs on different hosts apart."""
+    try:
+        return platform.node() or "unknown"
+    except OSError:
+        return "unknown"
+
+
+def get_jax_backend() -> str:
+    """jax.default_backend() ("cpu"/"gpu"/"tpu") - distinguishes Kaggle
+    GPU / Kaggle CPU / local CPU / TACC runs sharing the same hostname
+    convention wouldn't otherwise separate. Import kept local: s4dpc.logging
+    is imported by scripts (env_probe.py, tools/*) that don't all need jax."""
+    try:
+        import jax
+
+        return jax.default_backend()
+    except Exception:
         return "unknown"
 
 
@@ -66,13 +93,22 @@ class Logger:
 
 
 def write_csv(path: Path | str, rows: Sequence[Mapping[str, Any]]) -> None:
-    """Write rows to `path`, stamping git_sha + lockfile_sha into every row."""
+    """Write rows to `path`, stamping git_sha + lockfile_sha + machine +
+    backend into every row (CLAUDE.md §12/multi-machine provenance -
+    added 2026-08-25 once three local machines were in regular use, so a
+    result row can be traced to hardware/backend, not just code
+    version)."""
     if not rows:
         raise ValueError("write_csv: no rows to write")
 
     git_sha = get_git_sha()
     lockfile_sha = get_lockfile_sha()
-    stamped = [{**row, "git_sha": git_sha, "lockfile_sha": lockfile_sha} for row in rows]
+    machine = get_machine_id()
+    backend = get_jax_backend()
+    stamped = [
+        {**row, "git_sha": git_sha, "lockfile_sha": lockfile_sha, "machine": machine, "backend": backend}
+        for row in rows
+    ]
 
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

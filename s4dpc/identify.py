@@ -33,7 +33,7 @@ import flax.serialization as serialization
 
 from s4dpc.blocks import BlockConfig, VARIANTS
 from s4dpc.data import generate_microgrid_trajectory
-from s4dpc.logging import get_git_sha, get_lockfile_sha
+from s4dpc.logging import get_git_sha, get_jax_backend, get_lockfile_sha, get_machine_id
 from s4dpc.model import StackedModel
 
 D_INPUT, D_OUTPUT = 9, 6  # cases 1-7: state_dim(6) + control_dim(3) -> state_dim(6)
@@ -414,6 +414,8 @@ def save_checkpoint(row: dict, config: dict, out_dir: pathlib.Path) -> pathlib.P
         "config": config,
         "git_sha": get_git_sha(),
         "lockfile_sha": get_lockfile_sha(),
+        "machine": get_machine_id(),
+        "backend": get_jax_backend(),
     }
     (ckpt_dir / f"{stem}.json").write_text(json.dumps(sidecar, indent=2))
 

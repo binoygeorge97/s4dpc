@@ -793,3 +793,41 @@ revert:**
   copy of the batch script, so `BASH_SOURCE[0]` pointed into the spool
   directory rather than the actual checkout (this is exactly what made
   smoke job 3377181 fail immediately with "fatal: not a git repository").
+
+---
+
+## 13. Multi-machine sync protocol
+
+Added 2026-08-25 once three local machines (ThinkPad P53, Lab PC, Home PC —
+full detail in `docs/ENVIRONMENTS.md`) were in regular use alongside Kaggle/
+Colab/TACC, all pushing to `main` directly (no branch protection is
+configured on this repo — confirmed via the GitHub API, not assumed). The
+risk isn't malicious, it's silent divergence: two machines editing the same
+files without syncing, or a result row from one machine's backend getting
+mixed into an analysis that assumes another's (CLAUDE.md §3 rule 4).
+
+**The three rules:**
+
+1. **Pull before starting work, on ANY machine, every time** — `git pull
+   --ff-only`. If it's not a clean fast-forward, STOP and look at what
+   diverged before doing anything else; don't force past it.
+2. **Commit and push before switching machines** — uncommitted work on one
+   machine is invisible to every other one. Don't leave a machine holding
+   the only copy of something overnight.
+3. **Never force-push** to `main`, from any machine, under any
+   circumstances covered by this file. (The repo-wide git safety rules
+   already forbid this by default — this section is not a new exception
+   path, just restating it applies identically across every machine.)
+
+**One-line "what state am I in" check**, run this before assuming a
+machine's checkout is current or its working tree is clean:
+
+```bash
+git fetch origin && git status --short && git log -1 --oneline && \
+  git rev-list --left-right --count main...origin/main
+```
+
+Empty `git status --short` output = clean tree. `0	0` from the last
+command = local `main` and `origin/main` are identical (no unpushed local
+commits, nothing to pull). Anything else — investigate before running
+`sweep.py`, launching a Kaggle/TACC job, or committing.
