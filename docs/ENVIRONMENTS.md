@@ -179,35 +179,42 @@ asserted against a reference automatically — it's a fingerprint you compare
 by eye against another machine's run, exactly as this project's own
 docstring says ("Run this before trusting any result from a new machine").
 
-**Three-way baseline captured 2026-08-25 — local CPU, local GPU (this
-machine, the ThinkPad P53), and Kaggle T4** — full JSON in
-`docs/env_probes/thinkpad_p53.json` (`.gpu`/`.cpu` keys) and
-`docs/env_probes/kaggle_t4.json`. Headline digests (truncated to 12 hex
-chars for readability — full values in the JSON):
+**Four-way baseline — local CPU, local GPU (this machine, the ThinkPad
+P53), Kaggle T4 (2026-08-25), and TACC A100 (2026-08-25, added once
+TACC was brought up on P53 — `docs/DECISIONS.md`'s TASK B entry)** —
+full JSON in `docs/env_probes/thinkpad_p53.json` (`.gpu`/`.cpu` keys),
+`docs/env_probes/kaggle_t4.json`, and `docs/env_probes/tacc_a100.json`.
+Headline digests (truncated to 12 hex chars for readability — full
+values in the JSON):
 
 ```
-              backend  matmul        fwd_digest_cnn  fwd_digest_rnn  grad_digest
-local CPU     cpu      ee9f0ab0064f  b5a876b4c7fe    89bb8310be31    2719f9e9d3ac
-local GPU     gpu      9b042a3047a2  e69ac8d8852d    8b614469bf83    5b669b8668c0
-Kaggle T4     gpu      eb3fd0e19539  061c073f7d8c    8b614469bf83    4f16366eb9aa
+              backend  matmul        fwd_digest_cnn  fwd_digest_rnn  cnn_rnn_max_abs_diff
+local CPU     cpu      ee9f0ab0064f  b5a876b4c7fe    89bb8310be31    2.32e-06
+local GPU     gpu      9b042a3047a2  e69ac8d8852d    8b614469bf83    5.19e-06
+Kaggle T4     gpu      eb3fd0e19539  061c073f7d8c    8b614469bf83    5.42e-06
+TACC A100     gpu      acf5d955f881  0c1c0dab90e2    c2d7a814a6f9    6.61e-03
 ```
 
 `param_tree_sha`/`param_count` (3942, matching the external
-reproduction's stated M6 count exactly) agree across all three — expected,
-architecture-only. Everything numeric diverges between CPU and either
-GPU, unsurprising. **The one genuinely interesting result: `fwd_digest_rnn`
-(the step-mode/`scan` forward pass) is BIT-IDENTICAL between local GPU and
-Kaggle T4** — different physical GPUs, different driver stacks, same
-digest — while `fwd_digest_cnn` (the conv-mode/FFT forward pass) differs
-between every pair, local-vs-local included (next paragraph). Read
-narrowly: this is one fixed-seed, freshly-initialized, float32,
-100-step canary — not a general portability guarantee, and specifically
-NOT the x64 regime real sweeps run under (`cnn_rnn_max_abs_diff` here is
-~5e-6, expected to be loose at float32 per CLAUDE.md's TACC x64 notes) —
-but it's a genuine, reproducible directional signal that the recurrent
-path travels better across GPU hardware than the convolutional one, on
-top of everything else this project has already found about that same
-conv/FFT path's sensitivity (`docs/DECISIONS.md`'s "TASK 0 EXTENSION").
+reproduction's stated M6 count exactly) agree across all four — expected,
+architecture-only. Everything numeric diverges between CPU and any GPU,
+unsurprising. **The one genuinely interesting result among the three
+GPUs: `fwd_digest_rnn` (the step-mode/`scan` forward pass) is
+BIT-IDENTICAL between local GPU and Kaggle T4** — different physical
+GPUs, different driver stacks, same digest — **but TACC's A100 matches
+NEITHER of them, on either `fwd_digest_cnn` or `fwd_digest_rnn`, and its
+own internal conv/step consistency (`cnn_rnn_max_abs_diff` 6.6e-3) is
+~1,000x looser than local GPU's or Kaggle T4's (~5e-6 each).** This
+canary runs at float32 — NOT the x64 regime real sweeps use — and this
+project already separately established, directly on TACC's A100s, that
+float32 S4 conv/recurrent parity is bad (~0.67 for M3) and collapses to
+~1e-13 under x64 (`README.md`'s TACC §9). Read together: TACC is
+admitted for real x64 sweep results on that existing, direct x64
+validation — NOT on this float32 digest, which it fails against both
+other GPU backends (`CLAUDE.md` §12's admission rule). `env_probe.py`
+has no x64-mode canary yet, so this comparison could not be run in the
+regime that actually matters — a natural extension for later, not done
+this round.
 
 **A second, independent local-GPU-specific hazard, confirmed directly
 this round: this machine's local GPU is not deterministic with ITSELF
@@ -239,11 +246,12 @@ requirements.lock`, §3 step 4). A machine reporting `jax_backend: cpu`
 after a manual/improvised install is not evidence of missing hardware;
 rebuild the venv from the lock file before concluding that.
 
-**When the Lab PC and Home PC are set up**, run this same command there and
-save `docs/env_probes/{machine}.json` next to this one — three of the
-likely four+ backends this project touches (local CPU, local GPU, Kaggle
-T4) are now on record; TACC's A100 and the other two local machines are
-not yet.
+**When the Lab PC and Home PC are set up**, run this same command there
+too and save `docs/env_probes/{machine}.json` next to this one — four of
+the backends this project touches (local CPU, local GPU, Kaggle T4,
+TACC A100) are now on record; the Lab PC's and Home PC's own local
+CPU/GPU digests are not yet, and would be worth comparing against P53's
+own local-CPU/local-GPU rows above rather than assumed identical.
 
 ---
 

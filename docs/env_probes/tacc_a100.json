@@ -1,0 +1,10 @@
+{
+  "python_version": "3.12.11",
+  "platform": "Linux-4.18.0-553.150.1.el8_10.x86_64-x86_64-with-glibc2.28",
+  "packages": {"jax": "0.7.2", "jaxlib": "0.7.2", "flax": "0.11.2", "optax": "0.2.8", "numpy": "2.0.2", "scipy": "1.16.3", "pandas": "2.3.3", "s4_nnx": "0.1.0"},
+  "jax_backend": "gpu",
+  "jax_devices": ["cuda:0", "cuda:1", "cuda:2"],
+  "jax_device_count": 3,
+  "numerics_canary": {"seed": 0, "shape": [512, 512], "dtype": "float32", "matmul_sha256": "acf5d955f88112f2fb8e2c1d8055f3e7583f9bd526242195996f9dc8d8c1c490", "matmul_sum": 18693.8671875},
+  "model_canary": {"seed": 0, "config": {"d_model": 16, "N": 32, "n_layers": 1, "l_max": 100, "d_input": 9, "d_output": 6}, "param_tree_sha": "2df0eecc49e8e9871bdbf0ff7952eb8ea8ab1dedfd893b82d32e1134ebceff6c", "param_count": 3942, "fwd_digest_cnn": "0c1c0dab90e2405a406d7f5ed9a149741ac32be991488462997fa7264666e221", "fwd_digest_rnn": "c2d7a814a6f9f379110999802e52bd595016b40a64ee2b33d5b5b757b9759a24", "cnn_rnn_max_abs_diff": 0.006608366966247559, "cnn_rnn_rmse": 0.00205863150767982, "cnn_rnn_rel_l2": 0.0021478976123034954, "grad_digest": "40fd069b60faa7892fb8167f8f95f92d35439b3e3fbe875ed2fd07957ff992a1"}
+}

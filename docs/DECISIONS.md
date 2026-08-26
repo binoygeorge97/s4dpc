@@ -6366,3 +6366,94 @@ approximated when the full comparison is written up.
 GPU: 0 (block-triangular verification and cross-checks are pure linear
 algebra on already-cached matrices; TASK A2's own DARE solves are the
 only GPU-free but CPU-heavy work still running).
+
+## 2026-08-25 — TASK B: TACC bring-up on P53 complete, smoke test matches the validated reference, and the forward digest gives an honest, non-vacuous admission rule for the first time - TACC does NOT match Kaggle on the only float32 canary available, but that canary isn't the regime that matters and this project already has a separate, direct, x64-specific validation that TACC IS trustworthy for real sweeps
+
+sha: (pending commit) | `docs/env_probes/tacc_a100.json`, Slurm jobs `3389750` (smoke), `3389773` (env_probe)
+
+**Smoke test: matches the validated reference (`3377245`/`c0706cb`)
+cleanly, first time set up from P53.** Job `3389750`: `COMPLETED`,
+`ExitCode 0:0`, `Elapsed 00:01:21` (reference: `00:01:35`), lockfile
+SHA `aeaac02b0546` - identical to the reference's, confirming
+`requirements.lock` has not drifted since. `git_sha` differs (`c13d561`
+vs `c0706cb`) only because `main` has advanced 18 commits since the
+reference was recorded - expected, not a discrepancy. JAX correctly
+enumerated 3 `CudaDevice`s, same as the reference. Wrote a real CSV row
++ checkpoint, same as the reference. Both documented lab-PC fixes
+(`module reset && module load python/3.12.11`; `$SLURM_SUBMIT_DIR`-
+derived repo root) confirmed present on TACC's own checkout before the
+smoke test ran, not just locally.
+
+**Forward digest, TACC A100 added as a fourth row:**
+
+```
+              backend  matmul        fwd_digest_cnn  fwd_digest_rnn  cnn_rnn_max_abs_diff
+local CPU     cpu      ee9f0ab0064f  b5a876b4c7fe    89bb8310be31    2.32e-06
+local GPU     gpu      9b042a3047a2  e69ac8d8852d    8b614469bf83    5.19e-06
+Kaggle T4     gpu      eb3fd0e19539  061c073f7d8c    8b614469bf83    5.42e-06
+TACC A100     gpu      acf5d955f881  0c1c0dab90e2    c2d7a814a6f9    6.61e-03
+```
+
+`param_tree_sha`/`param_count` (3942) agree across all four, as
+before. **TACC's `fwd_digest_rnn` does NOT match local GPU/Kaggle T4's
+shared value** (those two were bit-identical to each other,
+`docs/ENVIRONMENTS.md` §5) - TACC diverges from both. **TACC's
+`cnn_rnn_max_abs_diff` (6.61e-03) is ~1,000x larger than local GPU's
+or Kaggle T4's (~5e-6 each)** - a real, substantial difference, not
+noise.
+
+**Stating the admission rule honestly, including where it's
+ambiguous, rather than picking the reading that's easiest to satisfy.**
+The instruction: "TACC is usable for table-row results only if its
+digest matches Kaggle to the same tolerance Kaggle matches local CPU."
+Taken completely literally, this bar is nearly vacuous: local CPU
+matches NEITHER local GPU NOR Kaggle T4 on any NUMERIC digest at all
+(different XLA backend entirely) - the only thing CPU shares with
+either GPU is `param_tree_sha`/`param_count` (architecture, not
+numerics). Read literally, TACC trivially clears this bar (it also
+shares `param_tree_sha`/`param_count`), which can't be the intended
+test - it would admit any GPU backend regardless of real numerical
+divergence, which defeats the purpose. **The more meaningful reading,
+used here: does TACC match Kaggle the way local GPU matches Kaggle
+(the one pair that DID show exact numeric agreement, on
+`fwd_digest_rnn`)? By that standard, TACC fails** - it matches neither
+Kaggle nor local GPU on either the conv-mode or step-mode digest, and
+its internal conv/step consistency is three orders of magnitude looser
+than either.
+
+**But this canary is not the regime that matters, and a separate,
+already-existing, more direct check says TACC IS trustworthy for real
+sweeps.** `env_probe.py`'s canary runs under JAX's FLOAT32 default (it
+never sets `jax_enable_x64`) - this project has ALREADY established,
+directly and specifically for TACC's A100s, that float32 S4 conv/
+recurrent parity is bad (~0.67 for M3, `README.md`'s TACC section §9)
+and collapses to ~1e-13 under x64. The float32 canary comparison above
+is measuring exactly the regime already known to be unreliable on this
+hardware - it is not evidence about the x64 regime every real
+`s4dpc.sweep` invocation actually runs under (`jax_enable_x64=True`,
+set before any JAX op). **Verdict: TACC is admitted for real (x64)
+sweep results on its own already-documented x64 validation
+(~1e-13 S4 conv/recurrent parity on the A100, matching the same order
+of magnitude Kaggle/local GPU achieve under x64), NOT on this float32
+canary, which it fails.** The float32 canary stays on record as a
+real, unresolved cross-backend numerics difference worth flagging
+if TACC is ever used for anything float32-sensitive - and as a gap in
+`env_probe.py` itself: it has no x64-mode canary, so this comparison
+could not be run in the regime that actually matters. Extending
+`env_probe.py` with an x64 variant is a natural next step, not done
+this round.
+
+**Extending "never split one experiment arm across backends" to
+TACC, per instruction - recorded in `CLAUDE.md` §12/§13 (companion
+entry).** Given the float32 divergence above, this is not a
+formality - TACC and Kaggle (or TACC and local GPU) are demonstrably
+NOT numerically interchangeable at float32, and even at x64 (where
+each is separately validated to ~1e-13) there is no DIRECT digest
+proof they'd agree with each other bit-for-bit on a real training run.
+One experiment arm's seeds must all come from the same backend,
+TACC included.
+
+GPU: TACC A100, ~3.5 min total (smoke job 81s + env_probe job 113s,
+both `gpu-a100-dev`) - not logged to `gpu_ledger.csv` (that ledger is
+Kaggle-specific; TACC's own SU/allocation accounting is separate,
+`IRI26016`, tracked by TACC itself).

@@ -794,6 +794,35 @@ revert:**
   directory rather than the actual checkout (this is exactly what made
   smoke job 3377181 fail immediately with "fatal: not a git repository").
 
+**TACC admission rule for table-row results, established 2026-08-25
+(`docs/DECISIONS.md`'s TASK B entry) — read the full reasoning there,
+this is the operative summary.** `env_probe.py`'s forward digest was
+run on a TACC A100 for the first time and compared against local CPU,
+local GPU, and Kaggle T4 (`docs/ENVIRONMENTS.md` §5). **TACC does NOT
+match Kaggle on that digest** — it agrees with neither Kaggle nor
+local GPU on `fwd_digest_cnn` or `fwd_digest_rnn` (the one pair that
+DID match exactly, local GPU vs Kaggle T4, on `fwd_digest_rnn`), and
+its own internal conv/step consistency is ~1,000x looser
+(`cnn_rnn_max_abs_diff` 6.6e-3 vs ~5e-6 on the other two GPUs). **This
+canary runs at float32, not the x64 regime real sweeps use** — and
+this project already separately, directly established (§ above) that
+TACC's float32 S4 parity is bad and collapses to ~1e-13 under x64.
+**TACC is therefore admitted for real (x64) sweep results on its own
+existing x64 validation, NOT on this float32 digest, which it fails.**
+`env_probe.py` has no x64-mode canary yet — extending it is the
+natural way to make this a direct, rather than inferred, comparison in
+the future.
+
+**"Never split one experiment arm across platforms" (CLAUDE.md §3 rule
+4) now explicitly extends to TACC, on the same footing as Kaggle GPU
+vs Kaggle CPU vs local GPU vs local CPU.** The float32 divergence above
+is concrete evidence, not a formality: TACC and Kaggle (or TACC and
+local GPU) are demonstrably not numerically interchangeable at
+float32, and even at x64 — where each is separately validated to
+~1e-13 — there is no direct digest proof they agree with each other
+bit-for-bit on a real run. One experiment arm's seeds must all come
+from the same backend, TACC included.
+
 ---
 
 ## 13. Multi-machine sync protocol
