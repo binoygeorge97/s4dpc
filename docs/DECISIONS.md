@@ -6457,3 +6457,204 @@ GPU: TACC A100, ~3.5 min total (smoke job 81s + env_probe job 113s,
 both `gpu-a100-dev`) - not logged to `gpu_ledger.csv` (that ledger is
 Kaggle-specific; TACC's own SU/allocation accounting is separate,
 `IRI26016`, tracked by TACC itself).
+
+## 2026-08-25 — TASK A2 complete: zeroing A_xs is NOT a general cure at B=1 - only 3/30 stabilize, the population median stays catastrophic, and on 6/30 checkpoints zeroing A_xs makes cost WORSE, not better. Coupling is A significant factor, not the whole mechanism, and the residual is confirmed as a real, distinct open object.
+
+sha: (pending commit) | `docs/task_a2_warmstart_axs_zeroed.csv` (30 rows, complete),
+`docs/lqr_cache/fullM3_axszeroed_*.npz` (30 files)
+
+**Scope, stated precisely before the numbers: this ran on the B=1
+`fullM3` population (30 checkpoints, matching TASK 4(b)'s own
+population), not B=320.** The external group's "356x -> 1.0013x" claim
+and this project's own B=320 numbers are both separate populations -
+this entry does not speak to B=320 at all, and should not be read as
+extending to it without a separate run.
+
+**Full distribution, all 30 checkpoints, `A_xs` zeroed at synthesis,
+cold-start (cold and warm are identical to float64 noise throughout -
+`K_s'=0` exactly, per the interim entry above, so there is nothing for
+an initial condition to act on):**
+
+```
+n_stable (rho<1): 3/30
+cost_ratio: median=396.5x  geometric mean=897.0x  min=3.34x  max=1.44e7x
+distribution: <1x:0  1-10x:4  10-100x:4  100-1e3x:9  1e3-1e4x:2  1e4-1e5x:9  >1e5x:2
+```
+
+**This flatly contradicts a universal reading of "converts 356x into
+1.0013x."** 27/30 checkpoints remain unstable after zeroing `A_xs`;
+even the 3 that DO stabilize land at 3.3x-5.1x cost, not ~1.0x; the
+population median (396.5x) and geometric mean (897.0x) are both still
+catastrophic failures by this project's own standing definition. Per
+instruction: **coupling (`A_xs`) is a significant, real factor - it is
+NOT the whole mechanism, and the residual is confirmed as a genuine,
+distinct open object**, not a rounding error around an otherwise-clean
+cure.
+
+**Sharper and more surprising than "the cure is incomplete": on 6 of 30
+checkpoints, zeroing `A_xs` makes cost WORSE than the original,
+un-zeroed baseline - not merely "less improved," genuinely worse:**
+
+```
+case5/seed2: 1.26e3x -> 1.19e4x  (9.4x WORSE)
+case4/seed0: 1.57e6x -> 1.44e7x  (9.2x WORSE)
+case5/seed4: 1.94e4x -> 6.20e4x  (3.2x WORSE)
+case7/seed4: 3.11e2x -> 4.60e2x  (1.5x WORSE)
+case5/seed3: 8.83e2x -> 1.14e3x  (1.3x WORSE)
+case1/seed2: 1.11e1x -> 1.32e1x  (1.2x WORSE)
+```
+
+**On the other 24/30, zeroing helps - sometimes by an enormous margin**
+(case1/seed1: 2.21e11x -> 3.34x, an ~6.6e10x improvement; case5/seed0:
+9.62e12x -> 5.70e4x, ~1.69e8x improvement - still catastrophic in
+absolute terms, but a real, large reduction). **The sign of the effect
+is not predictable from the coupling magnitude alone** - this is not
+"zeroing always helps a little" or "zeroing always helps a lot," it is
+genuinely bidirectional, checkpoint-dependent. A natural, not-yet-tested
+hypothesis: `A_xs`, despite being the thing that ultimately destabilizes
+the joint system on most checkpoints, may on SOME checkpoints also be
+providing compensation that zeroing removes - consistent with Riccati
+having co-designed `K_x`/`K_s` against the REAL (nonzero-`A_xs`) system,
+so forcibly zeroing `A_xs` only in the SYNTHESIS matrix while nothing
+else about the plant changes is not guaranteed to be safe even on
+average, let alone universally.
+
+**What this does and does not change about the retracted mechanism
+narrative:** TASK 4(a) already established `rho(A_t+B_t@K_x)>1` for
+ALL 30 checkpoints under the ORIGINAL (un-zeroed) `K_x` - zero
+checkpoints escape instability via the physical-block gain alone.
+Zeroing `A_xs` at synthesis moves that to 3/30 - a real, non-trivial
+improvement in COUNT, but the fact that 27/30 remain unstable (and 6/30
+get WORSE) means `A_xs` is demonstrably not the sole lever. The
+external group's own reported number is, per the earlier TASK A3 entry,
+un-locatable in this project's record beyond "a 356x failure" (singular,
+un-labeled by B-value) - this population-level result does not confirm
+or refute their specific number, since it was never established whether
+theirs was one cherry-picked checkpoint, a median, or at what B.
+
+GPU: 0 (30 fresh 1030-dim DARE solves, CPU-only, ~4 hours wall-clock
+total across two attempts - the first died silently from fully-buffered
+stdout losing all progress on an unrelated interruption, the second
+(unbuffered, `python3 -u`) ran to completion).
+
+## 2026-08-25 — TASK A complete: M3 systematically understates the true plant's own open-loop instability at B=1, recovers it much better at B=320, and the simple conditioning-times-coupling bound does not predict n_unstable
+
+sha: (pending commit) | `docs/task_a_coupling_quantify.csv` (120 rows, complete)
+
+**(i) `n_unstable(A_xx)` - the physical-block Jacobian's own open-loop
+eigenvalues, no control involved, M3 at B=1/B=320 with M1/M0_S4 as
+controls:**
+
+```
+M1     (n=30): median=6.0  range [2,6]   - M1 recovers A_d to ~1e-14, so this is essentially the TRUE plant's own open-loop instability count per case
+M0_S4  (n=30): median=6.0  range [0,6]   - Axx=A_d exactly by construction, same story
+M3_B1  (n=30): median=0.0  range [0,2]   - SEVERELY UNDERSTATES the true plant's instability
+M3_B320(n=30): median=5.0  range [1,6]   - much closer to the true 6
+```
+
+**M3 at B=1 does not just have a large `Axx` relative error (91.7%,
+already established) - it fundamentally misrepresents the plant's
+STABILITY CHARACTER: the true plant is unstable in most/all of its 6
+modes on most cases (M1/M0_S4 median 6), while M3's own learned `Axx`
+at B=1 thinks the plant is almost entirely stable (median 0).** At
+B=320, `Axx` recovers the correct instability count much more closely
+(median 5, close to the true 6) - the SAME B=1-vs-B=320 improvement
+already seen in `axx_rel_err`/`equilibrium_drift`, now stated in a
+directly interpretable way: at B=1 the identified model doesn't know
+which of its own modes are unstable; at B=320 it mostly does. This is
+exactly consistent with TASK 4(a)'s finding that `K_x` from B=1's
+understated `Axx` fails to stabilize the (more unstable than believed)
+true plant - the K designed for a nearly-stable-looking system is
+under-powered for the real one.
+
+**(ii) Eigenvalue condition numbers `kappa(lambda)=1/|y^H x|` for the
+`A_ss` modes within `1e-2` of the unit circle:**
+
+```
+M3_B1:   kappa_median (per-checkpoint median) = 1.26e13   kappa_max (per-checkpoint max) = 1.48e15, worst checkpoint 1.17e16
+M0_S4:   kappa_median = 6.53e14   kappa_max = 1.10e16, worst checkpoint 5.70e16
+M3_B320: kappa_median = 9.71e12   kappa_max = 1.73e15, worst checkpoint 1.07e16
+```
+
+Extremely ill-conditioned throughout, all populations, both B values -
+condition numbers in the `1e12`-`1e16` range mean a perturbation to
+`A_ss` as small as `1e-13` in the right direction could shift some of
+these eigenvalues by `O(1)` - the spectrum LOOKS safely inside the unit
+disk (TASK 3: every checkpoint's `A_ss` eigenvalues are individually
+`<1`) while being extraordinarily sensitive to any coupling
+perturbation, exactly the mechanism a large condition number predicts.
+
+**(iii) Departure from normality,
+`||A_ss^H A_ss - A_ss A_ss^H||_F / ||A_ss||_F^2`:** median ~7.0e-3
+across M3_B1/M0_S4/M3_B320 alike - small in absolute terms, consistent
+across every population, does not by itself distinguish the variants.
+Non-normality this small still produces the enormous condition numbers
+above once the spectrum is sufficiently CLUSTERED near the unit circle
+(TASK 3's histogram: thousands of eigenvalues packed into `[0.9,
+0.999)` on every checkpoint) - clustering, not raw non-normality
+magnitude, appears to be doing most of the work.
+
+**(iv) `||A_xs||_F` and `||A_sx||_F`:**
+
+```
+M3_B1:   axs_norm median=18.22 (max 30.30)   asx_norm median=0.55 (max 0.80)
+M0_S4:   axs_norm = 0 exactly (by construction)   asx_norm median=343.3 (max 559.5)
+M3_B320: axs_norm median=17.21 (max 35.28)   asx_norm median=0.64 (max 0.92)
+```
+
+`axs_norm` is essentially unchanged between B=1 and B=320 (matching the
+already-established coupling-ratio-stays-flat finding). **`asx_norm`
+is ~600x larger for M0_S4 than for M3** - M0_S4's hand-constructed
+`Asx` (feeding the true, un-normalized physical state directly into the
+S4 recursion) is structurally very different in scale from what M3
+learns; not chased further this round, flagged as a real, unexplained
+scale difference.
+
+**(v) `kappa_max * ||A_xs||` vs the observed `n_unstable(Abar)` -
+checked honestly, does NOT predict well:** `Spearman(kappa_max*axs_norm,
+n_unstable_full)` on M3_B1's 30 checkpoints = **0.22 (p=0.24, not
+significant)**. The simplest first-order perturbation-theory product
+does not explain which checkpoints end up with more or fewer unstable
+`Abar` eigenvalues - consistent with this project's own established,
+recurring pattern (`docs/DECISIONS.md`'s many "no tested spectral
+quantity correlates with severity" entries) rather than a new
+counterexample to it. Reported as a real negative result, not
+suppressed.
+
+**Learned `Delta` (S4 timescale) statistics and the closed-form
+`Lambda_re<=-1e-4` bound, checked against real checkpoints, not just
+theory:**
+
+```
+M3_B1:    step(Delta) median-of-medians = 1.13e-2   Lambda_re_max (closest to 0), median = EXACTLY -1e-4 (at the clip boundary)
+M3_B320:  step(Delta) median-of-medians = 1.14e-2   Lambda_re_max, median = EXACTLY -1e-4 (at the clip boundary)
+M0_S4:    step(Delta) median-of-medians = 1.20e-2   Lambda_re_max, median = -5.0e-1 (nowhere near the boundary - never trained, HiPPO init only)
+```
+
+**Real, trained checkpoints (M3, both B values) consistently have at
+least one mode saturating the `-1e-4` clip - not a theoretical edge
+case, the median-of-medians across 30 checkpoints each sits EXACTLY at
+the boundary.** Combined with the closed-form Tustin bound from the
+interim entry (`step_min * |Re|_min = 0.001*1e-4 = 1e-7` at the
+parameterization's absolute extremes) and these REALISTIC observed
+values (`~0.0113 * 1e-4 ~= 1.13e-6`): **the parameterization does
+permit, and real training does drive checkpoints toward, discrete
+poles within ~1e-6 of the unit circle - confirmed with real data, not
+only the theoretical extreme.** (The DPLR low-rank correction pushes
+the WORST observed `A_ss` eigenvalue even closer than this naive
+single-mode product predicts on some checkpoints - TASK 3's own
+`max_abs_ass` up to `0.999975`, margin `2.5e-5` - consistent with
+coupling between modes mattering on top of any single mode's own
+Tustin-implied proximity, not a contradiction of the bound.)
+
+**Refuting the standing hypothesis, per instruction:** the idea that
+`n_unstable` reflected unstable `A_ss` modes directly is REFUTED -
+`A_ss` has zero unstable eigenvalues on every one of 60 checkpoints
+tested (TASK 3, prior entry). Instability is coupling-induced, and the
+operative quantity is eigenvalue CONDITIONING of a clustered,
+non-normal latent spectrum interacting with real (`axs_norm` 12-35),
+not-well-predicted-by-a-simple-product coupling magnitude - not any
+single mode crossing the unit circle on its own.
+
+GPU: 0 (pure linear algebra/eigendecomposition on already-saved
+checkpoints - no training, no GPU).
