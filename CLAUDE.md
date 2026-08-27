@@ -807,11 +807,15 @@ its own internal conv/step consistency is ~1,000x looser
 canary runs at float32, not the x64 regime real sweeps use** — and
 this project already separately, directly established (§ above) that
 TACC's float32 S4 parity is bad and collapses to ~1e-13 under x64.
-**TACC is therefore admitted for real (x64) sweep results on its own
-existing x64 validation, NOT on this float32 digest, which it fails.**
-`env_probe.py` has no x64-mode canary yet — extending it is the
-natural way to make this a direct, rather than inferred, comparison in
-the future.
+**Stated explicitly, per instruction: admission is for x64 experiment
+arms only.** TACC IS admitted for real (x64) sweep results, on its own
+existing x64 validation (~1e-13 S4 conv/recurrent parity, § above) —
+but the float32 digest mismatch documented here BARS TACC from any
+float32 arm outright. This is not "TACC is admitted, with a caveat
+about float32" — it is two separate rulings: admitted at x64, barred
+at float32, on independent evidence for each. `env_probe.py` has no
+x64-mode canary yet — extending it is the natural way to make the x64
+admission a direct, rather than inferred, comparison in the future.
 
 **"Never split one experiment arm across platforms" (CLAUDE.md §3 rule
 4) now explicitly extends to TACC, on the same footing as Kaggle GPU

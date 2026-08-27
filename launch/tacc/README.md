@@ -266,10 +266,19 @@ machine, not a second procedure.
       User binoygeorge
       ControlMaster auto
       ControlPath ~/.ssh/sockets/%r@%h-%p
-      ControlPersist 4h
+      ControlPersist 12h
       ServerAliveInterval 60
       ServerAliveCountMax 3
   ```
+  **`ControlPersist` was raised from 4h to 12h (2026-08-25)** after the
+  socket lapsed mid-session during a ~2 hour local CPU computation with
+  no TACC activity — `ControlPersist` counts IDLE time since the last
+  client disconnected, not wall-clock session length, so any gap this
+  long (a long local analysis, a real production sweep's own runtime)
+  will outlast a 4h window with no TACC interaction in between. 12h
+  covers a full working day; re-run the interactive login (step 3) if
+  the socket has genuinely expired — `ssh -O check ls6.tacc.utexas.edu`
+  reports `No such file or directory` when it has.
 - **Socket verification (`ssh -O check ls6.tacc.utexas.edu`) must run
   on the LOCAL machine, in a second terminal — not inside the TACC ssh
   session itself.** The control socket is a local-machine artifact
