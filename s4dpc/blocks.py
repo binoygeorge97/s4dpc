@@ -36,6 +36,11 @@ class BlockConfig:
     memoryless: bool = False  # layernorm_study/CLAUDE.md: truncate the S4 branch to
     # its zero-lag impulse response only (no memory) - see
     # _memoryless_s4_branch below for why this belongs here rather than in s4-nnx.
+    postnorm_also: bool = False  # layernorm_study Exp2's combined prenorm+postnorm
+    # arm: an INDEPENDENT second LayerNorm applied at the very end (after the
+    # residual add, after the primary prenorm/postnorm norm if any) - default
+    # False leaves every existing M3-M6/M6_fix variant's forward pass, and
+    # its RNG key-splitting order (test_m6_init_params_match_legacy), untouched.
 
 
 VARIANTS = {
@@ -151,6 +156,18 @@ class ConfigurableBlock(nnx.Module):
         if config.glu:
             self.out2 = nnx.Linear(config.d_model, config.d_model, rngs=nnx.Rngs(params=keys[2]))
 
+        # fold_in (not a 4th split() slot): keeps `keys` a fixed 3-way split
+        # of rngs.params() regardless of postnorm_also, so M3-M6/M6_fix
+        # (postnorm_also=False always) keep the EXACT key-derivation
+        # sequence test_m6_init_params_match_legacy checks bit-for-bit -
+        # widening the split() count would change keys[0..2] themselves,
+        # not just add a 4th, since split()'s outputs depend on the
+        # requested count.
+        self.norm_post = None
+        if config.postnorm_also:
+            post_key = jax.random.fold_in(keys[0], 1)
+            self.norm_post = nnx.LayerNorm(config.d_model, rngs=nnx.Rngs(params=post_key))
+
     def __call__(self, x: jax.Array, s4_state: jax.Array) -> tuple[jax.Array, jax.Array]:
         skip = x
 
@@ -191,5 +208,8 @@ class ConfigurableBlock(nnx.Module):
 
         if self.norm is not None and not self.config.prenorm:
             x = self.norm(x)
+
+        if self.norm_post is not None:
+            x = self.norm_post(x)
 
         return x, new_s4_state
