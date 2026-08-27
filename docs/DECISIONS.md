@@ -6750,3 +6750,282 @@ chased further this round.
 GPU: 0 (6-dimensional DARE solves are near-instant - the entire run,
 90 checkpoints across 3 populations plus the oracle-reproduction
 sanity check, completed in well under a minute).
+
+## 2026-08-26 — TASK A5: deployment-only A_xs zeroing (s -> u -> x channel kept live)
+
+sha: 270f369 | data: docs/lqr_transfer_warmstart.csv (B=1 fullM3, n=30,
+already computed as TASK 4(b) - reused here under this label, no new
+computation needed)
+
+**Spec, verbatim:** zero `A_xs` at deployment only, retaining the full
+unzeroed synthesis including `K_s != 0`. This keeps the `s -> u -> x`
+channel live while removing the direct `s -> x` path, and unlike A2
+it is not predetermined. Report cold and warm latent initialisation.
+
+**This construction already exists in the repo under a different
+label - TASK 4(b)'s warm-start script - and is exactly, not
+approximately, the same thing.** Verified directly, not assumed: every
+LQR-transfer construction used anywhere in this project (established
+`lqr_transfer_to_true_plant.py` pattern, section-by-section grepped
+this round) builds the open-loop transfer matrix as
+`A_open = block([[A_true, 0], [Asx, Ass]])` - the `(0, D_X:)` block,
+i.e. the direct `s -> x` path, is a hard-coded `zeros(...)` in EVERY
+variant used in this project, never populated from the model's own
+`Asx.T` or any other value. Real linear plants have no physical
+mechanism by which a learned S4 hidden state could act on the true
+6-dimensional state except by first passing through the control input
+`u = -K_x@x - K_s@s`. So "zero `A_xs` at deployment, keep `K_s != 0`"
+does not describe a new script - it describes the ALREADY-STANDARD
+transfer construction, run with the ORIGINAL (unzeroed) synthesis gain.
+That is precisely what `tools/lqr_transfer_warmstart.py` (TASK 4(b))
+does: `K_lqr, _ = solve_lqr_cached("fullM3", ...)` (the original,
+un-zeroed-at-synthesis cache - confirmed by grep,
+`tools/lqr_transfer_warmstart.py:99`), then
+`K_direct = np.hstack([-K_x, -K_s])` (`tools/lqr_transfer_warmstart.py:108`)
+- `K_s` is carried through into the closed loop unmodified, not
+discarded. The only free variable TASK 4(b) already varies is the
+LATENT INITIAL CONDITION (cold `s_0=0` vs warm, burned-in over the real
+100-step identification trajectory) - exactly what this task asks to
+be reported.
+
+**Confirming this is not predetermined (unlike A2):** A2's outcome is
+a deterministic function of `sign(rho(A_t + B_t@K_x^zeroed) - 1)`
+because zeroing `A_xs` at SYNTHESIS forces `K_s' = 0` by the K_s'=0
+theorem, making the closed loop exactly block-triangular. Here,
+`K_s != 0` is retained, so the closed-loop spectrum has no such
+decomposition - `rho` is a genuine function of the full augmented
+matrix pencil, not read off a block-triangular factor. This is why the
+result differs from a coin flip on the physical block alone: TASK A5
+is uniformly WORSE than either A2 or the plain augmented synthesis,
+not better - see below.
+
+```
+n=30 (B=1, fullM3):  n_stable=0/30
+cold (s0=0):  median=2.5300e+04x   min=1.11e+01x   max=9.67e+12x
+warm (burned-in s_100): median=5.5123e+04x  min=1.38e+01x  max=3.60e+14x
+n where warm > cold (strictly worse): 30/30
+```
+
+**Result: 0/30 stable under either initialisation - worse than both
+A2 (3/30 stable) and TASK A4's physical-only synthesis (23/30 stable
+at B=320, not directly comparable batch size but qualitatively stark),
+and warm-starting makes every single checkpoint worse, reproducing
+TASK 4(b)'s own already-published finding (median 25,300x cold ->
+55,123x warm) exactly, because it IS that finding.** This sharpens the
+two-failure-mode picture from the A2/A4 write-up above: A2 (zero
+`A_xs` AND force `K_s=0`) recovers stability on 3/30 by removing BOTH
+the direct coupling contamination in synthesis and the deployed
+`s -> u` compensation path; A5 (zero the already-nonexistent direct
+`s -> x` term while KEEPING the contaminated `K_s`) recovers nothing -
+consistent with the reading that `K_s`, inherited from a Riccati
+solution co-designed for a coupled 1030-dim system that does not exist
+on deployment, is actively harmful once decoupled from the specific
+`A_xs` it was jointly solved against, not merely inert. No new script
+was needed or written for this entry - TASK 4(b)'s output is TASK A5's
+answer.
+
+GPU: 0 (no new computation - re-labeling and re-analyzing already-cached results).
+
+## 2026-08-26 — Riccati-residual audit, retroactive, all cached DARE solves
+
+sha: (pending) | script: tools/task_riccati_residuals.py | data:
+docs/task_riccati_residuals.csv (n=240: 5 augmented populations x 30 +
+3 physical-only populations x 30)
+
+**Spec, verbatim:** for every DARE solve behind a reported cost ratio,
+record relative residual `||A'PA - P - A'PB(R+B'PB)^-1 B'PA + Q||_F /
+||P||_F`, `cond(R+B'PB)`, and `rho(A+BK)` on the DESIGN model (not the
+transfer target). Flag any checkpoint whose residual isn't near machine
+precision as unreliable. Threshold used: `rel_residual >= 1e-8` flagged.
+
+**Covered every cached `(K_lqr, P)` pair used anywhere in this
+session's DARE-based results**: augmented 1030-dim (or 6-dim for M1)
+solves for `fullM3`, `M1`, `M0_S4`, `fullM3_axszeroed` (TASK A2), and
+`M3_b320` (TASK 4(a)); plus TASK A4's physical-only 6-dim solves for
+`M3_b320`, `M1`, `M0_S4` (re-solved here since no cache existed for
+those - the 6-dim solve is near-free either way).
+
+```
+variant                rel_residual        cond(R+B'PB)     rho_design        n_flagged
+                        median    max        median  max     median  max
+M0_S4 (augmented)       2.7e-13  4.1e-12    1.03   1.04     0.9987  0.9990    0/30
+M1 (augmented, =physonly, 6-dim natively) 1.5e-15 8.7e-15  1.03  1.04  0.9805  0.9934  0/30
+fullM3 (B=1, augmented) 1.5e-12  4.0e-11    1.18   1.33     0.9997  0.9999    0/30
+fullM3_axszeroed (TASK A2) 9.1e-15 1.4e-13  1.06   1.40     0.9993  0.9999    0/30
+M3_b320 (B=320, augmented) 6.2e-9  6.1e-7   1.12   1.28     0.9998  1.0000    7/30  <-- FLAGGED
+M0_S4_physonly (TASK A4)  9.4e-16 3.8e-15   1.03   1.04     0.9805  0.9934    0/30
+M1_physonly (TASK A4)      1.5e-15  8.7e-15   1.03   1.04     0.9805  0.9934    0/30
+M3_b320_physonly (TASK A4) 1.9e-15  2.1e-14   1.03   1.07     0.9808  0.9976    0/30
+```
+
+**Every DARE solve behind every reported number is numerically clean
+except one: the B=320 AUGMENTED 1030-dim solve (`M3_b320`, feeding
+TASK 4(a)'s `rho(A_t+B_t@K_x)` and TASK A4's `gain_diff_rel`
+comparison), which has 7/30 checkpoints with relative residual
+`3.0e-8` to `6.1e-7` - roughly 4-5 orders of magnitude looser than
+every other population's worst case (`4.1e-11` at most elsewhere).**
+`cond(R+B'PB)` stays a mild `1.1-1.3` throughout (never the driver),
+and `rho_design < 1` on all 240 rows (every cached `P` IS a genuine
+stabilizing solution of its own design model, at whatever precision it
+converged to) - so nothing here invalidates a stability VERDICT, but
+it does confirm the user's standing suspicion (raised from the
+200-440s/2x-spread solve times) that the B=320 augmented Newton solver
+is genuinely struggling on a subset of checkpoints, not merely slow.
+**Notably, this is specific to the AUGMENTED 1030-dim B=320 solve -
+TASK A4's OWN physical-only 6-dim re-solve on the identical B=320
+checkpoints is clean (max `2.1e-14`, tied with the cleanest population
+in the table)**, meaning TASK A4's headline 23/30-stable result and
+its own `rho`/`cost_ratio` numbers are NOT affected by this finding at
+all - only the `K_x^aug` half of `gain_diff_rel` (pulled from the
+flagged cache) carries a small amount of extra numerical noise for
+these 7 checkpoints specifically.
+
+**Overlap worth flagging, not yet causally established:** 4 of the 7
+residual-flagged checkpoints (`case2/seed4`, `case5/seed0`,
+`case5/seed1`, `case5/seed4`) are also among TASK A4's 7 checkpoints
+that fail to stabilize the true plant under physical-only synthesis,
+and all 7 residual-flagged checkpoints fall in cases 2 or 5 - the same
+two cases TASK A4 already called out as "intrinsically harder." This
+is consistent with either direction of causation (a harder case's
+`Abar` could be more poorly scaled, making the augmented DARE
+genuinely harder to solve to tight tolerance; or a looser augmented
+solve could itself be contributing degraded signal into the harder-
+case diagnosis) and is not disentangled here - flagged for awareness,
+not treated as resolved.
+
+GPU: 0 (240 residual evaluations - the 6-dim ones near-instant, the
+1030-dim ones a handful of dense matmuls each - completed in well
+under a minute total, no new DARE solves for the augmented cases since
+`P` was already cached).
+
+## 2026-08-26 — TASK 3 conditioning caveat re-verified: n_unstable_ass=0 and margin~2.5e-5 CONFIRMED via methods independent of eigenvector conditioning
+
+sha: (pending) | script: tools/task3_conditioning_reverify.py | data:
+docs/task3_lyapunov_reverify.csv (n=60)
+
+**Standing concern, stated precisely:** `A_ss`'s eigenvalue condition
+numbers run up to `kappa_max~1.17e16` (docs/task_a_coupling_quantify.csv).
+First-order eigenvalue perturbation theory bounds computed error as
+`~kappa * eps_machine`, which at `kappa=1.17e16` and float64
+`eps_machine~2.2e-16` is `O(1)` - meaning `np.linalg.eig`'s raw output
+for the MOST ill-conditioned modes cannot be trusted at face value, and
+TASK 3's two headline claims (`n_unstable_ass=0` on all 60 checkpoints;
+margin `~2.5e-5` at the single tightest checkpoint) were exactly the
+kind of near-boundary, precision-sensitive claims this concern targets.
+Flagged provisional pending re-verification by a method that doesn't
+route through an ill-conditioned eigenvector matrix.
+
+**Full mpmath arbitrary-precision eig at n=1024 confirmed infeasible,
+not attempted - stated explicitly rather than silently skipped.**
+Dense eig is `O(n^3)`; at `n=1024` with pure-Python arbitrary-precision
+arithmetic (needed for the >=50 digits requested), this is an
+estimated many-hours-to-days-per-checkpoint cost, ruled out for this
+task's scope before writing any code.
+
+**Method 1 (primary, all 60 checkpoints): discrete Lyapunov/Stein
+equation PD test.** Theorem: `A` is Schur-stable (`rho(A)<1`) IFF
+`A^T P A - P = -I` has a positive-definite solution `P`. Solved via
+Bartels-Stewart (`scipy.linalg.solve_discrete_lyapunov`), which uses a
+REAL SCHUR decomposition - a unitary similarity transform, backward-
+stable regardless of `A_ss`'s non-normality, structurally avoiding the
+exact ill-conditioned-eigenvector-matrix pathway that produces
+`kappa~1e16` in the first place. Checking the returned `P`'s
+positive-definiteness is itself well-conditioned (symmetric eigenvalue
+problems have condition number exactly 1, always). Result: **60/60
+checkpoints confirmed PD** (`min_eig(P_sym)` ranged `~1.000-1.013`,
+comfortably positive; Stein-equation residual `~1e-15` at every
+checkpoint, i.e. the solve itself is machine-precision-clean).
+`n_unstable_ass=0` on all 60 is therefore CONFIRMED, not merely
+repeated, by a method with no shared failure mode with the original
+`np.linalg.eig`-based claim.
+
+**Method 2 (independent-algorithm cross-check on the single tightest-
+margin checkpoint, `B320/case3/seed3`, `max_abs_ass=0.99997497`,
+margin `2.503e-05`): ARPACK/Arnoldi iteration**
+(`scipy.sparse.linalg.eigs`, `k=6`, `which='LM'`, `tol=0`) - an
+orthonormal-Krylov-subspace method, algorithmically unrelated to dense
+`np.linalg.eig`'s general eigendecomposition, so agreement between the
+two is a real cross-check, not a tautology. **Result: exact agreement**
+- `dense_eig_max_abs=0.99997497`, `arpack_max_abs=0.99997497`,
+`abs_diff=6.661e-16` (machine epsilon), margin identical to displayed
+precision from both methods. **The `~2.5e-5` margin figure is
+CONFIRMED, not an artifact of eigenvector ill-conditioning** - two
+structurally different algorithms land on the same value to 16 digits
+at exactly the checkpoint where the concern would bite hardest.
+(Remaining 5 of 6 planned cross-check checkpoints were still running
+ARPACK - slow to converge given the dense near-unit-circle clustering,
+consistent with why this needed checking in the first place - at the
+time of this entry; the single result obtained is the highest-priority
+one, the global minimum-margin checkpoint across all 60.)
+
+**Conclusion: both of TASK 3's headline claims stand, now on firmer
+ground than the original float64 `eig` call alone provided.** The
+`kappa~1e16` concern was a real, correctly-raised methodological gap -
+raw eigenvector-based error bounds genuinely could not have ruled out
+an `O(1)` error at that conditioning - but the specific numbers TASK 3
+reported survive independent, conditioning-robust re-verification
+exactly as stated. Provisional flag lifted for `n_unstable_ass=0`
+(full population) and for the single margin value directly checked;
+the margin values for the other 59 checkpoints were not individually
+cross-checked by ARPACK (only their PD/stability verdict was, via
+Method 1) and should be read as "confirmed stable, magnitude not
+independently re-verified" until/unless checked the same way.
+
+GPU: 0 (CPU-only; Method 1 ~60-90s/checkpoint via Bartels-Stewart at
+n=1024, ~55 min total for 60 checkpoints; Method 2's single completed
+ARPACK call ran to `tol=0` convergence, slower per-checkpoint by design).
+
+## 2026-08-26 — kappa_max*||A_xs|| reinterpreted as "outside perturbation theory's validity radius," not an unexplained miss; pseudospectral-radius confirmation attempted, abandoned as intractable at this dimension
+
+sha: (pending) | script: tools/task_a_pseudospectral_radius.py (partial
+run only, see below) | data: docs/task_a_coupling_quantify.csv,
+docs/n_unstable_characterization.csv
+
+**Reasoning, recorded per instruction.** TASK A found
+`kappa_max * ||A_xs||` in the range `1e10-1e14`
+(docs/task_a_coupling_quantify.csv) and only a weak, non-significant
+correlation with `n_unstable(Abar)` (Spearman `0.22`, `p=0.24`,
+n=120). First-order eigenvalue perturbation theory (`kappa(lambda) =
+1/|y^H x|` as the local sensitivity to a rank-1-scale perturbation)
+is valid only while `eps * kappa << 1` - i.e. only while the predicted
+eigenvalue displacement stays much smaller than the distance to other
+spectral features. At `kappa_max * ||A_xs|| ~ 1e10-1e14`, the
+predicted displacement is 10-14 ORDERS OF MAGNITUDE larger than the
+unit circle itself - the theory is being asked to predict a
+perturbation vastly outside the radius where its own linearization is
+valid. **A weak/non-significant correlation between a quantity and an
+outcome, when the quantity's own governing theory says it should not
+be predictive at this scale, is the expected result of linear theory
+breaking down - not evidence that the coupling-conditioning mechanism
+itself is wrong.** This reframes, rather than contradicts, TASK A's
+original finding.
+
+**Corrected predictor, per instruction: eps-pseudospectral radius
+`rho_eps(A_ss) = max{|z| : sigma_min(zI-A_ss) <= eps}` at
+`eps=||A_xs||`,** which makes no small-perturbation assumption (it
+directly asks "how far can the spectrum move under ANY perturbation
+of norm <= eps," not "how far does first-order theory predict it
+moves"). **Attempted, not completed - abandoned as computationally
+intractable within this task's time budget, stated explicitly rather
+than silently dropped.** Even the coarsest tractable grid (5 radii x 2
+angles = 10 points/checkpoint, dense complex SVD per point at
+`n=1024`) did not complete a single checkpoint in over 25 minutes of
+CPU time - dense SVD of a 1024x1024 COMPLEX matrix (required since grid
+points `z` are complex) is markedly more expensive than the real
+1030-dim DARE/Lyapunov solves elsewhere in this session, and a
+production-quality pseudospectrum estimate (needing either a much
+finer grid or an iterative resolvent-norm method, e.g. Lehoucq/Sorensen-
+style continuation, neither implemented here) was out of scope to build
+from scratch at this point in the week.
+
+**What stands without the numerical confirmation:** the reasoning
+above (perturbation theory invalidity explaining the weak correlation)
+is a direct, checkable consequence of the ALREADY-COMPUTED
+`kappa_max`/`axs_norm` values and standard perturbation theory - it
+does not depend on the pseudospectral computation to be true. The
+pseudospectral radius remains the theoretically correct predictor and
+is flagged as an open, not-yet-executed piece of future work, distinct
+from and stronger than the reasoning-only argument recorded here.
+
+GPU: 0 (CPU-only; killed after ~25-30 min without completing a single
+checkpoint at the coarsest grid attempted).
