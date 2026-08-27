@@ -333,14 +333,81 @@ damage, and the combined arm's teacher MSE (`1.0e-3`) is actually the
 single worst of the whole ladder, suggesting the two LNs interfere with
 training rather than each contributing independently.
 
-**Standing caveat, load-bearing**: every Experiment 2 number above is
-from a SINGLE seed (seed=0) per arm. Given how much the exact kink
-LOCATION already varied between Experiment 1's 6D checkpoints and this
-round's scalar arm_2 (same underlying mechanism, different manifestation),
-none of arm_2/5/6/7's specific numbers (spike ratio, error magnitude,
-kink location) should be treated as a general property of the
-architecture until replicated across multiple seeds — only the
-qualitative ranking (arm_0/1/4 flat < arm_3 mild < arm_2/5 kinked <
-arm_6/7 severely broken) is well-supported by the mechanism-level
-argument (degree-0 vs. degree-1 homogeneity) and cross-checked against
-Experiment 1's independent, 30-checkpoint-per-variant, 6D population.
+**Standing caveat from round 1 (SUPERSEDED below, kept for the record
+per this project's culture of dated corrections rather than silent
+rewrites)**: round 1 above was single-seed (seed=0) per arm and treated
+arm_2 as showing a real, if off-origin, kink. The multi-seed round below
+shows this needs correcting, not just re-confirming with more data.
+
+## Results, round 2: multi-seed (8 seeds x 8 arms), and a correction to arm_2 (2026-08-27)
+
+Round 1's arm_0 positive control, re-run across 8 seeds at the SAME
+20000 epochs, **failed at seed=6** (`jx_err_max=1.8e-3`, ju similarly)
+— the script halted exactly as designed, per the task's own instruction.
+Diagnosed directly, not assumed: re-training seed=6 alone at 60000
+epochs converged to `jx_err_max=3.4e-9` (and 120000 epochs to
+`1.4e-9`, no further improvement) — a pure convergence-budget issue
+(some random inits need more Adam steps for this well-posed, effectively
+convex 2-parameter fit), not a real failure of the arm_0 concept. Fixed
+by raising `EPOCHS` to 60000 for the whole ladder and re-running all 64
+(arm x seed) combinations clean — zero errors, all arm_0 seeds pass.
+
+**The correction**: at 60000 epochs, arm_2's (LN + memoryless, round 1's
+"KEY ARM") median `jx_err_mean` across 8 seeds is `2.7e-9` — in the SAME
+near-machine-precision tier as arm_0 (`2.4e-9`) and arm_1 (`3.7e-12`),
+not the `~10-20%` distortion round 1 reported at 20000 epochs. Verified
+directly by re-plotting arm_2/seed0's origin sweep at 60000 epochs: the
+dip-then-spike SHAPE is still visibly present at the exact same location
+in `|Jx(c)|` vs. `c` (confirming the mechanism itself didn't vanish) —
+but its AMPLITUDE collapsed from a ~3x swing to a ~1e-9 RELATIVE swing,
+three orders of magnitude below anything practically meaningful. **The
+corrected reading: for LayerNorm WITHOUT real S4 memory, on this
+problem, the kink is real but "trainable away" — more optimization
+steps let the network converge to a solution where the branch's
+practical contribution (and therefore LayerNorm's influence) shrinks
+toward negligible, even though the branch is never literally forced to
+zero.** Round 1's characterization of arm_2 as "the key arm confirming a
+persistent kink" is retracted; what round 1 actually measured was an
+UNDER-TRAINED arm_2, not a fundamental property of LN-without-memory.
+
+**What DOES replicate robustly across seeds (`results/exp2_ladder.csv`,
+`results/exp2_ladder_seed_summary.csv`, `figures/exp2_seed_variance_summary.png`
+— a box plot of `jx_err_mean` and `teacher_mse` per arm across all 8
+seeds is the clearest single figure from this round):**
+
+- arm_0, arm_1, arm_2 cluster tightly in a near-machine-precision tier
+  (`jx_err_mean` medians `1e-9` to `1e-12`) — LayerNorm ALONE, without
+  real S4 memory, is not a robust failure mode at this problem's scale
+  once given enough training.
+- arm_3 (GELU+GLU, memoryless) and arm_4 (real S4 memory, no LN) sit in
+  a middle tier (`jx_err_mean` medians `2.1e-2` and `2.9e-3`) — neither
+  converges to the machine-precision tier even at 60000 epochs, a
+  genuine optimization-difficulty finding distinct from any LN-specific
+  claim (their `teacher_mse` medians, `1.9e-5` and `3.1e-6`, are also
+  4-5 orders of magnitude worse than arm_0/1/2's floor).
+- arm_5 (S4 + LN prenorm, full model) is the round's most seed-SENSITIVE
+  result: `jx_err_mean` ranges from `4.7e-3` to `4.0e-1` across 8 seeds
+  (median `6.8e-2`) — sometimes nearly as good as arm_3/4, sometimes far
+  worse. This is a real property of the architecture (LN interacting
+  with genuine S4 memory), not noise to average away — it means a
+  single training run cannot be trusted to characterize this arm's
+  behavior, exactly the caveat round 1 flagged in advance.
+- arm_6 (S4 + LN POSTNORM) and arm_7 (combined) are the round's most
+  ROBUST finding: consistently catastrophic across every seed
+  (`jx_err_mean` between `25%` and `77%` for arm_6, `32%` and `77%` for
+  arm_7 — tight boxes at the top of the plot, not scattered), regardless
+  of the 3x increase in training budget that rescued arm_2. Postnorm's
+  failure is not a training-budget artifact and not seed-dependent — it
+  looks like a structural property of forcing the ENTIRE skip+branch
+  sum through LayerNorm.
+
+**Revised bottom line for this sub-project's core question**: at this
+problem's scale, LayerNorm's Jacobian-corrupting effect is not really
+about LayerNorm in isolation (arm_2 trains away) — it is about
+LayerNorm's INTERACTION with S4's real recurrent dynamics (arm_5,
+seed-sensitive but real) and, most severely and robustly, about
+POSTNORM PLACEMENT specifically (arm_6/7, robust and severe regardless
+of seed or training budget). This sharpens rather than overturns the
+motivating hypothesis (LN's degree-0 homogeneity), but relocates where
+the real, hard-to-train-away damage lives: not "LN exists" but "LN
+placed after the residual, or LN composed with genuine memory."
