@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from s4_nnx import S4LayerEnsemble
+from s4_nnx import S4LayerEnsemble, discrete_dplr
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,9 @@ class BlockConfig:
     glu: bool = True
     prenorm: bool = True
     residual: bool = True
+    memoryless: bool = False  # layernorm_study/CLAUDE.md: truncate the S4 branch to
+    # its zero-lag impulse response only (no memory) - see
+    # _memoryless_s4_branch below for why this belongs here rather than in s4-nnx.
 
 
 VARIANTS = {
@@ -77,6 +80,44 @@ class StaticNorm(nnx.Module):
         return (x - self.mu.value) / self.sigma.value
 
 
+def _memoryless_s4_branch(seq: S4LayerEnsemble, x: jax.Array) -> jax.Array:
+    """Truncates the S4 branch to ONLY its zero-lag impulse-response tap
+    (h_0 = C_bar @ B_bar, the memoryless instantaneous gain per channel),
+    for layernorm_study's Experiment 2 complexity ladder (arm_1/2/3:
+    "linear/nonlinear branch, NO MEMORY" - isolating LayerNorm/activation
+    effects from S4's own recurrence). Composes s4-nnx's own PUBLIC
+    `discrete_dplr` function (never forked/copied - CLAUDE.md sec 7:
+    s4-nnx is pinned/frozen for the week, changes belong in s4dpc instead)
+    rather than S4LayerEnsemble.__call__'s conv/decode branches directly,
+    for one deliberate reason: this project has an independently
+    documented conv-mode-vs-decode-mode numerics gap in the FULL S4
+    branch (CLAUDE.md's "M6's conv/step parity gap"), because conv mode's
+    kernel_dplr (FFT/Cauchy) and decode mode's discrete_dplr+scan take
+    different numerical paths to nominally the same answer. Using
+    discrete_dplr's h_0 = C_bar@B_bar as the SAME single formula in BOTH
+    modes (rather than kernel_dplr's kernel[0] in conv mode and
+    discrete_dplr's h_0 in decode mode) makes the memoryless arms exactly
+    conv/step-consistent by construction, instead of inheriting a second,
+    unrelated numerics discrepancy on top of the one already being
+    isolated for study.
+
+    x: (L, d_model) - same shape ConfigurableBlock's normal S4 path
+    consumes, for either L=1 (decode/step mode) or L=l_max (conv mode);
+    the elementwise gain below is L-agnostic, so no mode branch is needed
+    here at all. Returns (L, d_model)."""
+    step = jnp.clip(jnp.exp(seq.log_step.value), 0.001, 1.0)  # (d_model, 1)
+    lambd = jnp.clip(seq.Lambda_re.value, None, -1e-4) + 1j * seq.Lambda_im.value  # (d_model, N)
+    c_vector = seq.C_real_imag.value[..., 0] + 1j * seq.C_real_imag.value[..., 1]  # (d_model, N)
+
+    def h0_one_channel(lambd_c, p_c, b_c, c_c, step_c):
+        _, b_bar, c_bar = discrete_dplr(lambd_c, p_c, p_c, b_c, c_c, step_c, seq.l_max)
+        return (c_bar @ b_bar).reshape(()).real
+
+    h0 = jax.vmap(h0_one_channel)(lambd, seq.P.value, seq.B.value, c_vector, step)  # (d_model,)
+    gain = h0 + seq.D.value.reshape(-1)  # (d_model,) - same +D feedthrough S4LayerEnsemble adds
+    return x * gain[jnp.newaxis, :]
+
+
 class ConfigurableBlock(nnx.Module):
     """One S4 sequence block: per-channel S4Layer (vmapped) + configurable
     norm/activation/glu/prenorm/residual. decode is fixed at construction
@@ -116,17 +157,21 @@ class ConfigurableBlock(nnx.Module):
         if self.norm is not None and self.config.prenorm:
             x = self.norm(x)
 
-        seq_graph, seq_params = nnx.split(self.seq)
+        if self.config.memoryless:
+            x = _memoryless_s4_branch(self.seq, x)
+            new_s4_state = s4_state  # untouched: memoryless branch carries no state forward
+        else:
+            seq_graph, seq_params = nnx.split(self.seq)
 
-        def run_one_channel(params_slice, u_slice, state_slice):
-            single_channel_layer = nnx.merge(seq_graph, params_slice)
-            return single_channel_layer(u_slice, state_slice)
+            def run_one_channel(params_slice, u_slice, state_slice):
+                single_channel_layer = nnx.merge(seq_graph, params_slice)
+                return single_channel_layer(u_slice, state_slice)
 
-        x, new_s4_state = jax.vmap(
-            run_one_channel,
-            in_axes=(0, 1, 0),
-            out_axes=(1, 0),
-        )(seq_params, x, s4_state)
+            x, new_s4_state = jax.vmap(
+                run_one_channel,
+                in_axes=(0, 1, 0),
+                out_axes=(1, 0),
+            )(seq_params, x, s4_state)
 
         if self.config.activation == "gelu":
             x = nnx.gelu(x)
