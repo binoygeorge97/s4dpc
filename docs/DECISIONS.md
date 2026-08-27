@@ -6658,3 +6658,95 @@ single mode crossing the unit circle on its own.
 
 GPU: 0 (pure linear algebra/eigendecomposition on already-saved
 checkpoints - no training, no GPU).
+
+## 2026-08-25 — TASK A2's confound verified exactly, the two-failure-mode framing established, and TASK A4 confirms it decisively: physical-only synthesis (discarding the latent block from the design problem entirely) recovers stability on 23/30 B=320 checkpoints at near-oracle cost, versus the augmented synthesis's 0/30
+
+sha: (pending commit) | `tools/task_a4_physical_only_synthesis.py`, `docs/task_a4_physical_only_synthesis.csv`
+
+**A2's confound, verified directly, not just conceded.** For all 30
+checkpoints: computed `eig(A_true - B_true@K_x_zeroed)` directly and
+compared against TASK A2's own reported `rho` (the FULL augmented
+closed loop's spectral radius). The two agree in SIGN on all 30 (stable
+set identical: `{(1,0),(1,1),(1,3)}` both ways) - but for those exact 3
+"stable" checkpoints, `rho` doesn't come from the physical block at all:
+it EXACTLY equals `max|eig(A_ss)|` for that checkpoint (`0.999339`,
+`0.998699`, `0.999848` - matching TASK A2's reported `rho` to every
+displayed digit). **This confirms the instruction's reading precisely:
+because `A_xs=0` forces `K_s=0` (theorem, prior entry), the deployed
+loop is exactly block lower triangular, `eig(Acl) = eig(A_t+B_t@K_x^zeroed)
+UNION eig(A_ss)` - and since `A_ss` never exceeds the unit circle (TASK 3,
+0/60 checkpoints), UNSTABLE outcomes can only ever come from the
+physical block. TASK A2 measures whether the resynthesized `K_x`
+stabilizes the true plant. It says nothing about coupling, full stop.**
+
+**The two-failure-mode framing, established:**
+
+1. **Latent injection via `A_xs`** - present in the ORIGINAL, augmented
+   synthesis, contaminating `K_x`'s design (Riccati co-designs `K_x`/
+   `K_s` jointly against a coupling that only exists in the model, not
+   reality). Dominant in 24/30 checkpoints (TASK A2: zeroing improves
+   cost on 24/30, several by 5+ orders of magnitude).
+2. **Physical-gain failure** - even with `A_xs` removed from synthesis,
+   the resulting `K_x^zeroed` can still fail to stabilize the true
+   plant, because `A_xx` itself is not accurate enough (91.7% rel err
+   at B=1 - TASK A2 ran at B=1). This is what remains after removing
+   (1) - 27/30 still unstable, only 3/30 actually achieve `rho<1`.
+   `K_s` (nonzero in the ORIGINAL synthesis) partially masks this
+   failure mode - explains the 6/30 checkpoints where zeroing makes
+   cost WORSE: on those specific checkpoints, `K_s`'s masking
+   compensation was doing more net good than the coupling contamination
+   was doing net harm, so removing both together (by zeroing `A_xs`,
+   which structurally forces `K_s->0`) nets out worse, not better. No
+   unpredictable-sign story is needed - both failure modes are real,
+   present simultaneously, and their relative size varies per
+   checkpoint.
+
+**TASK A4, highest priority per instruction, confirms this framing
+decisively and separates the two failure modes cleanly for the first
+time: solve the DARE on `(A_xx, B_x)` ALONE (discard the latent block
+from the design problem entirely, not just zero `A_xs` within the
+augmented problem) - genuinely isolates failure mode (2), since there
+is no coupling left in the design at all.** Sanity check first: this
+script's DARE path reproduces the oracle gain on `(A_d, B_d)` to
+EXACTLY `0.0` max abs diff, every case - the method itself is
+validated before trusting anything downstream.
+
+```
+M3 B=320 (n=30):  n_stable=23/30   cost_ratio median=1.017x  min=1.005x  max=2.05e7x
+gain_diff_rel = ||K_x^phys - K_x^aug|| / ||K_x^phys||:  median=1.0065  range [0.79, 11.36]
+M1 (n=30, control):    n_stable=30/30   cost=1.0050x exactly, every checkpoint
+M0_S4 (n=30, control): n_stable=30/30   cost=1.0050x exactly, gain_diff_rel~1e-12 (exactly 0, as expected - Axs=0 by construction, so physical-only and augmented synthesis are already identical)
+```
+
+**23 of 30 B=320 checkpoints achieve real stability and NEAR-ORACLE
+cost (median 1.017x, most in the 1.005-1.11x range) once the latent
+block is discarded from the design problem entirely - a dramatic
+result compared to the augmented synthesis's 0/30 (TASK 4(a)) and even
+TASK A2's coupling-only-zeroed 3/30 (note: A2 ran at B=1, this ran at
+B=320 - not a direct like-for-like, but the qualitative gap is stark
+either way).** `gain_diff_rel`'s median of `1.0065` (100%+ relative
+difference between the physical-only gain and the augmented-synthesis
+gain, for gains that are supposedly designing for the SAME 6-dimensional
+subsystem) directly confirms the hypothesis: **`K_x` from the augmented
+synthesis IS substantially contaminated by latent participation in the
+Riccati solution, even at B=320 where `A_xx` itself is already accurate
+to `~3.5e-3`.** The controls behave exactly as expected and validate
+the method: M1 (no augmented structure at all) hits the exact oracle
+cost on every checkpoint; M0_S4 (`A_xs=0` by hand construction) shows
+`gain_diff_rel` at floating-point zero, since physical-only and
+augmented synthesis are mathematically identical when there was never
+any coupling to remove.
+
+**Not a complete fix - the remaining 7/30 failures are real and
+concentrated, not scattered noise.** 5 of the 7 unstable checkpoints
+are cases 2 or 5 (`case5/seed3` catastrophically, `rho=1.047`,
+`cost=2.05e7x`; `case2/seed1`, `rho=1.023`, `cost=921x`; plus 5 more
+with `rho` in `[1.0008, 1.0147]`, cost `1.5x-40x`) - suggesting these
+two cases are intrinsically harder (a possibly-worse B=320 `A_xx`
+estimate, or a genuinely less forgiving true plant) rather than a
+generic residual failure spread evenly across the population. Not
+chased further this round.
+
+GPU: 0 (6-dimensional DARE solves are near-instant - the entire run,
+90 checkpoints across 3 populations plus the oracle-reproduction
+sanity check, completed in well under a minute).
