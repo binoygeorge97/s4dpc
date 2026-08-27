@@ -1,0 +1,19 @@
+{
+  "arm": "arm_7",
+  "description": "S4 + LN prenorm AND postnorm combined (user-requested)",
+  "n_layers": 1,
+  "block_kwargs": {
+    "norm": "layer",
+    "activation": "gelu",
+    "glu": true,
+    "memoryless": false,
+    "prenorm": true,
+    "postnorm_also": true
+  },
+  "d_model": 8,
+  "N": 16,
+  "l_max": 100,
+  "epochs": 20000,
+  "learning_rate": 0.001,
+  "seed": 0
+}

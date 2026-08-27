@@ -1,0 +1,17 @@
+{
+  "arm": "arm_1",
+  "description": "linear branch, no LN, no memory - exactly linear",
+  "n_layers": 1,
+  "block_kwargs": {
+    "norm": "none",
+    "activation": "none",
+    "glu": false,
+    "memoryless": true
+  },
+  "d_model": 8,
+  "N": 16,
+  "l_max": 100,
+  "epochs": 20000,
+  "learning_rate": 0.001,
+  "seed": 0
+}

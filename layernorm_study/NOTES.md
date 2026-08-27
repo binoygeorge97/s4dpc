@@ -231,3 +231,116 @@ most-expensive/most-global:
 *(empty — fill in with prenorm/postnorm and LayerNorm-analysis papers as
 they're identified; the "NEEDS CITATION" flags above in particular need
 sourcing before any claim here goes into the parent paper)*
+
+## Results, round 1 (2026-08-27)
+
+**Experiment 1 (existing checkpoints M3/M4/M5/M6, 120 checkpoints, all 7
+cases x 5 seeds — `results/exp1_jacobian_decomposition.csv`, gitignored,
+regenerate via `python -m layernorm_study.experiments.exp1_jacobian_decomposition`):**
+the skip/branch decomposition `F(z) = W_dec@W_enc@z + W_dec@branch(z)`
+is exact by construction (decomposition residual ~1e-16 everywhere — a
+correctness check on the tooling, not a finding). The origin sweep of
+`dF/dx` (case1/seed0, representative) is the clean result: M3 (no norm)
+is EXACTLY constant from `t=-100` to `t=+100` including `t=1e-6` — zero
+kink, as expected by construction. M4 (GELU+GLU, no LN) varies only
+mildly (1.63→1.73, ~6%) with no feature localized at the origin — this
+matters because the trajectory-averaged "contamination ratio" alone is
+a poor discriminator (M4's average is *higher* than M5's despite having
+no LayerNorm — it's the origin-LOCALIZED spike specifically, not
+general nonlinear state-dependence, that is LayerNorm's signature). M5
+(LN only) and M6 (LN+GELU+GLU) both show a sharp ~4-4.7x Jacobian-norm
+spike within `1e-5` of the origin, entirely carried by the branch term,
+surviving on top of GELU/GLU. Two caveats worth carrying forward: (1)
+the skip term alone does NOT recover `[A_d|B_d]` for ANY variant
+including M3 (relative error 0.5-1.3x) — training has no reason to
+privilege that split, so "branch is a small correction to skip's
+correct linear map" is not literally what happens, even though the
+kink itself is real; (2) M5 has a real ~0.1-0.3% conv/step numerics gap
+(recomputed vs. recorded teacher MSE) that M3 doesn't (M3 matches to
+~1e-12) — small, doesn't affect the kink conclusion, but is a genuine
+finding not previously documented for M5 specifically (parent repo's
+CLAUDE.md documents it for M6 only).
+
+**Experiment 2 (scalar plant `x_next=3x+u`, complexity ladder, single
+seed=0 per arm so far — `results/exp2_ladder.csv` + per-arm manifests +
+figures, gitignored, regenerate via
+`python -m layernorm_study.experiments.exp2_train_ladder`):** data
+sanity check passes at machine precision (least squares recovers
+`(3.0, 1.0)` to `~1e-16`, far under the `1e-9` gate). arm_0 (skip-only,
+`n_layers=0`) passes its positive-control check exactly: `Jx`/`Ju`
+match `(3, 1)` to `~2e-8` at every trajectory point, Jacobian exactly
+flat (spike ratio `=1`). arm_1 (linear branch, memoryless, no LN) is
+likewise exactly flat, as expected for a composition of affine maps.
+arm_4 (real S4 memory, no LN, no GELU/GLU) is ALSO exactly flat to
+machine precision — confirms memory alone, without LayerNorm, does not
+produce state-dependence, matching M3's finding in Experiment 1 at a
+completely different (scalar, real-memory) architecture.
+
+arm_2 (linear + LayerNorm, memoryless — the KEY ARM) DOES show real,
+autodiff-confirmed Jacobian distortion (a ~3x-swing dip-then-spike in
+`|Jx(c)|` vs. sweep parameter `c`) — but, surprisingly, it is NOT
+located at the physical origin the way Exp1's M5/M6 spikes were. This
+was caught and verified directly, not assumed: a plain sweep of
+`Jx` vs. `c` (autodiff, drift-invariant) shows the distortion sitting
+at a moderate, off-center `c` value, while `Jx` right at the physical
+origin is close to the true value. This is a real refinement, not a
+contradiction, of Experiment 1's finding — LayerNorm's singular
+direction is set by whether the network's `encoder(0,0)` bias happens
+to land near LayerNorm's degenerate (equal-component) subspace, which
+is empirically true for Exp1's 6D closed-loop-trained M5/M6 checkpoints
+but was NOT true for this particular scalar-plant training run. arm_3
+(GELU+GLU, memoryless, no LN) shows a similarly-shaped but far MILDER
+dip/spike (~10-20% swing, not ~3x+) — consistent with Experiment 1's
+finding that generic smooth nonlinearity produces mild, bounded
+curvature, while LayerNorm's is categorically larger.
+
+**A real bug was caught and fixed in this round, not just noted**: the
+first version of the "homogeneity sweep" `||F(c*z0)||/c` plot showed a
+dip/spike near `c=0` for every arm except arm_0/1 — including arm_4,
+which is PROVABLY exactly linear (its own `Jx(c)` is flat to machine
+precision). The shape was entirely the model's nonzero equilibrium
+drift `F(0,0)` divided by a vanishing `c` (`F(c*z0)/c = J@z0 +
+drift/c`, which diverges as `c→0` for any `drift != 0`), not a
+curvature effect at all — the same class of drift-vs-derivative
+confound the parent repo's CLAUDE.md documents under its bias-term-round
+corrections. Fixed by subtracting `F(0,0)` before dividing
+(`scalar_diagnostics.homogeneity_sweep`); re-verified arm_4 is now flat
+in this plot too, matching its Jacobian.
+
+**arm_5 vs. arm_6 vs. arm_7 — the actual prenorm/postnorm comparison,
+and the most striking single result of this round**: arm_5 (S4+LN
+prenorm, full model) mostly tracks the true `Jx=3` closely along the
+real trajectory (mostly within ±5%) with a few sharp, NARROW, isolated
+spikes (up to `Jx≈3.4`) at specific timesteps — a milder, more
+localized version of arm_2's kink, since the real trajectory only
+occasionally passes near the degenerate direction. arm_6 (S4+LN
+POSTNORM, otherwise identical) is qualitatively different and far
+worse: `|Jx(c)|` swings over **6 orders of magnitude** (`~1e-5` to
+`~10`) across almost the ENTIRE tested range, not a narrow kink but
+pervasive derivative corruption, and the real-trajectory `Jx` swings
+wildly between `-1` and `8` (mean relative error `48%`, vs. arm_5's
+`0.76%`) — despite arm_6's teacher-forced MSE (`4.3e-5`) being only
+~4x worse than arm_5's (`1.0e-5`), NOT orders of magnitude worse. This
+is the starkest illustration in this project so far of "low prediction
+error does not guarantee Jacobian fidelity" — postnorm's placement
+(forcing the ENTIRE skip+branch sum through LayerNorm, rather than
+leaving an LN-free identity path via the skip connection) looks
+categorically worse than prenorm here, not just "also kinked."
+arm_7 (prenorm AND postnorm combined, the user-requested arm) is
+similarly catastrophic to arm_6 (`jx_err_mean=35%`, spike ratio `1.4e6`)
+— adding a second LN on top of prenorm does not rescue postnorm's
+damage, and the combined arm's teacher MSE (`1.0e-3`) is actually the
+single worst of the whole ladder, suggesting the two LNs interfere with
+training rather than each contributing independently.
+
+**Standing caveat, load-bearing**: every Experiment 2 number above is
+from a SINGLE seed (seed=0) per arm. Given how much the exact kink
+LOCATION already varied between Experiment 1's 6D checkpoints and this
+round's scalar arm_2 (same underlying mechanism, different manifestation),
+none of arm_2/5/6/7's specific numbers (spike ratio, error magnitude,
+kink location) should be treated as a general property of the
+architecture until replicated across multiple seeds — only the
+qualitative ranking (arm_0/1/4 flat < arm_3 mild < arm_2/5 kinked <
+arm_6/7 severely broken) is well-supported by the mechanism-level
+argument (degree-0 vs. degree-1 homogeneity) and cross-checked against
+Experiment 1's independent, 30-checkpoint-per-variant, 6D population.

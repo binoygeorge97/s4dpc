@@ -1,0 +1,12 @@
+{
+  "arm": "arm_0",
+  "description": "zero branch (skip only) - exactly linear, no memory",
+  "n_layers": 0,
+  "block_kwargs": {},
+  "d_model": 8,
+  "N": 16,
+  "l_max": 100,
+  "epochs": 20000,
+  "learning_rate": 0.001,
+  "seed": 0
+}
