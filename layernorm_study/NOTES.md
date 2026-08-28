@@ -1,0 +1,930 @@
+# NOTES
+
+## Motivation
+
+The parent repo's `SequenceBlockNNX` wraps each S4 layer as either
+
+```
+prenorm:  x -> LayerNorm -> S4 -> GELU -> GLU -> (+ skip)
+postnorm: x -> S4 -> GELU -> GLU -> (+ skip) -> LayerNorm
+```
+
+controlled by a `prenorm` boolean. The parent project's control-side
+analysis found that the learned surrogate's local Jacobians (`dF/dx`,
+`dF/du`) are state- and history-dependent even though the true plant being
+identified is a fixed linear system `(A_d, B_d)`. In particular there is a
+"kink" in the local gain as the state passes through the origin.
+
+LayerNorm is a natural suspect for this, independent of any specific
+downstream DPC result, for a structural reason:
+
+- LayerNorm normalizes by the input's own statistics
+  (`(x - mean(x)) / sqrt(var(x) + eps)`), which makes the map from layer
+  input to layer output a *non-homogeneous, state-dependent* function even
+  when everything else in the block is linear. A true LTI plant has a
+  single constant Jacobian everywhere in state space; a LayerNorm'd block
+  does not, by construction — its local Jacobian depends on the norm and
+  direction of the current input, not just a fixed weight matrix.
+- This directly threatens the premise that a learned block can represent a
+  linear plant with a *constant* Jacobian. If the true system is
+  `x_{t+1} = A_d x_t + B_d u_t`, a block containing LayerNorm cannot
+  represent this exactly for all `x_t` — at best it approximates a
+  constant Jacobian locally, with the approximation error growing as
+  `||x||` shrinks (relatively) or as the input direction changes.
+- **Equilibrium concern:** at `x = 0` (or more precisely, whenever the
+  block's pre-norm input is the zero vector), `var(x) = 0`, so the
+  normalization is `0 / sqrt(0 + eps) = 0`, entirely dominated by the
+  `eps` floor rather than by any meaningful signal. This is exactly the
+  operating point a regulation-task DPC controller drives the system
+  toward (the origin is the setpoint), so if LayerNorm's behavior is
+  singular or numerically degenerate near `x = 0`, it is singular exactly
+  where the controller spends most of its time and needs Jacobian
+  fidelity the most. This also connects to the parent repo's separately
+  documented finding that the learned block is *affine*, not linear
+  (`F(0, 0, s) != 0`, nonzero `equilibrium_drift`) — LayerNorm is one
+  plausible structural source of a nonzero map-of-the-origin, since even a
+  literal zero input does not guarantee a zero pre-activation once GELU,
+  GLU, and skip connections are composed around it, and the norm itself
+  behaves differently in the immediate neighborhood of zero than it does
+  away from it.
+- Prenorm and postnorm place this non-homogeneous operation at different
+  points in the residual computation graph, so they are not guaranteed to
+  distort the Jacobian in the same way or by the same amount. Prenorm
+  normalizes the S4 layer's *input* before every layer; postnorm
+  normalizes the *output* of the full sub-block (S4 + GELU + GLU + skip).
+  Since the skip connection in prenorm bypasses LayerNorm entirely while
+  in postnorm it does not, the two placements could plausibly have very
+  different equilibrium and near-origin behavior even holding all other
+  weights fixed.
+
+**Relationship to the parent repo's kink-refutation finding.** The parent
+repo's `CLAUDE.md` documents that the kink hypothesis was tested directly
+on control-side DPC data and refuted as an explanation for *DPC failure*
+(M3 — zero kink by construction, no norm/activation/glu — still fails DPC
+by 2-6 orders of magnitude, and kink magnitude anti-correlates with DPC
+cost ratio across cases). That refutation is about whether the kink
+explains the *specific, large* M3-vs-M6 DPC cost gap. It does **not**
+establish that LayerNorm has no effect on Jacobian fidelity at all — only
+that some other mechanism (the augmented-state realization/gauge story,
+see parent `CLAUDE.md` §1's later entries) dominates the DPC failure
+magnitude. Whether LayerNorm placement measurably perturbs `dF/dx`/`dF/du`
+locally, and whether that perturbation compounds with or is dwarfed by the
+realization-level mechanism, remains open and is the actual scope of this
+sub-project. This sub-project is not resurrecting the refuted
+"kink causes the DPC failure" claim — it is asking a narrower, still-open
+question about LayerNorm's local Jacobian behavior on its own terms.
+
+## LayerNorm background
+
+**Definition.** For an input vector `x` of dimension `d` (normalized over
+the feature axis), LayerNorm computes
+
+```
+mu    = mean(x)                         # scalar
+var   = mean((x - mu)^2)                # scalar, biased (population) variance
+x_hat = (x - mu) / sqrt(var + eps)
+y     = gamma * x_hat + beta
+```
+
+where `gamma, beta` are learnable per-feature scale and shift parameters,
+and `eps` is a small constant (commonly `1e-5` or `1e-6`) added purely for
+numerical stability — it is not a modeling choice, but it does mean
+`x_hat` is not exactly scale-invariant at very small `||x - mu||`.
+
+**Analytical Jacobian.** Writing `x_hat = (x - mu * 1) / sigma` with
+`sigma = sqrt(var + eps)` and `1` the all-ones vector, the Jacobian of
+`x_hat` with respect to `x` (before applying `gamma`/`beta`) is
+
+```
+d(x_hat)/dx = (1/sigma) * ( I - (1/d) * 1 @ 1^T - x_hat @ x_hat^T / d )
+```
+
+(This is the standard LayerNorm backward-pass Jacobian; see e.g. the
+derivation used in most transformer LayerNorm backward implementations.)
+Structurally, this is `(1/sigma)` times a projection-like operator: the
+`I - (1/d) 1 1^T` term projects out the mean direction (removing the
+all-ones component, since mean-subtraction is invariant to shifts along
+`1`), and the `x_hat x_hat^T / d` term further projects out the current
+normalized-direction component (removing the scale/variance component,
+since scaling `x` by any positive constant leaves `x_hat` unchanged). The
+composition is an oblique projection onto the subspace orthogonal to both
+`1` and the current `x_hat` direction, scaled by `1/sigma`. Two
+consequences matter for this sub-project:
+
+1. **The `1/sigma` scaling makes the Jacobian's magnitude depend on the
+   input's own norm** (through `var`), not just its direction — this is
+   the direct mechanism for state-dependent gain.
+2. **The projection means directions aligned with the current `x_hat`
+   (or with `1`) are annihilated** in the LayerNorm Jacobian — a term
+   downstream (GELU, GLU, S4) sees a different effective input
+   sensitivity depending on the current state's direction, not a fixed
+   linear map.
+
+After the learnable affine step, the full LayerNorm Jacobian is
+`diag(gamma) @ d(x_hat)/dx` — `gamma` rescales each output row but does
+not change the state-dependence structure above.
+
+**RMSNorm comparison.** RMSNorm drops the mean-centering step entirely:
+
+```
+rms   = sqrt(mean(x^2) + eps)
+y     = gamma * (x / rms)
+```
+
+RMSNorm's Jacobian is `(1/rms) * (I - x @ x^T / (d * rms^2))` scaled by
+`gamma` — no `1 1^T` mean-projection term, and no separate `beta` shift
+(most RMSNorm formulations omit the additive bias). It is still
+state-dependent through `rms` and still contains a projection along the
+current input direction, so it does **not** trivially solve the
+non-homogeneity problem motivating this study — but it removes one source
+of it (mean-centering) and is a natural ablation arm alongside "no norm at
+all" (M3) and full LayerNorm (M5/M6).
+
+## Prenorm vs postnorm
+
+Standard framing from the Transformer literature (**claims below need
+citations — see Reading List**):
+
+- **Postnorm** (original Transformer, Vaswani et al.) applies LayerNorm
+  after the residual addition. This is reported to require careful
+  learning-rate warmup to train stably at depth — without warmup, gradient
+  magnitudes through the un-normalized residual stream are claimed to
+  grow uncontrollably in early training. *[NEEDS CITATION]*
+- **Prenorm** (used in GPT-2 and most modern large-scale transformers)
+  applies LayerNorm to the sub-block's input, before the sub-block, with
+  the residual/skip path bypassing normalization entirely. This is
+  reported to give a cleaner identity path through the residual stream
+  (gradients can flow through the skip connection without passing through
+  any normalization), improving training stability at depth and often
+  removing the need for warmup. *[NEEDS CITATION]*
+- The general claimed trade-off in the literature: prenorm trains more
+  stably/robustly but can have worse final performance or "representation
+  collapse" at very large depth compared to a well-tuned postnorm model,
+  because the identity path can let the effective network act shallower
+  than its layer count. *[NEEDS CITATION]*
+
+**Why this matters here, distinct from the general transformer story:**
+this project is not concerned with training-depth stability per se (the
+S4 stack here is shallow), but the *identity-path* framing maps directly
+onto the Jacobian-fidelity question above. Prenorm's skip connection
+bypassing LayerNorm means part of the block's output-to-input map is
+exactly linear (the skip term) regardless of state; postnorm's
+LayerNorm-after-everything means the *entire* block output, including the
+skip contribution, is subject to the state-dependent rescaling. This
+suggests (untested — see Open Research Questions) that prenorm may
+preserve a larger constant-Jacobian component than postnorm, which would
+be a novel, pipeline-specific point not obviously covered by the existing
+transformer-training literature (which is about gradient flow during
+optimization, not the trained model's own input-output Jacobian at
+inference/rollout time).
+
+## Open research questions
+
+Numbered, falsifiable, ordered roughly from cheapest/most-local to
+most-expensive/most-global:
+
+1. **Does prenorm vs postnorm change one-step identification MSE?**
+   Falsifiable via: train matched M5-prenorm / M5-postnorm (or M6
+   variants) checkpoints on the same case/seed grid used elsewhere in the
+   parent repo, compare one-step teacher-forced MSE. A null result (no
+   difference) would suggest placement doesn't matter for raw fit quality.
+
+2. **Does prenorm vs postnorm change `dF/dx`/`dF/du` fidelity against the
+   true `(A_d, B_d)`?** Falsifiable via: compute the local Jacobian
+   (autodiff, as already done elsewhere in the parent repo's diagnostics)
+   at a grid of states/inputs for both placements, compare relative
+   Frobenius error against `A_d`/`B_d`. This is the direct test of the
+   Motivation section's structural argument.
+
+3. **Does prenorm vs postnorm change the magnitude of the origin kink?**
+   Falsifiable via: measure the Jacobian's discontinuity/curvature as
+   state crosses `x = 0` (e.g. compare `dF/dx` evaluated at `x = +delta`
+   vs `x = -delta` for small `delta`, sweeping `delta -> 0`) for both
+   placements. A meaningfully smaller kink under one placement would be a
+   clean, actionable result even without touching the larger DPC-failure
+   question.
+
+4. **Does removing LayerNorm entirely (M3-style) or swapping to RMSNorm
+   recover a constant Jacobian?** Falsifiable via: same Jacobian-grid
+   measurement as (2)/(3), applied to a no-norm block and an RMSNorm
+   block. Prediction from the Motivation section's math: no-norm should
+   recover an exactly constant Jacobian (already established for M3 in
+   the parent repo — zero kink by construction); RMSNorm is predicted to
+   still show *some* state-dependence (it retains a projection/scaling
+   structure) but this has not been measured directly.
+
+5. **Does the prenorm/postnorm choice change downstream DPC closed-loop
+   stability or cost**, independent of whatever the dominant
+   realization-level mechanism turns out to be? Falsifiable via: run the
+   parent repo's existing DPC harness with matched prenorm/postnorm
+   checkpoints, compare closed-loop cost ratios. Given the parent repo's
+   finding that kink magnitude does *not* correlate with DPC cost ratio
+   (Spearman = -0.54, wrong sign, n=6), the prior going into this question
+   should be that placement differences here are a second-order effect at
+   best — this question is included for completeness and because a null
+   result here is itself informative (it would further support the
+   realization/gauge-freedom explanation over any norm-placement-based
+   one).
+
+## Reading list
+
+*(empty — fill in with prenorm/postnorm and LayerNorm-analysis papers as
+they're identified; the "NEEDS CITATION" flags above in particular need
+sourcing before any claim here goes into the parent paper)*
+
+## Results, round 1 (2026-08-27)
+
+**Experiment 1 (existing checkpoints M3/M4/M5/M6, 120 checkpoints, all 7
+cases x 5 seeds — `results/exp1_jacobian_decomposition.csv`, gitignored,
+regenerate via `python -m layernorm_study.experiments.exp1_jacobian_decomposition`):**
+the skip/branch decomposition `F(z) = W_dec@W_enc@z + W_dec@branch(z)`
+is exact by construction (decomposition residual ~1e-16 everywhere — a
+correctness check on the tooling, not a finding). The origin sweep of
+`dF/dx` (case1/seed0, representative) is the clean result: M3 (no norm)
+is EXACTLY constant from `t=-100` to `t=+100` including `t=1e-6` — zero
+kink, as expected by construction. M4 (GELU+GLU, no LN) varies only
+mildly (1.63→1.73, ~6%) with no feature localized at the origin — this
+matters because the trajectory-averaged "contamination ratio" alone is
+a poor discriminator (M4's average is *higher* than M5's despite having
+no LayerNorm — it's the origin-LOCALIZED spike specifically, not
+general nonlinear state-dependence, that is LayerNorm's signature). M5
+(LN only) and M6 (LN+GELU+GLU) both show a sharp ~4-4.7x Jacobian-norm
+spike within `1e-5` of the origin, entirely carried by the branch term,
+surviving on top of GELU/GLU. Two caveats worth carrying forward: (1)
+the skip term alone does NOT recover `[A_d|B_d]` for ANY variant
+including M3 (relative error 0.5-1.3x) — training has no reason to
+privilege that split, so "branch is a small correction to skip's
+correct linear map" is not literally what happens, even though the
+kink itself is real; (2) M5 has a real ~0.1-0.3% conv/step numerics gap
+(recomputed vs. recorded teacher MSE) that M3 doesn't (M3 matches to
+~1e-12) — small, doesn't affect the kink conclusion, but is a genuine
+finding not previously documented for M5 specifically (parent repo's
+CLAUDE.md documents it for M6 only).
+
+**Experiment 2 (scalar plant `x_next=3x+u`, complexity ladder, single
+seed=0 per arm so far — `results/exp2_ladder.csv` + per-arm manifests +
+figures, gitignored, regenerate via
+`python -m layernorm_study.experiments.exp2_train_ladder`):** data
+sanity check passes at machine precision (least squares recovers
+`(3.0, 1.0)` to `~1e-16`, far under the `1e-9` gate). arm_0 (skip-only,
+`n_layers=0`) passes its positive-control check exactly: `Jx`/`Ju`
+match `(3, 1)` to `~2e-8` at every trajectory point, Jacobian exactly
+flat (spike ratio `=1`). arm_1 (linear branch, memoryless, no LN) is
+likewise exactly flat, as expected for a composition of affine maps.
+arm_4 (real S4 memory, no LN, no GELU/GLU) is ALSO exactly flat to
+machine precision — confirms memory alone, without LayerNorm, does not
+produce state-dependence, matching M3's finding in Experiment 1 at a
+completely different (scalar, real-memory) architecture.
+
+arm_2 (linear + LayerNorm, memoryless — the KEY ARM) DOES show real,
+autodiff-confirmed Jacobian distortion (a ~3x-swing dip-then-spike in
+`|Jx(c)|` vs. sweep parameter `c`) — but, surprisingly, it is NOT
+located at the physical origin the way Exp1's M5/M6 spikes were. This
+was caught and verified directly, not assumed: a plain sweep of
+`Jx` vs. `c` (autodiff, drift-invariant) shows the distortion sitting
+at a moderate, off-center `c` value, while `Jx` right at the physical
+origin is close to the true value. This is a real refinement, not a
+contradiction, of Experiment 1's finding — LayerNorm's singular
+direction is set by whether the network's `encoder(0,0)` bias happens
+to land near LayerNorm's degenerate (equal-component) subspace, which
+is empirically true for Exp1's 6D closed-loop-trained M5/M6 checkpoints
+but was NOT true for this particular scalar-plant training run. arm_3
+(GELU+GLU, memoryless, no LN) shows a similarly-shaped but far MILDER
+dip/spike (~10-20% swing, not ~3x+) — consistent with Experiment 1's
+finding that generic smooth nonlinearity produces mild, bounded
+curvature, while LayerNorm's is categorically larger.
+
+**A real bug was caught and fixed in this round, not just noted**: the
+first version of the "homogeneity sweep" `||F(c*z0)||/c` plot showed a
+dip/spike near `c=0` for every arm except arm_0/1 — including arm_4,
+which is PROVABLY exactly linear (its own `Jx(c)` is flat to machine
+precision). The shape was entirely the model's nonzero equilibrium
+drift `F(0,0)` divided by a vanishing `c` (`F(c*z0)/c = J@z0 +
+drift/c`, which diverges as `c→0` for any `drift != 0`), not a
+curvature effect at all — the same class of drift-vs-derivative
+confound the parent repo's CLAUDE.md documents under its bias-term-round
+corrections. Fixed by subtracting `F(0,0)` before dividing
+(`scalar_diagnostics.homogeneity_sweep`); re-verified arm_4 is now flat
+in this plot too, matching its Jacobian.
+
+**arm_5 vs. arm_6 vs. arm_7 — the actual prenorm/postnorm comparison,
+and the most striking single result of this round**: arm_5 (S4+LN
+prenorm, full model) mostly tracks the true `Jx=3` closely along the
+real trajectory (mostly within ±5%) with a few sharp, NARROW, isolated
+spikes (up to `Jx≈3.4`) at specific timesteps — a milder, more
+localized version of arm_2's kink, since the real trajectory only
+occasionally passes near the degenerate direction. arm_6 (S4+LN
+POSTNORM, otherwise identical) is qualitatively different and far
+worse: `|Jx(c)|` swings over **6 orders of magnitude** (`~1e-5` to
+`~10`) across almost the ENTIRE tested range, not a narrow kink but
+pervasive derivative corruption, and the real-trajectory `Jx` swings
+wildly between `-1` and `8` (mean relative error `48%`, vs. arm_5's
+`0.76%`) — despite arm_6's teacher-forced MSE (`4.3e-5`) being only
+~4x worse than arm_5's (`1.0e-5`), NOT orders of magnitude worse. This
+is the starkest illustration in this project so far of "low prediction
+error does not guarantee Jacobian fidelity" — postnorm's placement
+(forcing the ENTIRE skip+branch sum through LayerNorm, rather than
+leaving an LN-free identity path via the skip connection) looks
+categorically worse than prenorm here, not just "also kinked."
+arm_7 (prenorm AND postnorm combined, the user-requested arm) is
+similarly catastrophic to arm_6 (`jx_err_mean=35%`, spike ratio `1.4e6`)
+— adding a second LN on top of prenorm does not rescue postnorm's
+damage, and the combined arm's teacher MSE (`1.0e-3`) is actually the
+single worst of the whole ladder, suggesting the two LNs interfere with
+training rather than each contributing independently.
+
+**Standing caveat from round 1 (SUPERSEDED below, kept for the record
+per this project's culture of dated corrections rather than silent
+rewrites)**: round 1 above was single-seed (seed=0) per arm and treated
+arm_2 as showing a real, if off-origin, kink. The multi-seed round below
+shows this needs correcting, not just re-confirming with more data.
+
+## Results, round 2: multi-seed (8 seeds x 8 arms), and a correction to arm_2 (2026-08-27)
+
+Round 1's arm_0 positive control, re-run across 8 seeds at the SAME
+20000 epochs, **failed at seed=6** (`jx_err_max=1.8e-3`, ju similarly)
+— the script halted exactly as designed, per the task's own instruction.
+Diagnosed directly, not assumed: re-training seed=6 alone at 60000
+epochs converged to `jx_err_max=3.4e-9` (and 120000 epochs to
+`1.4e-9`, no further improvement) — a pure convergence-budget issue
+(some random inits need more Adam steps for this well-posed, effectively
+convex 2-parameter fit), not a real failure of the arm_0 concept. Fixed
+by raising `EPOCHS` to 60000 for the whole ladder and re-running all 64
+(arm x seed) combinations clean — zero errors, all arm_0 seeds pass.
+
+**The correction**: at 60000 epochs, arm_2's (LN + memoryless, round 1's
+"KEY ARM") median `jx_err_mean` across 8 seeds is `2.7e-9` — in the SAME
+near-machine-precision tier as arm_0 (`2.4e-9`) and arm_1 (`3.7e-12`),
+not the `~10-20%` distortion round 1 reported at 20000 epochs. Verified
+directly by re-plotting arm_2/seed0's origin sweep at 60000 epochs: the
+dip-then-spike SHAPE is still visibly present at the exact same location
+in `|Jx(c)|` vs. `c` (confirming the mechanism itself didn't vanish) —
+but its AMPLITUDE collapsed from a ~3x swing to a ~1e-9 RELATIVE swing,
+three orders of magnitude below anything practically meaningful. **The
+corrected reading: for LayerNorm WITHOUT real S4 memory, on this
+problem, the kink is real but "trainable away" — more optimization
+steps let the network converge to a solution where the branch's
+practical contribution (and therefore LayerNorm's influence) shrinks
+toward negligible, even though the branch is never literally forced to
+zero.** Round 1's characterization of arm_2 as "the key arm confirming a
+persistent kink" is retracted; what round 1 actually measured was an
+UNDER-TRAINED arm_2, not a fundamental property of LN-without-memory.
+
+**What DOES replicate robustly across seeds (`results/exp2_ladder.csv`,
+`results/exp2_ladder_seed_summary.csv`, `figures/exp2_seed_variance_summary.png`
+— a box plot of `jx_err_mean` and `teacher_mse` per arm across all 8
+seeds is the clearest single figure from this round):**
+
+- arm_0, arm_1, arm_2 cluster tightly in a near-machine-precision tier
+  (`jx_err_mean` medians `1e-9` to `1e-12`) — LayerNorm ALONE, without
+  real S4 memory, is not a robust failure mode at this problem's scale
+  once given enough training.
+- arm_3 (GELU+GLU, memoryless) and arm_4 (real S4 memory, no LN) sit in
+  a middle tier (`jx_err_mean` medians `2.1e-2` and `2.9e-3`) — neither
+  converges to the machine-precision tier even at 60000 epochs, a
+  genuine optimization-difficulty finding distinct from any LN-specific
+  claim (their `teacher_mse` medians, `1.9e-5` and `3.1e-6`, are also
+  4-5 orders of magnitude worse than arm_0/1/2's floor).
+- arm_5 (S4 + LN prenorm, full model) is the round's most seed-SENSITIVE
+  result: `jx_err_mean` ranges from `4.7e-3` to `4.0e-1` across 8 seeds
+  (median `6.8e-2`) — sometimes nearly as good as arm_3/4, sometimes far
+  worse. This is a real property of the architecture (LN interacting
+  with genuine S4 memory), not noise to average away — it means a
+  single training run cannot be trusted to characterize this arm's
+  behavior, exactly the caveat round 1 flagged in advance.
+- arm_6 (S4 + LN POSTNORM) and arm_7 (combined) are the round's most
+  ROBUST finding: consistently catastrophic across every seed
+  (`jx_err_mean` between `25%` and `77%` for arm_6, `32%` and `77%` for
+  arm_7 — tight boxes at the top of the plot, not scattered), regardless
+  of the 3x increase in training budget that rescued arm_2. Postnorm's
+  failure is not a training-budget artifact and not seed-dependent — it
+  looks like a structural property of forcing the ENTIRE skip+branch
+  sum through LayerNorm.
+
+**Revised bottom line for this sub-project's core question**: at this
+problem's scale, LayerNorm's Jacobian-corrupting effect is not really
+about LayerNorm in isolation (arm_2 trains away) — it is about
+LayerNorm's INTERACTION with S4's real recurrent dynamics (arm_5,
+seed-sensitive but real) and, most severely and robustly, about
+POSTNORM PLACEMENT specifically (arm_6/7, robust and severe regardless
+of seed or training budget). This sharpens rather than overturns the
+motivating hypothesis (LN's degree-0 homogeneity), but relocates where
+the real, hard-to-train-away damage lives: not "LN exists" but "LN
+placed after the residual, or LN composed with genuine memory."
+
+## Results, round 1.5: is "trainable away" actually branch suppression? (2026-08-28)
+
+Motivated by a direct objection to round 2's arm_2 correction: LayerNorm
+is homogeneous of degree ZERO by construction (no gamma/beta makes
+`LN(c*z) = c*LN(z)`) - a prenorm block containing a real LayerNorm
+CANNOT represent an exactly homogeneous map unless the branch's
+contribution is driven toward zero. So "trainable away" (round 2)
+should mean the optimizer found an escape route (branch suppression),
+not that LN's nonlinearity itself became benign. Tested directly rather
+than assumed.
+
+**Task 1(a) - gamma/beta, init vs final, all 8 arm_2 seeds**: `gamma`
+does NOT collapse toward zero. It stays close to its init norm
+(`2.83`) throughout - final values range `2.84` to `3.29` (shrink
+factors `0.86x`-`0.99x`, several actually GROW slightly). `beta` grows
+from `0` to a modest `0.15`-`0.73`. **The specific "gamma -> 0" escape
+route is refuted by this alone**, before even running the frozen-LN
+test.
+
+**Task 1(b,c) - branch/skip ratio and J = C + R decomposition, arm_2**:
+the branch's OUTPUT magnitude relative to skip is genuinely small
+(median ratio `0.7%`-`9.4%` across seeds), and the constant term `C`
+(skip alone) already matches `[A_true, B_true]` almost exactly
+(`C_err_rel` `0` to `8.4e-8`) - consistent with suppression, but not
+yet distinguishing WHICH parameter is doing the suppressing.
+
+**Task 1(d) - the decisive test: retrain arm_2 with gamma FROZEN at 1,
+beta FROZEN at 0 (LN's normalization is still fully active every
+forward pass - mean-subtraction, `1/sigma` scaling - the optimizer just
+cannot shrink gamma or shift beta), same pinned 60000 epochs, same 8
+seeds.** Result: **error does NOT jump back to percent-level.** 7 of 8
+seeds stay in the `1e-10` to `1e-8` range (statistically indistinguishable
+from the unfrozen run); the one exception (seed 6, `1.7e-3`) is still
+three orders of magnitude below "percent-level," not a restoration of
+round 1's original finding. **This refutes the specific "gamma->0"
+hypothesis as stated.** Freezing LN's own affine parameters does not
+stop whatever is suppressing the branch.
+
+**Follow-up (not in the original task list, run because Task 1(d)'s
+result demanded it): which knob IS doing the suppression, if not
+gamma/beta?** Checked the S4 gain itself (arm_2 is memoryless, so its
+zero-lag gain `h_0 = C_bar@B_bar` is the only other multiplicative
+factor on the branch path) - it does NOT shrink either (norm `2.7`-`2.9`
+at init, `2.7`-`3.5` at final, several seeds growing). Checked the
+actual geometry instead: at a representative trajectory point (seed 0),
+the PRE-decoder branch vector has substantial norm (`3.07`), `W_dec`
+has a normal norm (`1.63`), but `cos(angle between them) = 0.15` - **the
+two are nearly orthogonal**. Confirmed on a second seed (`5`): branch
+norm `3.82`, `W_dec` norm `1.09`, `cos = 0.16`. **This directly confirms
+the task's alternative hypothesis (e): `W_dec` learned a DIRECTION
+that geometrically nearly-annihilates the branch's contribution, not
+that any individual scalar (gamma, beta, or the S4 gain) collapsed.**
+Precise statement of what round 2 actually found: LayerNorm's degree-0
+term cannot become linear, so it becomes irrelevant via a *geometric*
+route (the decoder projects it out), not a *magnitude* route on any
+single learnable scale factor.
+
+**Task 2 - does arm_5's seed sensitivity correlate with the same
+phenomenon?** Computed the same branch/skip ratio (Task 1b's machinery,
+generic, applied unchanged to arm_5's 8 existing checkpoints - no
+retraining) and correlated it against arm_5's already-recorded
+`jx_err_mean` per seed. **Pearson r = 0.973** (`results/
+round1_5_arm5_branch_ratio_vs_error.csv`, `figures/
+round1_5_arm5_branch_ratio_vs_error.png`) - a very strong, clean,
+monotonic relationship. **Arm_5's seed sensitivity is not mysterious:
+it is basin selection between "branch mostly suppressed" (low ratio,
+low error, e.g. seed 0 at ratio `0.04`/error `0.5%`) and "branch stays
+live" (high ratio, high error, e.g. seed 5 at ratio `1.04`/error
+`40%`).** Exactly the mechanism Task 1 characterizes for arm_2, playing
+out as literal seed-to-seed variance for arm_5 rather than being
+uniformly resolved.
+
+**Task 3 - is arm_0's slow convergence (round 2: 60000 epochs needed,
+failed at 20000 on one seed for an exactly-affine 2-parameter fit) a
+data-conditioning artifact?** `cond(E[z z^T])` for round 1/2's data
+(`k_stab=-2.7`) is `156` - `corr(x, u) = -0.977`, confirming the
+predicted near-rank-deficiency from proportional feedback
+(`u = k_stab*x + a`, closed form `corr = k_stab/sqrt(k_stab^2 + 1 -
+pole^2)`). A scan over the stabilizing range found APRBS amplitude
+barely moves `cond` (the closed-form correlation doesn't depend on it)
+but `k_stab` does: `k_stab=-3.5` (pole `-0.5`) empirically minimizes it
+at `cond=82` - a real `47.6%` reduction, but not dramatic; there is an
+apparent FLOOR to how decorrelated a purely-proportional stabilizing
+loop can make `(x, u)` for this specific unstable plant without
+changing the excitation paradigm entirely (out of scope this round).
+Re-ran arm_0 and arm_5 on the decorrelated data at the SAME PINNED
+60000 epochs (per this round's own methodological note - the budget was
+not re-tuned again): **arm_0's median error barely moves** (`2.4e-9` ->
+`1.1e-9`, both already at the machine-precision floor - conditioning
+doesn't matter once the epoch budget is adequate). **arm_5's median
+error does not improve** (`6.8e-2` -> `1.1e-1`, if anything slightly
+worse) **and which SEEDS are good/bad completely reshuffles** (seed 1:
+`2.6%` -> `23%`; seed 5: `40%` -> `1.9%`; seed 6: `9.2%` -> `0.6%`).
+**The conclusions do not move: data conditioning is real (and now
+documented/parameterized - `scalar_system.generate_scalar_trajectory`'s
+new `k_stab` argument, `regressor_condition_number` helper) but is NOT
+the driver of arm_5's seed sensitivity.** That remains best explained
+by Task 2's basin-selection finding, which is architecture/optimization-
+landscape-inherent, not data-inherent.
+
+**Standing status (superseded below)**: Tasks 4 (harden the postnorm
+ceiling claim) and 5 (epsilon sweep on arm_5) were queued but not run,
+per instruction to stop and report Task 1(d)/Task 3 first. Round 2
+below re-examines the round 1.5 orthogonality claim before proceeding
+to Tasks 4/5.
+
+## Round 2, Part A: null tests for the orthogonality claim (2026-08-28)
+
+Direct objection to round 1.5's "W_dec learns a direction nearly
+orthogonal to the branch (cos~0.15)": for two INDEPENDENT RANDOM
+vectors in R^H, typical |cosine| ~ 1/sqrt(H) - at this study's
+`d_model=8`, that baseline is `0.354`, well ABOVE the observed
+`cos~0.15`. Near-orthogonality in high dimensions is the default, so a
+below-baseline cosine needed an explicit null test, not a bare number.
+Round 1.5's `cos=0.15` was also a single-point spot-check (one arbitrary
+`t`), not a trajectory-level statistic - both issues are addressed
+directly below (`results/round2_partA_arm2_orthogonality.csv`,
+`layernorm_study/src/orthogonality_tests.py`).
+
+**A1/A2 - cosine at init vs convergence, against an explicit null,
+all 8 arm_2 seeds:**
+
+| seed | cos init | pctl init | cos final | pctl final | proj. ratio init | proj. ratio final |
+|---|---|---|---|---|---|---|
+| 0 | -0.096 | 20.0 | -0.008 | **1.8** | 0.064 | 0.007 |
+| 1 | 0.324 | 59.6 | 0.023 | **5.0** | 0.105 | 0.036 |
+| 2 | -0.464 | 78.7 | 0.029 | **6.0** | 0.530 | 0.017 |
+| 3 | 0.136 | 26.2 | 0.066 | 12.5 | 0.043 | 0.075 |
+| 4 | -0.464 | 80.5 | -0.129 | 25.7 | 0.170 | 0.058 |
+| 5 | -0.193 | 37.8 | 0.106 | 21.5 | 1.665 | 0.092 |
+| 6 | 0.066 | 12.8 | 0.058 | 11.2 | 0.022 | 0.055 |
+| 7 | 0.134 | 27.0 | 0.040 | 8.1 | 0.023 | 0.021 |
+
+(`pctl` = percentile of `|cos(w, branch)|` in a 2000-sample null of
+random unit directions against the SAME branch vector - a LOW
+percentile means the trained/init decoder is MORE orthogonal to the
+branch than random chance.)
+
+At **init**, percentiles scatter across the full `12.8`-`80.5` range
+with no consistent direction - exactly what pure random initialization
+should produce, and a sanity check that the null-test methodology
+itself is not biased. At **convergence**, all 8 seeds land at or below
+the 26th percentile, 6 of 8 at or below the 13th, and 3 of 8 below the
+7th. **This is not noise and not a generic property of high-dimensional
+geometry** - training consistently and reliably moves `W_dec` toward a
+direction MORE orthogonal to the branch than chance would predict,
+across every seed. Round 1.5's `cos=0.15` number is superseded (a
+single-point estimate, not wrong in kind but noisier and less
+extreme than the trajectory-median values here, which run as low as
+`-0.008`).
+
+**A3 - projected contribution `|<w,branch>| / |<w,skip>|` (scale-
+sensitive, unlike cosine) at init vs final**: does NOT shrink
+monotonically in every seed (seeds 3, 6, 7 are flat or even grow
+slightly from init) - this is flagged, not smoothed over, since it
+complicates a simple "training monotonically suppresses the branch"
+story. But the CONVERGED value is small in absolute terms for every
+seed regardless of its own trajectory (`0.007`-`0.092`, all under
+`10%`) - so what's robust across seeds is the FINAL state (small
+projected contribution, low percentile), not necessarily a monotonic
+shrinking path to get there.
+
+**Note on gamma/beta, restated precisely per the task's own caution**:
+freezing gamma/beta (round 1.5 Task 1(d)) could only ever have tested
+whether LN's OWN affine parameters were the suppression mechanism. It
+was never a test of the projection/W_dec hypothesis - if `W_dec` does
+the annihilating, gamma is irrelevant to it by construction, so that
+result is consistent with the projection story but was never evidence
+FOR it on its own. A1-A3 above are the actual test of the projection
+hypothesis, and they support it: `W_dec` reliably lands in the low tail
+of the null distribution after training, and its converged projected
+contribution is uniformly small.
+
+**A4 - Task 2 robustness: Spearman alongside Pearson.** Pearson
+`r=0.973` (unchanged from round 1.5); **Spearman rho=0.738 (p=0.037)** -
+still positive and still significant at `n=8`, but MATERIALLY weaker
+than the Pearson number suggested. The labeled scatter
+(`figures/round2_partA_arm5_correlation_labeled.png`) shows why: seeds
+3 and 5 (branch/skip ratio `0.65` and `1.04`) sit well outside the
+cluster of the other 6 seeds (ratio `0.04`-`0.17`) and are doing much of
+the work in the Pearson number - among the clustered 6, the relationship
+is directionally consistent but not strictly monotonic (e.g. seed 1
+has LOWER error than seed 4 despite a HIGHER ratio). **Revised
+statement: the branch-ratio/Jacobian-error relationship for arm_5 is
+real and significant, not an artifact of two leverage points - but it
+is noisier than the Pearson r=0.973 alone implied, and should be
+described as "strong and significant" rather than "near-deterministic."**
+
+**A5 - Task 3, is conditioning ruled out?** `corr(x,u)` for the
+original data is `-0.977`; for the `k_stab=-3.5` decorrelated data,
+`-0.945` - barely moved, confirming round 1.5's own characterization
+("factor of two [in cond], not an elimination"). Tried a genuinely
+different decorrelation strategy per instruction: OPEN-LOOP excitation
+over a short horizon (x and u independent BY CONSTRUCTION in open
+loop, since u is pure APRBS). **Result: catastrophically worse, not
+better** - because the plant is open-loop unstable (`rho=3`), even a
+short horizon lets `|x|` grow enormously relative to `u`'s fixed
+APRBS scale (length 8: `max|x|=717`, `cond=4.8e5`; length 20:
+`max|x|=3.7e8`, `cond=7.8e16`), despite LOWER raw correlation
+(`0.44`-`0.62` vs. the closed-loop's `0.94`-`0.98`) - condition number
+depends on the whole covariance spectrum, not correlation alone, and
+an unstable open-loop system creates a variance mismatch between `x`
+and `u` that dominates. **Explicit answer to "is conditioning ruled
+out": no, not rigorously - a `cond~1` dataset was never achieved by
+either method tried, so conditioning-as-a-contributing-factor cannot
+be logically excluded. But it is not demonstrated to be the ACTIONABLE
+driver either: round 1.5's direct empirical test (retrain arm_0/arm_5
+on the ~50%-better-conditioned k_stab=-3.5 data) showed no improvement
+and a full reshuffling of which seeds succeed - the available evidence
+says conditioning is not the lever that explains arm_5's seed
+sensitivity, even though "conditioning matters zero" was never proven
+in the strong mathematical sense.**
+
+**Summary of Part A's effect on round 1.5's claims**: the branch-
+suppression/orthogonality mechanism (Task 1) is CONFIRMED more rigorously
+than before, not weakened - the null test was the right skeptical check
+to run, and it came back supporting the original claim more strongly
+(low percentiles are a cleaner signal than a bare cosine number could
+ever be). Task 2's correlation survives but should be described more
+modestly (Spearman, not just Pearson). Task 3's "conditioning doesn't
+explain it" conclusion survives a genuine second attempt, with the
+caveat that "ruled out" overstates what was actually shown.
+
+## Round 2, Part A follow-ups: A6-A8 (2026-08-28)
+
+**A6 - direction ambiguity: does W_dec rotate toward the branch, or
+does the branch reorganize into W_dec's null space?** Measured angular
+displacement of each from its OWN initialization
+(`results/round2_partA_a6_a7_direction_and_signed_vs_abs.csv`). W_dec
+moved more in 6 of 8 seeds (often by a wide margin - e.g. seed 5:
+`75.8` deg vs `30.2` deg); the branch direction moved more in 2 of 8
+(seeds 4 and 7, and seed 7's margin is a near-tie, `21.5` vs `20.7`
+deg). **Not unanimous, but the dominant pattern (6/8, larger margins)
+supports the original framing ("W_dec learns to project the branch
+out") over the alternative ("the branch reorganizes into W_dec's null
+space") - stated as a majority finding, not a universal one.**
+
+**A7 - signed vs. unsigned cosine.** `abs_cos_median` equals
+`signed_cos_median` to displayed precision for every one of the 8
+seeds. This means the concern behind A7 (a sign-flipping cosine along
+the trajectory hiding a larger true magnitude under a near-zero signed
+median) did NOT occur here empirically - the branch's projection onto
+`W_dec` keeps a consistent sign throughout the real trajectory for
+every seed tested. Worth checking, and checked - the earlier signed
+numbers were not an artifact.
+
+**A8, part 1 - one more conditioning attempt (randomized feedback
+gain).** Scanned `segment_length` (how often the closed-loop gain `k`
+is resampled within the 100-step trajectory) from 2 to 100
+(`results/round2_partA_a8_gain_randomization_scan.csv`). **Contradicts
+the stated prediction**: gain randomization does NOT move conditioning
+"much further than -0.977 -> -0.945" - every segment length tried lands
+at `cond~76-95` (well-randomized, short segments) or WORSE (`cond` up
+to `383` at long segments, which approach single-fixed-k behavior).
+There is an apparent hard floor around `cond~76-80` for this specific
+plant that neither fixed-`k` selection (round 1.5) nor randomization
+(this round) beats - because `B_true=1` gives strong control authority,
+keeping `u` tightly tied to `x` regardless of which stabilizing `k` is
+used. A bonus attempt applying the same method to the user's example
+plant (`A=1.03, B=0.01`, the system Part C will use) hit a clear
+numerical pathology (`cond=1.6e14`, `corr=1.0000` exactly) - flagged as
+NOT a meaningful measurement, not silently reported as a result; that
+plant's weak control authority needs its own dedicated excitation
+tuning, done properly when Part C sets it up rather than reusing this
+plant's defaults opportunistically.
+
+**A8, part 2 - does arm_5's variance track conditioning level? THE
+RESULT IS REAL BUT CONFOUNDED, AND THAT CONFOUND IS REPORTED RATHER
+THAN HIDDEN.** Since the originally-requested targets (`cond~5, 20, 80,
+156`) were not achievable (part 1's floor), used the actual achieved
+spread instead: `segment_length` in `{6, 10, 20, 50}`, giving `cond`
+approximately `{76, 82, 130, 318}`. Retrained arm_5 (8 seeds) at each
+level (`results/round2_partA_a8_arm5_multilevel_results.csv`,
+`figures/round2_partA_a8_arm5_variance_vs_cond.png`):
+
+| cond | median jx_err_mean | std | min | max |
+|---|---|---|---|---|
+| 76.4 | 0.0065 | 0.082 | 0.0007 | 0.197 |
+| 82.1 | 0.0076 | 0.060 | 0.0004 | 0.175 |
+| 130.3 | 0.0964 | 0.312 | 0.0004 | 0.913 |
+| 317.7 | 0.1844 | 0.169 | 0.0004 | 0.424 |
+
+This IS a clear, visible, monotonic-in-median trend - the two
+low-`cond` levels have median error `<1%`; the two high-`cond` levels
+have median error `10-18%`, both wider spread AND worse minimums are
+NOT what moved (the min stays `~0.0004`-`0.0007` at every level - what
+changed is the ceiling). **This looks, at first read, like exactly the
+"conditioning drives arm_5's variance" result the prediction hoped for
+- but it directly CONTRADICTS round 1.5's own direct test (fixed
+`k=-2.7` vs. fixed `k=-3.5`, which found NO improvement and full seed
+reshuffling), and the reason for the contradiction is a confound in
+THIS experiment's own design, not a real reversal of round 1.5's
+finding.** `segment_length` controls two things at once: it changes
+`cond` (as intended), but it ALSO changes how often the effective
+closed-loop relationship switches within one trajectory - a SHORT
+segment_length means the model sees many different local (x,u)
+relationships packed into one 100-step trajectory, which is a
+"persistence of excitation" effect (a classical, distinct concept in
+system identification: does the trajectory excite enough different
+regimes for identification to be well-posed), not the same thing as the
+marginal correlation/condition-number of the pooled (x,u) pairs. This
+round's 4-level sweep varies `segment_length`, and `cond` merely
+happens to move WITH it - the experiment as designed cannot attribute
+the observed trend to conditioning specifically rather than excitation
+richness. **Honest statement: there is a real, strong relationship
+between `segment_length` (short vs. long gain-switching) and arm_5's
+error ceiling, but this round's design conflates that with raw
+regressor conditioning, and cannot separate the two. Round 1.5's
+direct, unconfounded test (same segment structure - a single fixed `k`
+throughout - varying only which `k`) remains the cleaner evidence, and
+it found no improvement. A properly separated follow-up (hold
+`segment_length` fixed, vary `cond` some OTHER way, or vice versa)
+would be needed to settle which variable is doing the work - not run
+this round.**
+
+## Round 2, A9/A10 (2026-08-28)
+
+**A9 - the cond floor is structural, decoupling `u` from `x` fixes it.**
+The closed-form `cond ~ (1+k^2) var(x)/var(a)` predicts the correct
+TREND across `k` (correlates with which `k` gives lower/higher `cond`
+in round 2's own A8 scan) but is off by a roughly constant factor
+(`~7`-`14x`, not exactly constant) - the qualitative structural claim
+holds, the exact formula is an approximation
+(`results/round2_A9_our_plant_reset_scan.csv`).
+
+Short-horizon open-loop-with-resets (draw `x_0` fresh from a wide
+range every `reset_every` steps, inject pure APRBS `u` - independent
+of `x` by construction) works dramatically better than any feedback-
+gain approach: for this study's plant (`rho=3`), `reset_every=2` gives
+`cond=3.1`, `reset_every=3` gives `cond=10.1` (`max|x|=54`, a
+reasonable scale) - both far below the `~76`-`80` floor round 2's A8
+found for every closed-loop scheme tried. Growth is `rho^reset_every`,
+so this only works because the window is short (`reset_every=5` already
+gives `cond=467`, `max|x|=490`; `reset_every=8` is unusable,
+`cond=2.2e5`).
+
+For the `A=1.03, B=0.01` plant Part C will use: the earlier `cond=1.6e14`
+blowup is confirmed to be exactly the predicted artifact, not real
+ill-conditioning. Under short-horizon resets (`reset_every=20`, per the
+task's own `1.03^20~1.8` growth-bound argument) with the SAME raw
+excitation range reused from the other plant, `cond_raw=11.2` already -
+much better than the long-horizon closed-loop attempt. Reporting the
+SCALE-INVARIANT (standardized/correlation-matrix) condition number
+alongside it, per the task's own instruction that a bare `cond` number
+is meaningless without stating the unit convention:
+`cond_standardized=1.38` - close to the `1.0` floor, confirming the
+plant itself is nearly perfectly identifiable once `B`'s tiny raw scale
+stops dominating the Gram matrix. **Both plants: the fix works, and the
+mechanism (structural floor from closed-loop `u in span(x)`, not a
+tuning failure) is confirmed.**
+
+**A10 - the unconfounded conditioning test, and a genuine structural
+limit found along the way.** Attempted exactly as specified: ONE fixed
+dataset (round 1's `k_stab=-2.7`, `cond=156`, the SAME 100 real points
+in their ORIGINAL temporal order/PE structure throughout), reweighted
+via a per-timestep loss weight (`arms.train_arm_weighted`, new) to hit
+different empirical `cond` targets. **Before the retraining sweep, an
+unconstrained numerical search for minimum-cond weights found a real,
+structural limit, not a search failure**: the lowest achievable `cond`
+via reweighting this specific dataset is `~6.8`, but ONLY by collapsing
+effective sample size (`1/sum(w^2)`) to `~1.1` - i.e. by putting nearly
+all loss-weight on a single timestep. This is itself a confound (a
+dataset that is EFFECTIVELY 1-2 points carries far less identification
+signal than one that is effectively 100, independent of its raw
+conditioning), so it was not used for the retraining sweep. Instead,
+traced the full achievable `(cond, eff_n)` trade-off curve under an
+`eff_n` floor constraint (`results/round2_A10_conditioning_levels.csv`):
+
+| level | cond | eff_n |
+|---|---|---|
+| eff_n>=15 | 41.0 | 15.0 |
+| eff_n>=30 | 65.6 | 30.0 |
+| eff_n>=50 | 85.3 | 50.0 |
+| eff_n>=80 | 107.8 | 80.0 |
+| native (uniform) | 156.0 | 100.0 |
+
+This is a narrower achievable range (`41`-`156`, `~3.8x`) than the
+originally-hoped `5`-`300` (`60x`), and `cond` and `eff_n` remain
+coupled throughout it - a genuinely cleaner test than A8 (no
+excitation-scheme/persistence-of-excitation confound: every level uses
+the identical 100 real data points in the identical order, differing
+ONLY in loss-weighting) but not a perfectly isolated one, since `eff_n`
+could not be held exactly fixed while cond varies for this dataset.
+Retrained arm_5 (8 seeds) at each of the 5 levels
+(`results/round2_A10_arm5_reweighted_results.csv`,
+`figures/round2_A10_arm5_cond_vs_effn.png`):
+
+| level | cond | eff_n | median err | std err | min | max |
+|---|---|---|---|---|---|---|
+| eff_n>=15 | 41.0 | 15.0 | 0.0187 | 0.080 | 0.0042 | 0.228 |
+| eff_n>=30 | 65.6 | 30.0 | 0.0587 | 0.150 | 0.0013 | 0.413 |
+| eff_n>=50 | 85.3 | 50.0 | 0.0417 | 0.042 | 0.0024 | 0.124 |
+| eff_n>=80 | 107.8 | 80.0 | 0.0566 | 0.102 | 0.0013 | 0.294 |
+| native | 156.0 | 100.0 | 0.0681 | 0.149 | 0.0047 | 0.403 |
+
+**This directly contradicts A8's apparent clean monotonic trend, and
+is reported as such rather than reconciled away.** The median is NOT
+monotonic in `cond` (`65.6->85.3` DECREASES, `0.059->0.042`, before
+rising again) and the figure (both panels - vs. `cond` and vs. `eff_n`
+separately) shows no visible trend at all: every level's 8 seeds
+scatter across roughly the SAME `0.001`-`0.4` range regardless of
+which level they belong to. Within-level standard deviation is
+frequently LARGER than the between-level median differences (e.g.
+`eff_n>=30`'s own std, `0.150`, exceeds every other level's median).
+**Conclusion: with the segment_length confound removed and the
+achievable range honestly narrower than hoped, arm_5's seed-to-seed
+error spread is FLAT within noise across the `cond` range this method
+could reach (`41`-`156`) - conditioning is not the driver of arm_5's
+variance. This is now supported by evidence within a properly
+(if imperfectly) controlled design, not by elimination or by round
+1.5's single unconfounded data point alone.** The dominant driver
+remains round 2's Task 2 finding: basin selection between branch-
+suppressed and branch-live solutions (Pearson `r=0.973`, Spearman
+`rho=0.738`), independent of data conditioning.
+
+**A6 restated per instruction, majority not universal**: W_dec's own
+angular displacement from init exceeded the branch direction's in 6 of
+8 arm_2 seeds (not all 8) - the dominant pattern, not a unanimous one.
+
+## Round 2, A11/A12 (2026-08-28)
+
+**A12 - tightening the closed form.** The stated formula, `cond ~
+(1+k^2) var(x)/var(a)`, was off by a "roughly constant" `7`-`14x` factor
+- re-derived properly rather than accepting that as final. The exact
+2x2 eigenvalue product/sum (`det=lambda_max*lambda_min`,
+`trace=lambda_max+lambda_min`) gives, in the small-`var(a)` asymptotic
+regime, `lambda_max ~ Mxx(1+k^2)` and `lambda_min ~ Maa/(1+k^2)` (not
+`Maa` alone) - an EXTRA factor of `(1+k^2)` was missing. **The
+corrected formula is `cond ~ (1+k^2)^2 * var(x)/var(a)`,** confirmed
+directly (`results/round2_A12_k_scan.csv`,
+`results/round2_A12_seed_scan.csv`, `results/round2_A12_summary.txt`):
+the residual ratio (actual/predicted) collapses from `5.15`-`16.49x`
+(original formula, systematic and large, mean `10.50`) to
+`0.80`-`1.32x` (corrected formula, mean `1.05`) across a `k` scan from
+`-3.99` to `-2.01`. Per the task's own instruction to stop calling any
+residual "constant" without checking: the corrected formula's residual
+DOES still correlate with `k` (Pearson `r=0.759`, `p=1.4e-8`) - a real,
+if much smaller, remaining `k`-dependence, most likely a next-order
+term in the asymptotic expansion (not derived further - diminishing
+returns for this study's purposes). Separately, and importantly for
+interpreting that residual: holding `k` FIXED at `-2.7` and varying
+only the random seed gives residual values ranging `0.91`-`2.50`
+(`std=0.47`) - LARGER than the across-`k` scan's own spread
+(`std=0.18`) - meaning a substantial part of what looked like
+"unexplained k-dependence" is actually ordinary finite-sample noise
+(only 100 timesteps per trajectory), not a further systematic
+correction waiting to be found. **Both effects are now separated and
+quantified: a real but small residual k-dependence (`r=0.759`) plus a
+comparable-or-larger finite-sample noise floor - neither hidden inside
+a vague "roughly constant" label.**
+
+**A11 - closing the conditioning range, and it changes the
+conclusion.** A10's sweep only reached `cond=41` (via reweighting, at
+the cost of `eff_n=15`), so its "flat variance" finding spanned `~4x`
+in `cond`, not the `~30x` the test needed. Fix, exactly as specified:
+use A9's short-horizon open-loop-with-resets data (`reset_every=3`)
+DIRECTLY as arm_5's training set - `cond=10.1` at FULL `eff_n=100`,
+persistence-of-excitation held fixed by construction (all 100 real
+points used, no reweighting at all), not by argument. Retrained arm_5
+(8 seeds) on it and added it to A10's combined sweep
+(`results/round2_A11_combined_results.csv`,
+`figures/round2_A11_arm5_full_range.png`):
+
+| level | cond | eff_n | median err | std err | min | max |
+|---|---|---|---|---|---|---|
+| reset_based (A11) | 10.1 | 100.0 | **0.00047** | 0.0085 | 0.00005 | 0.024 |
+| eff_n>=15 (A10) | 41.0 | 15.0 | 0.0187 | 0.080 | 0.0042 | 0.228 |
+| eff_n>=30 (A10) | 65.6 | 30.0 | 0.0587 | 0.150 | 0.0013 | 0.413 |
+| eff_n>=50 (A10) | 85.3 | 50.0 | 0.0417 | 0.042 | 0.0024 | 0.124 |
+| eff_n>=80 (A10) | 107.8 | 80.0 | 0.0566 | 0.102 | 0.0013 | 0.294 |
+| native (A10) | 156.0 | 100.0 | 0.0681 | 0.149 | 0.0047 | 0.403 |
+
+**The spread DOES open up at `cond~10`, exactly the alternative
+outcome flagged in advance.** Median error at `cond=10` is `~40x`
+better than at `cond=41` and `~145x` better than native; the figure
+shows the `cond=10` cluster sitting entirely below every other level,
+not overlapping the noise band the way A10's five closed-loop-derived
+levels overlapped each other. **This is a genuine change of
+conclusion from A10/round 1.5, and is retracted rather than
+reconciled: "conditioning is not the driver of arm_5's variance,
+closed" (A10's stated conclusion) does NOT survive extending the range
+to true low conditioning.**
+
+**However - and this must be reported with the same rigor as the
+result itself - the `cond=10` anchor is NOT produced by the same
+mechanism as A10's other five levels, and this reintroduces a version
+of A8's original confound rather than eliminating it.** A10's five
+closed-loop-derived levels are all reweightings of ONE fixed dataset
+(same 100 real closed-loop-plus-dither points, same temporal order,
+differing only in per-timestep loss weight). A11's `cond=10` anchor is
+a COMPLETELY DIFFERENT dataset, generated by a different excitation
+SCHEME (open-loop, `x_0` redrawn independently every 3 steps - roughly
+33 independent state-space draws packed into 100 steps, versus one
+single continuous closed-loop trajectory for every other level). This
+is, structurally, the same category of confound as `segment_length` in
+A8: reaching low `cond` via any method found so far in this study
+requires changing HOW the excitation is generated, and every such
+change also changes how much of the state space gets visited (a
+persistence-of-excitation effect), not conditioning in isolation.
+**Honest statement, not resolved further this round: extending the
+range reveals a large, real effect that A10 alone could not see
+(a genuine result, not an artifact of A10's narrower range) - but
+whether that effect is attributable to LOW CONDITIONING specifically,
+to the RICHER STATE-SPACE COVERAGE that came bundled with the only
+method found to reach it, or to both, remains open.** A clean
+follow-up would need low `cond` achieved WITHOUT a scheme change (not
+found this round - A10's own numerical search shows this dataset's
+reweighting floor is `cond~41` at usable `eff_n`) or richer coverage
+achieved WITHOUT lower `cond` (not attempted this round). The
+practical bottom line for the rest of this study: **conditioning (or
+whatever is bundled with reaching it) is a REAL, first-order effect on
+arm_5's error, at least at the low end - it should not be treated as a
+solved non-factor going into Parts B/C, even though within any single
+FIXED excitation scheme (A10's reweighting-only comparisons, or A8's
+segment-length-only comparisons among short segments) its effect looks
+much smaller or flat.**

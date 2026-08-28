@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from s4_nnx import S4LayerEnsemble
+from s4_nnx import S4LayerEnsemble, discrete_dplr
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,17 @@ class BlockConfig:
     glu: bool = True
     prenorm: bool = True
     residual: bool = True
+    memoryless: bool = False  # layernorm_study/CLAUDE.md: truncate the S4 branch to
+    # its zero-lag impulse response only (no memory) - see
+    # _memoryless_s4_branch below for why this belongs here rather than in s4-nnx.
+    postnorm_also: bool = False  # layernorm_study Exp2's combined prenorm+postnorm
+    # arm: an INDEPENDENT second LayerNorm applied at the very end (after the
+    # residual add, after the primary prenorm/postnorm norm if any) - default
+    # False leaves every existing M3-M6/M6_fix variant's forward pass, and
+    # its RNG key-splitting order (test_m6_init_params_match_legacy), untouched.
+    layer_norm_eps: float = 1e-6  # layernorm_study's epsilon sweep (Part B Task 5):
+    # flax.nnx.LayerNorm's own default - passed through explicitly rather than left
+    # implicit, so this can be varied without a second, parallel norm implementation.
 
 
 VARIANTS = {
@@ -77,6 +88,113 @@ class StaticNorm(nnx.Module):
         return (x - self.mu.value) / self.sigma.value
 
 
+class RMSNorm(nnx.Module):
+    """y = gamma * v / sqrt(mean(v^2) + eps) - drops LayerNorm's mean-
+    centering but KEEPS its degree-0 (per-input) scaling denominator.
+    No beta (matches the standard RMSNorm convention - unlike LayerNorm,
+    RMSNorm papers typically omit the additive shift).
+
+    layernorm_study's Part C, C7: "which part of LN does the damage" -
+    RMSNorm should fail IDENTICALLY to LayerNorm if the 1/sigma prefactor
+    (not mean-centering) is the sole source of the postnorm boundedness
+    pathology; the mean-centering matrix P plays no essential role in the
+    boundedness argument (||v|| bounded implies ||v||/sqrt(mean(v^2))
+    bounded the same way ||Pv|| bounded implies ||Pv||/sqrt(mean((Pv)^2))
+    is) - this arm tests whether that's actually true rather than assumed.
+    """
+
+    def __init__(self, d_model: int, *, epsilon: float = 1e-6, rngs: nnx.Rngs):
+        self.epsilon = epsilon
+        self.gamma = nnx.Param(jnp.ones((d_model,)))
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.epsilon)
+        return self.gamma.value * x / rms
+
+
+class FrozenSigmaNorm(nnx.Module):
+    """y = gamma * (v - mean(v)) / sigma_frozen + beta - LayerNorm's
+    mean-centering, computed FRESH per input exactly like real
+    LayerNorm, but divided by a FIXED CONSTANT (sigma_frozen=1.0,
+    never calibrated from data, never trained) instead of the
+    per-input std. Since mean-subtraction is itself linear
+    (mean(c*v)=c*mean(v)), dividing by a CONSTANT makes the whole
+    operation exactly AFFINE (degree-1) in v - this is the "denominator
+    replaced by a constant" variant of Part C's C7 (which part of LN
+    does the damage): if the postnorm pathology vanishes here, the
+    1/sigma prefactor specifically (not mean-centering, not the
+    existence of gamma/beta) is the sole culprit.
+    """
+
+    def __init__(self, d_model: int, *, rngs: nnx.Rngs):
+        del rngs  # unused: gamma/beta init deterministically, sigma is a fixed constant
+        self.gamma = nnx.Param(jnp.ones((d_model,)))
+        self.beta = nnx.Param(jnp.zeros((d_model,)))
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+        return self.gamma.value * (x - mean) + self.beta.value
+
+
+class CenteringOnlyNorm(nnx.Module):
+    """y = gamma * (v - mean(v)) + beta = FrozenSigmaNorm with
+    sigma_frozen fixed at exactly 1 - kept as a SEPARATE class (not an
+    alias) since Part C's C7 asks for this as an independently-labeled
+    third arm ("centering only, no division"), even though it is
+    mathematically identical to FrozenSigmaNorm's construction. Exactly
+    affine in v (degree-1), same reasoning as FrozenSigmaNorm - included
+    to directly test "is centering by itself harmless" as its own
+    labeled result, not inferred from FrozenSigmaNorm's.
+    """
+
+    def __init__(self, d_model: int, *, rngs: nnx.Rngs):
+        del rngs
+        self.gamma = nnx.Param(jnp.ones((d_model,)))
+        self.beta = nnx.Param(jnp.zeros((d_model,)))
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+        return self.gamma.value * (x - mean) + self.beta.value
+
+
+def _memoryless_s4_branch(seq: S4LayerEnsemble, x: jax.Array) -> jax.Array:
+    """Truncates the S4 branch to ONLY its zero-lag impulse-response tap
+    (h_0 = C_bar @ B_bar, the memoryless instantaneous gain per channel),
+    for layernorm_study's Experiment 2 complexity ladder (arm_1/2/3:
+    "linear/nonlinear branch, NO MEMORY" - isolating LayerNorm/activation
+    effects from S4's own recurrence). Composes s4-nnx's own PUBLIC
+    `discrete_dplr` function (never forked/copied - CLAUDE.md sec 7:
+    s4-nnx is pinned/frozen for the week, changes belong in s4dpc instead)
+    rather than S4LayerEnsemble.__call__'s conv/decode branches directly,
+    for one deliberate reason: this project has an independently
+    documented conv-mode-vs-decode-mode numerics gap in the FULL S4
+    branch (CLAUDE.md's "M6's conv/step parity gap"), because conv mode's
+    kernel_dplr (FFT/Cauchy) and decode mode's discrete_dplr+scan take
+    different numerical paths to nominally the same answer. Using
+    discrete_dplr's h_0 = C_bar@B_bar as the SAME single formula in BOTH
+    modes (rather than kernel_dplr's kernel[0] in conv mode and
+    discrete_dplr's h_0 in decode mode) makes the memoryless arms exactly
+    conv/step-consistent by construction, instead of inheriting a second,
+    unrelated numerics discrepancy on top of the one already being
+    isolated for study.
+
+    x: (L, d_model) - same shape ConfigurableBlock's normal S4 path
+    consumes, for either L=1 (decode/step mode) or L=l_max (conv mode);
+    the elementwise gain below is L-agnostic, so no mode branch is needed
+    here at all. Returns (L, d_model)."""
+    step = jnp.clip(jnp.exp(seq.log_step.value), 0.001, 1.0)  # (d_model, 1)
+    lambd = jnp.clip(seq.Lambda_re.value, None, -1e-4) + 1j * seq.Lambda_im.value  # (d_model, N)
+    c_vector = seq.C_real_imag.value[..., 0] + 1j * seq.C_real_imag.value[..., 1]  # (d_model, N)
+
+    def h0_one_channel(lambd_c, p_c, b_c, c_c, step_c):
+        _, b_bar, c_bar = discrete_dplr(lambd_c, p_c, p_c, b_c, c_c, step_c, seq.l_max)
+        return (c_bar @ b_bar).reshape(()).real
+
+    h0 = jax.vmap(h0_one_channel)(lambd, seq.P.value, seq.B.value, c_vector, step)  # (d_model,)
+    gain = h0 + seq.D.value.reshape(-1)  # (d_model,) - same +D feedthrough S4LayerEnsemble adds
+    return x * gain[jnp.newaxis, :]
+
+
 class ConfigurableBlock(nnx.Module):
     """One S4 sequence block: per-channel S4Layer (vmapped) + configurable
     norm/activation/glu/prenorm/residual. decode is fixed at construction
@@ -98,9 +216,15 @@ class ConfigurableBlock(nnx.Module):
 
         keys = jax.random.split(rngs.params(), 3)
         if config.norm == "layer":
-            self.norm = nnx.LayerNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
+            self.norm = nnx.LayerNorm(config.d_model, epsilon=config.layer_norm_eps, rngs=nnx.Rngs(params=keys[0]))
         elif config.norm == "static":
             self.norm = StaticNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
+        elif config.norm == "rmsnorm":
+            self.norm = RMSNorm(config.d_model, epsilon=config.layer_norm_eps, rngs=nnx.Rngs(params=keys[0]))
+        elif config.norm == "frozen_sigma":
+            self.norm = FrozenSigmaNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
+        elif config.norm == "centering_only":
+            self.norm = CenteringOnlyNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
         elif config.norm == "none":
             self.norm = None
         else:
@@ -110,23 +234,39 @@ class ConfigurableBlock(nnx.Module):
         if config.glu:
             self.out2 = nnx.Linear(config.d_model, config.d_model, rngs=nnx.Rngs(params=keys[2]))
 
+        # fold_in (not a 4th split() slot): keeps `keys` a fixed 3-way split
+        # of rngs.params() regardless of postnorm_also, so M3-M6/M6_fix
+        # (postnorm_also=False always) keep the EXACT key-derivation
+        # sequence test_m6_init_params_match_legacy checks bit-for-bit -
+        # widening the split() count would change keys[0..2] themselves,
+        # not just add a 4th, since split()'s outputs depend on the
+        # requested count.
+        self.norm_post = None
+        if config.postnorm_also:
+            post_key = jax.random.fold_in(keys[0], 1)
+            self.norm_post = nnx.LayerNorm(config.d_model, epsilon=config.layer_norm_eps, rngs=nnx.Rngs(params=post_key))
+
     def __call__(self, x: jax.Array, s4_state: jax.Array) -> tuple[jax.Array, jax.Array]:
         skip = x
 
         if self.norm is not None and self.config.prenorm:
             x = self.norm(x)
 
-        seq_graph, seq_params = nnx.split(self.seq)
+        if self.config.memoryless:
+            x = _memoryless_s4_branch(self.seq, x)
+            new_s4_state = s4_state  # untouched: memoryless branch carries no state forward
+        else:
+            seq_graph, seq_params = nnx.split(self.seq)
 
-        def run_one_channel(params_slice, u_slice, state_slice):
-            single_channel_layer = nnx.merge(seq_graph, params_slice)
-            return single_channel_layer(u_slice, state_slice)
+            def run_one_channel(params_slice, u_slice, state_slice):
+                single_channel_layer = nnx.merge(seq_graph, params_slice)
+                return single_channel_layer(u_slice, state_slice)
 
-        x, new_s4_state = jax.vmap(
-            run_one_channel,
-            in_axes=(0, 1, 0),
-            out_axes=(1, 0),
-        )(seq_params, x, s4_state)
+            x, new_s4_state = jax.vmap(
+                run_one_channel,
+                in_axes=(0, 1, 0),
+                out_axes=(1, 0),
+            )(seq_params, x, s4_state)
 
         if self.config.activation == "gelu":
             x = nnx.gelu(x)
@@ -146,5 +286,8 @@ class ConfigurableBlock(nnx.Module):
 
         if self.norm is not None and not self.config.prenorm:
             x = self.norm(x)
+
+        if self.norm_post is not None:
+            x = self.norm_post(x)
 
         return x, new_s4_state
