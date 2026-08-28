@@ -140,6 +140,58 @@ def train_arm(
     return nnx.state(model, nnx.Param), final_mse
 
 
+def train_arm_weighted(
+    arm: ArmSpec,
+    inputs: jax.Array,
+    targets: jax.Array,
+    weights: jax.Array,
+    *,
+    d_model: int,
+    N: int,
+    l_max: int,
+    epochs: int,
+    learning_rate: float,
+    seed: int,
+    weight_decay: float = 0.0,
+) -> tuple[nnx.State, float]:
+    """Same as train_arm, but the per-timestep loss is weighted:
+    loss = sum_t weights[t]*(pred_t-target_t)^2 / sum_t weights[t].
+    `weights` (L,), nonnegative, need not sum to 1 (normalized here).
+    The SAME 100 real (inputs, targets) pairs are used in their ORIGINAL
+    temporal order and positions (S4's conv-mode kernel is position-
+    dependent, so reordering/resampling into a shorter/longer/shuffled
+    sequence would corrupt it) - only which timesteps' errors matter for
+    the gradient changes, for round 2's Task A10 (does arm_5's
+    seed-to-seed spread track conditioning, with persistence-of-
+    excitation order held fixed rather than confounded with it, as
+    round 2's segment_length experiment was)."""
+    key = jax.random.PRNGKey(seed)
+    model = build_model(
+        arm, d_model=d_model, N=N, l_max=l_max,
+        d_input=inputs.shape[-1], d_output=targets.shape[-1], decode=False, key=key,
+    )
+    optimizer = nnx.Optimizer(model, optax.adamw(learning_rate, weight_decay=weight_decay), wrt=nnx.Param)
+    states = model.init_state(N=N)
+    w_norm = weights / jnp.sum(weights)
+
+    def loss_fn(m):
+        pred, _ = m(inputs, states)
+        sq_err = jnp.sum((pred - targets) ** 2, axis=-1)  # (L,)
+        return jnp.sum(w_norm * sq_err)
+
+    @nnx.jit
+    def train_step(m, opt):
+        loss, grads = nnx.value_and_grad(loss_fn)(m)
+        opt.update(m, grads)
+        return loss
+
+    for _ in range(epochs):
+        train_step(model, optimizer)
+
+    final_mse = float(loss_fn(model))
+    return nnx.state(model, nnx.Param), final_mse
+
+
 def load_arm_model(
     arm: ArmSpec,
     param_state: nnx.State,
