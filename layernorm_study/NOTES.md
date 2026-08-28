@@ -512,6 +512,125 @@ the driver of arm_5's seed sensitivity.** That remains best explained
 by Task 2's basin-selection finding, which is architecture/optimization-
 landscape-inherent, not data-inherent.
 
-**Standing status**: Tasks 4 (harden the postnorm ceiling claim) and 5
-(epsilon sweep on arm_5) are queued but not yet run, per instruction
-to stop and report Task 1(d)/Task 3 first.
+**Standing status (superseded below)**: Tasks 4 (harden the postnorm
+ceiling claim) and 5 (epsilon sweep on arm_5) were queued but not run,
+per instruction to stop and report Task 1(d)/Task 3 first. Round 2
+below re-examines the round 1.5 orthogonality claim before proceeding
+to Tasks 4/5.
+
+## Round 2, Part A: null tests for the orthogonality claim (2026-08-28)
+
+Direct objection to round 1.5's "W_dec learns a direction nearly
+orthogonal to the branch (cos~0.15)": for two INDEPENDENT RANDOM
+vectors in R^H, typical |cosine| ~ 1/sqrt(H) - at this study's
+`d_model=8`, that baseline is `0.354`, well ABOVE the observed
+`cos~0.15`. Near-orthogonality in high dimensions is the default, so a
+below-baseline cosine needed an explicit null test, not a bare number.
+Round 1.5's `cos=0.15` was also a single-point spot-check (one arbitrary
+`t`), not a trajectory-level statistic - both issues are addressed
+directly below (`results/round2_partA_arm2_orthogonality.csv`,
+`layernorm_study/src/orthogonality_tests.py`).
+
+**A1/A2 - cosine at init vs convergence, against an explicit null,
+all 8 arm_2 seeds:**
+
+| seed | cos init | pctl init | cos final | pctl final | proj. ratio init | proj. ratio final |
+|---|---|---|---|---|---|---|
+| 0 | -0.096 | 20.0 | -0.008 | **1.8** | 0.064 | 0.007 |
+| 1 | 0.324 | 59.6 | 0.023 | **5.0** | 0.105 | 0.036 |
+| 2 | -0.464 | 78.7 | 0.029 | **6.0** | 0.530 | 0.017 |
+| 3 | 0.136 | 26.2 | 0.066 | 12.5 | 0.043 | 0.075 |
+| 4 | -0.464 | 80.5 | -0.129 | 25.7 | 0.170 | 0.058 |
+| 5 | -0.193 | 37.8 | 0.106 | 21.5 | 1.665 | 0.092 |
+| 6 | 0.066 | 12.8 | 0.058 | 11.2 | 0.022 | 0.055 |
+| 7 | 0.134 | 27.0 | 0.040 | 8.1 | 0.023 | 0.021 |
+
+(`pctl` = percentile of `|cos(w, branch)|` in a 2000-sample null of
+random unit directions against the SAME branch vector - a LOW
+percentile means the trained/init decoder is MORE orthogonal to the
+branch than random chance.)
+
+At **init**, percentiles scatter across the full `12.8`-`80.5` range
+with no consistent direction - exactly what pure random initialization
+should produce, and a sanity check that the null-test methodology
+itself is not biased. At **convergence**, all 8 seeds land at or below
+the 26th percentile, 6 of 8 at or below the 13th, and 3 of 8 below the
+7th. **This is not noise and not a generic property of high-dimensional
+geometry** - training consistently and reliably moves `W_dec` toward a
+direction MORE orthogonal to the branch than chance would predict,
+across every seed. Round 1.5's `cos=0.15` number is superseded (a
+single-point estimate, not wrong in kind but noisier and less
+extreme than the trajectory-median values here, which run as low as
+`-0.008`).
+
+**A3 - projected contribution `|<w,branch>| / |<w,skip>|` (scale-
+sensitive, unlike cosine) at init vs final**: does NOT shrink
+monotonically in every seed (seeds 3, 6, 7 are flat or even grow
+slightly from init) - this is flagged, not smoothed over, since it
+complicates a simple "training monotonically suppresses the branch"
+story. But the CONVERGED value is small in absolute terms for every
+seed regardless of its own trajectory (`0.007`-`0.092`, all under
+`10%`) - so what's robust across seeds is the FINAL state (small
+projected contribution, low percentile), not necessarily a monotonic
+shrinking path to get there.
+
+**Note on gamma/beta, restated precisely per the task's own caution**:
+freezing gamma/beta (round 1.5 Task 1(d)) could only ever have tested
+whether LN's OWN affine parameters were the suppression mechanism. It
+was never a test of the projection/W_dec hypothesis - if `W_dec` does
+the annihilating, gamma is irrelevant to it by construction, so that
+result is consistent with the projection story but was never evidence
+FOR it on its own. A1-A3 above are the actual test of the projection
+hypothesis, and they support it: `W_dec` reliably lands in the low tail
+of the null distribution after training, and its converged projected
+contribution is uniformly small.
+
+**A4 - Task 2 robustness: Spearman alongside Pearson.** Pearson
+`r=0.973` (unchanged from round 1.5); **Spearman rho=0.738 (p=0.037)** -
+still positive and still significant at `n=8`, but MATERIALLY weaker
+than the Pearson number suggested. The labeled scatter
+(`figures/round2_partA_arm5_correlation_labeled.png`) shows why: seeds
+3 and 5 (branch/skip ratio `0.65` and `1.04`) sit well outside the
+cluster of the other 6 seeds (ratio `0.04`-`0.17`) and are doing much of
+the work in the Pearson number - among the clustered 6, the relationship
+is directionally consistent but not strictly monotonic (e.g. seed 1
+has LOWER error than seed 4 despite a HIGHER ratio). **Revised
+statement: the branch-ratio/Jacobian-error relationship for arm_5 is
+real and significant, not an artifact of two leverage points - but it
+is noisier than the Pearson r=0.973 alone implied, and should be
+described as "strong and significant" rather than "near-deterministic."**
+
+**A5 - Task 3, is conditioning ruled out?** `corr(x,u)` for the
+original data is `-0.977`; for the `k_stab=-3.5` decorrelated data,
+`-0.945` - barely moved, confirming round 1.5's own characterization
+("factor of two [in cond], not an elimination"). Tried a genuinely
+different decorrelation strategy per instruction: OPEN-LOOP excitation
+over a short horizon (x and u independent BY CONSTRUCTION in open
+loop, since u is pure APRBS). **Result: catastrophically worse, not
+better** - because the plant is open-loop unstable (`rho=3`), even a
+short horizon lets `|x|` grow enormously relative to `u`'s fixed
+APRBS scale (length 8: `max|x|=717`, `cond=4.8e5`; length 20:
+`max|x|=3.7e8`, `cond=7.8e16`), despite LOWER raw correlation
+(`0.44`-`0.62` vs. the closed-loop's `0.94`-`0.98`) - condition number
+depends on the whole covariance spectrum, not correlation alone, and
+an unstable open-loop system creates a variance mismatch between `x`
+and `u` that dominates. **Explicit answer to "is conditioning ruled
+out": no, not rigorously - a `cond~1` dataset was never achieved by
+either method tried, so conditioning-as-a-contributing-factor cannot
+be logically excluded. But it is not demonstrated to be the ACTIONABLE
+driver either: round 1.5's direct empirical test (retrain arm_0/arm_5
+on the ~50%-better-conditioned k_stab=-3.5 data) showed no improvement
+and a full reshuffling of which seeds succeed - the available evidence
+says conditioning is not the lever that explains arm_5's seed
+sensitivity, even though "conditioning matters zero" was never proven
+in the strong mathematical sense.**
+
+**Summary of Part A's effect on round 1.5's claims**: the branch-
+suppression/orthogonality mechanism (Task 1) is CONFIRMED more rigorously
+than before, not weakened - the null test was the right skeptical check
+to run, and it came back supporting the original claim more strongly
+(low percentiles are a cleaner signal than a bare cosine number could
+ever be). Task 2's correlation survives but should be described more
+modestly (Spearman, not just Pearson). Task 3's "conditioning doesn't
+explain it" conclusion survives a genuine second attempt, with the
+caveat that "ruled out" overstates what was actually shown.
