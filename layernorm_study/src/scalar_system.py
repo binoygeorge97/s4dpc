@@ -33,13 +33,23 @@ def generate_scalar_trajectory(
     aprbs_high: float = 10.0,
     hold_prob: float = 0.8,
     x0_range: float = 2.0,
+    k_stab: float = K_STAB,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Returns (inputs, targets): inputs (length, 2) = [x_k, u_k],
     targets (length, 1) = x_{k+1}, under the closed-loop-plus-dither
     excitation described above. float64 throughout (np.random.RandomState
     already returns float64), matching identify.fit_least_squares's own
     float64 convention for the ~1e-12-level precision this is meant to
-    support."""
+    support.
+
+    k_stab defaults to the module constant (round 1's choice, pole=0.3)
+    but is overridable - round 1.5's Task 3 found E[zz^T]'s condition
+    number is not very sensitive to aprbs amplitude (correlation(x,u) is
+    close to a fixed function of k_stab alone, since u=k_stab*x+a with a
+    independent of x - closed-form: corr = k_stab/sqrt(k_stab^2+1-pole^2))
+    but DOES depend on k_stab within the stabilizing range (-4,-2):
+    k_stab=-3.5 (pole=-0.5) empirically minimizes it (cond ~82 vs. the
+    default's ~156 - see round1_5_data_conditioning.py)."""
     rng = np.random.RandomState(seed)
     a_signal = fast_vectorized_aprbs(
         batch_size=1, length=length, low=aprbs_low, high=aprbs_high, hold_prob=hold_prob, rng=rng, Nu=1,
@@ -49,7 +59,7 @@ def generate_scalar_trajectory(
     targets = np.zeros((length, 1))
     x = rng.uniform(-x0_range, x0_range)
     for k in range(length):
-        u = K_STAB * x + a_signal[k]
+        u = k_stab * x + a_signal[k]
         inputs[k, 0] = x
         inputs[k, 1] = u
         x_next = A_TRUE * x + B_TRUE * u
@@ -57,6 +67,16 @@ def generate_scalar_trajectory(
         x = x_next
 
     return inputs, targets
+
+
+def regressor_condition_number(inputs: np.ndarray) -> float:
+    """cond(E[z z^T]), z=[x,u] rows of `inputs` - the Hessian of the
+    least-squares/teacher-forced-MSE loss (up to a constant factor) is
+    proportional to this matrix, so its condition number directly governs
+    gradient-descent convergence rate, independent of model capacity."""
+    z = np.asarray(inputs, dtype=np.float64)
+    cov = z.T @ z / z.shape[0]
+    return float(np.linalg.cond(cov))
 
 
 def fit_least_squares_scalar(inputs: np.ndarray, targets: np.ndarray) -> tuple[float, float, float]:
