@@ -726,3 +726,107 @@ it found no improvement. A properly separated follow-up (hold
 `segment_length` fixed, vary `cond` some OTHER way, or vice versa)
 would be needed to settle which variable is doing the work - not run
 this round.**
+
+## Round 2, A9/A10 (2026-08-28)
+
+**A9 - the cond floor is structural, decoupling `u` from `x` fixes it.**
+The closed-form `cond ~ (1+k^2) var(x)/var(a)` predicts the correct
+TREND across `k` (correlates with which `k` gives lower/higher `cond`
+in round 2's own A8 scan) but is off by a roughly constant factor
+(`~7`-`14x`, not exactly constant) - the qualitative structural claim
+holds, the exact formula is an approximation
+(`results/round2_A9_our_plant_reset_scan.csv`).
+
+Short-horizon open-loop-with-resets (draw `x_0` fresh from a wide
+range every `reset_every` steps, inject pure APRBS `u` - independent
+of `x` by construction) works dramatically better than any feedback-
+gain approach: for this study's plant (`rho=3`), `reset_every=2` gives
+`cond=3.1`, `reset_every=3` gives `cond=10.1` (`max|x|=54`, a
+reasonable scale) - both far below the `~76`-`80` floor round 2's A8
+found for every closed-loop scheme tried. Growth is `rho^reset_every`,
+so this only works because the window is short (`reset_every=5` already
+gives `cond=467`, `max|x|=490`; `reset_every=8` is unusable,
+`cond=2.2e5`).
+
+For the `A=1.03, B=0.01` plant Part C will use: the earlier `cond=1.6e14`
+blowup is confirmed to be exactly the predicted artifact, not real
+ill-conditioning. Under short-horizon resets (`reset_every=20`, per the
+task's own `1.03^20~1.8` growth-bound argument) with the SAME raw
+excitation range reused from the other plant, `cond_raw=11.2` already -
+much better than the long-horizon closed-loop attempt. Reporting the
+SCALE-INVARIANT (standardized/correlation-matrix) condition number
+alongside it, per the task's own instruction that a bare `cond` number
+is meaningless without stating the unit convention:
+`cond_standardized=1.38` - close to the `1.0` floor, confirming the
+plant itself is nearly perfectly identifiable once `B`'s tiny raw scale
+stops dominating the Gram matrix. **Both plants: the fix works, and the
+mechanism (structural floor from closed-loop `u in span(x)`, not a
+tuning failure) is confirmed.**
+
+**A10 - the unconfounded conditioning test, and a genuine structural
+limit found along the way.** Attempted exactly as specified: ONE fixed
+dataset (round 1's `k_stab=-2.7`, `cond=156`, the SAME 100 real points
+in their ORIGINAL temporal order/PE structure throughout), reweighted
+via a per-timestep loss weight (`arms.train_arm_weighted`, new) to hit
+different empirical `cond` targets. **Before the retraining sweep, an
+unconstrained numerical search for minimum-cond weights found a real,
+structural limit, not a search failure**: the lowest achievable `cond`
+via reweighting this specific dataset is `~6.8`, but ONLY by collapsing
+effective sample size (`1/sum(w^2)`) to `~1.1` - i.e. by putting nearly
+all loss-weight on a single timestep. This is itself a confound (a
+dataset that is EFFECTIVELY 1-2 points carries far less identification
+signal than one that is effectively 100, independent of its raw
+conditioning), so it was not used for the retraining sweep. Instead,
+traced the full achievable `(cond, eff_n)` trade-off curve under an
+`eff_n` floor constraint (`results/round2_A10_conditioning_levels.csv`):
+
+| level | cond | eff_n |
+|---|---|---|
+| eff_n>=15 | 41.0 | 15.0 |
+| eff_n>=30 | 65.6 | 30.0 |
+| eff_n>=50 | 85.3 | 50.0 |
+| eff_n>=80 | 107.8 | 80.0 |
+| native (uniform) | 156.0 | 100.0 |
+
+This is a narrower achievable range (`41`-`156`, `~3.8x`) than the
+originally-hoped `5`-`300` (`60x`), and `cond` and `eff_n` remain
+coupled throughout it - a genuinely cleaner test than A8 (no
+excitation-scheme/persistence-of-excitation confound: every level uses
+the identical 100 real data points in the identical order, differing
+ONLY in loss-weighting) but not a perfectly isolated one, since `eff_n`
+could not be held exactly fixed while cond varies for this dataset.
+Retrained arm_5 (8 seeds) at each of the 5 levels
+(`results/round2_A10_arm5_reweighted_results.csv`,
+`figures/round2_A10_arm5_cond_vs_effn.png`):
+
+| level | cond | eff_n | median err | std err | min | max |
+|---|---|---|---|---|---|---|
+| eff_n>=15 | 41.0 | 15.0 | 0.0187 | 0.080 | 0.0042 | 0.228 |
+| eff_n>=30 | 65.6 | 30.0 | 0.0587 | 0.150 | 0.0013 | 0.413 |
+| eff_n>=50 | 85.3 | 50.0 | 0.0417 | 0.042 | 0.0024 | 0.124 |
+| eff_n>=80 | 107.8 | 80.0 | 0.0566 | 0.102 | 0.0013 | 0.294 |
+| native | 156.0 | 100.0 | 0.0681 | 0.149 | 0.0047 | 0.403 |
+
+**This directly contradicts A8's apparent clean monotonic trend, and
+is reported as such rather than reconciled away.** The median is NOT
+monotonic in `cond` (`65.6->85.3` DECREASES, `0.059->0.042`, before
+rising again) and the figure (both panels - vs. `cond` and vs. `eff_n`
+separately) shows no visible trend at all: every level's 8 seeds
+scatter across roughly the SAME `0.001`-`0.4` range regardless of
+which level they belong to. Within-level standard deviation is
+frequently LARGER than the between-level median differences (e.g.
+`eff_n>=30`'s own std, `0.150`, exceeds every other level's median).
+**Conclusion: with the segment_length confound removed and the
+achievable range honestly narrower than hoped, arm_5's seed-to-seed
+error spread is FLAT within noise across the `cond` range this method
+could reach (`41`-`156`) - conditioning is not the driver of arm_5's
+variance. This is now supported by evidence within a properly
+(if imperfectly) controlled design, not by elimination or by round
+1.5's single unconfounded data point alone.** The dominant driver
+remains round 2's Task 2 finding: basin selection between branch-
+suppressed and branch-live solutions (Pearson `r=0.973`, Spearman
+`rho=0.738`), independent of data conditioning.
+
+**A6 restated per instruction, majority not universal**: W_dec's own
+angular displacement from init exceeded the branch direction's in 6 of
+8 arm_2 seeds (not all 8) - the dominant pattern, not a unanimous one.
