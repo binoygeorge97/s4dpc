@@ -935,3 +935,322 @@ solved non-factor going into Parts B/C, even though within any single
 FIXED excitation scheme (A10's reweighting-only comparisons, or A8's
 segment-length-only comparisons among short segments) its effect looks
 much smaller or flat.**
+
+## Part B: Task 4 / Task 5 (2026-08-28)
+
+**Task 4 - postnorm output ceiling, original plant (rho=3), existing
+60000-epoch arm_6/arm_7 checkpoints, all 8 seeds each, no retraining.**
+`Y_max = ||W_dec||(||gamma||_inf sqrt(H) + ||beta||) + ||b_dec||`
+computed from trained weights; swept `||F(c*z0)||` for `c` up to `1e4`
+along a fixed direction. **PASS (bound never exceeded)**: every one of
+16 checkpoints stays below its own `Y_max` (ratio range `0.05`-`0.66`,
+median `~0.37`-`0.40`). Not tight for a single fixed direction - a
+broader search (5000 random directions x 5 large scales, one
+representative checkpoint) reaches `0.74`, confirming the gap is "a
+single ray isn't the worst-case direction," not a loose bound.
+
+**Task 5 - epsilon sweep on arm_5 (prenorm, original plant), eps in
+{1e-8,...,1e-1}, 8 seeds each, 60000 epochs, new
+`BlockConfig.layer_norm_eps` flag.** **FAIL.** Predicted: kink
+amplitude/width scale as `eps^0.5`. Measured (log-log fit across the 5
+eps levels): amplitude `~ eps^-0.066` (`r^2=0.58`), width
+`~ eps^0.030` (`r^2=0.19`) - both essentially FLAT, nowhere near the
+predicted `+-0.5` exponent, and the width fit is barely better than
+noise (`r^2=0.19`). **Not fitted to look better than it is**: this is
+a real, clean failure of the simple `sqrt(eps)` picture for arm_5 as
+tested. Plausible (untested this round) explanation: arm_5 has REAL S4
+memory plus GELU+GLU on top of LayerNorm, and the origin-sweep shape
+this diagnostic reads off likely reflects those nonlinearities/memory
+at least as much as LayerNorm's own epsilon floor - a cleaner test
+would isolate LN the way arm_2 (memoryless, LN-only) does, rather than
+running it on the full arm_5 architecture where multiple mechanisms
+are superimposed. Flagged as the natural follow-up, not run this
+round.
+
+## Part C: Postnorm boundedness (2026-08-28)
+
+### Derivation sketch (for interpreting the numbers below)
+
+`P = I - (1/H) 1 1^T` (centering matrix). LayerNorm:
+`zhat = Pv / sqrt(||Pv||^2/H + eps)`, so `||zhat|| <= sqrt(H)` always
+(equality at `eps=0`) - LayerNorm maps all of `R^H` into a compact
+ball. A POSTNORM block - LN the LAST operation before the decoder, no
+skip bypassing it - therefore has uniformly bounded output:
+`||F(z)|| <= ||W_dec||(||gamma||_inf sqrt(H) + ||beta||) + ||b_dec|| =: Y_max`
+(the bound uses `||gamma||_inf`, not `||gamma||_2` - the worst case
+over the unit ball puts all of `zhat`'s norm on the single largest-
+`|gamma_i|` component).
+
+LayerNorm's own Jacobian: `dLN/dv = (1/sigma) diag(gamma)[P - zhat zhat^T/H]`,
+so `||J|| ~ C/||z||` far from the origin, and the bracket structurally
+annihilates `zhat` (and the all-ones direction), making `J` exactly
+rank-deficient by at least 2, at every point, not just far away.
+
+Writing the pre-norm activation `v(z) = b + Mz` (b = v(0), M = dv/dz|_0,
+both from the ACTUAL nonlinear branch, autodiff'd - not assumed
+literally affine): near field (`||PMz|| << ||Pb||`) gives `sigma~const`,
+`J~const`; far field (`||PMz|| >> ||Pb||`) gives `sigma~||z||`,
+`J` decays. Crossover: `r* ~ ||Pb|| / sigma_max(PM)`, floored at
+`sqrt(eps*H)/sigma_max(PM)`.
+
+**Architectural caveat, verified directly against `s4dpc/blocks.py`
+before relying on any of this** (not assumed): `skip = x` is set from
+the block's raw input at the top of `ConfigurableBlock.__call__`; for
+arm_6 (`prenorm=False`), the function's return value is
+`self.norm(skip + branch)` with nothing else in between; for arm_7
+(`postnorm_also=True`), it is `self.norm_post(skip + branch)`. In both
+cases `StackedModel.__call__` feeds that return value directly into
+`self.decoder` - no path from `skip` (or from `x` at any earlier point)
+to the decoder bypasses the final norm call. **The theorem's
+precondition holds exactly for both arms tested, confirmed by reading
+the code.** This does NOT generalize to postnorm variants elsewhere
+that place the norm inside the residual branch rather than around the
+whole residual sum - that architecture would not satisfy this
+precondition, and the boundedness argument would not apply to it
+without separate verification.
+
+All of C1-C8 below use `plant2` (`x_next = 1.03 x + 0.01 u`), excited
+via A9's short-horizon open-loop-with-resets scheme (`reset_every=20`
+unless noted), NOT the closed-loop scheme - per this round's own
+instruction not to carry that scheme's conditioning artifact into
+these tests.
+
+### C1 - bias ablation (decisive). PASS.
+
+**Framing correction per direct instruction**: the `r* ~ ||Pb||^0.93`
+scaling law is directionally right but `r^2=0.31` means it explains
+under a third of the variance - `p=0.0002` only says the slope is
+non-zero, not that the fit is tight. **The decisive result is the
+475x collapse under bias ablation, not the scaling exponent - reporting
+it that way, not as a clean power law.**
+
+- **C1(a) with-bias baseline** (`results/round2_C1a_withbias_baseline.csv`):
+  median measured `r* = 0.375` - a real, if narrow, near-field region.
+- **C1(b) no-bias ablation** (all biases AND beta frozen at exactly
+  zero before training - `arms.train_arm_no_bias`,
+  `results/round2_C1b_nobias_ablation.csv`): median measured
+  `r* = 0.00079` - **a 475x collapse**. The near-field region does not
+  shrink, it effectively vanishes: the amplitude simultaneously EXPLODES
+  (median `2.80 -> 1652.6`), exactly as predicted for a map whose
+  denominator now saturates at `sqrt(eps)` immediately at the origin
+  with nothing to hold it away.
+- **C1(c) bias-scale converse** (post-hoc scaling of the TRAINED
+  encoder bias by `k in {0.25,0.5,1,2,4}`, no retraining,
+  `results/round2_C1c_bias_scale_converse.csv`): `r* ~ ||Pb||^0.93`,
+  noisy (`r^2=0.31`) but the right sign and roughly the right order.
+
+### C2 - output ceiling (plant2, free-run rollout). PASS.
+
+`results/round2_C2_output_ceiling.csv`, `figures/round2_C2_output_ceiling.png`.
+Median `plateau/Y_max = 0.316` across 8 seeds - the free-run rollout's
+own plateau never exceeds the predicted ceiling (consistent with
+Task 4), though (same pattern as Task 4) a single rollout trajectory
+doesn't reach the theoretical worst-case ceiling exactly.
+
+### C3 - decay slope. FAIL as stated, with a plausible explanation not yet tested.
+
+`results/round2_C3_decay_slope.csv`. Predicted: log-log slope of `||J||`
+vs `||z||` in the far field is `-1`. **Measured median slope: `-2.33`,
+95% CI (across 8 seeds) `[-2.79, -1.76]` - excludes `-1` entirely. This
+is a real discrepancy, not noise, and is reported as a failure of the
+exact prediction, not smoothed into "roughly -1."** Plausible,
+untested explanation: the `-1` derivation considers LayerNorm's own
+`1/sigma` scaling in isolation, but arm_6's branch ALSO has GELU and a
+GLU gate, both of which have their own saturating behavior for large
+inputs and would compound with LN's decay to give something steeper.
+The natural test - rerun C3 on a GELU/GLU-free postnorm arm (e.g.
+`norm="layer", activation="none", glu=False`, postnorm) to see if
+`-1` holds when LN is the only nonlinearity present - was not run
+this round.
+
+### C4 - rank deficiency / Euler identity. PASS on Euler; AMBIGUOUS on null-alignment framing.
+
+`results/round2_C4_rank_deficiency.csv`. Computed on the block's OWN
+`H x H` LayerNorm Jacobian (`dLN/dv`, via `postnorm_geometry.py`) - NOT
+the overall 1x2 input-output Jacobian, which has only one singular
+value and no rank-deficiency structure to speak of.
+
+- **Euler identity**: `||J(v)v|| / (||J(v)|| ||v||)` is `~3e-7` at
+  `c=1` and `~4e-13` at `c=1000` - essentially exactly zero at BOTH
+  radii. **PASS**, cleanly.
+- **Null-direction alignment**: measured `~0.28`-`0.31` (median across
+  seeds, both radii) - close to OR BELOW the random baseline for
+  `R^8` (`1/sqrt(8)=0.354`), i.e. this specific check does NOT show
+  the predicted alignment. **Flagged as a measurement-definition
+  problem, not a clean fail of the underlying claim**: LayerNorm's
+  Jacobian has TWO theoretically-exact zero directions (the all-ones
+  direction from centering, and the `zhat` direction from the
+  self-projection term), and `sigma_min` is already at `1e-17` to
+  `1e-20` - numerically indistinguishable from a second near-zero
+  singular value, so which one SVD returns as "the" smallest is not
+  reliably resolved. The correct test compares `vhat` against the 2D
+  SPAN of both near-null directions, not one arbitrarily-chosen one;
+  not re-run this round.
+- **"sigma_min collapses before sigma_max"**: does not quite apply as
+  framed. `sigma_min` is ALREADY at machine-zero at `c=1` (near field),
+  not something that progressively collapses as radius grows - this
+  is a structural property of LayerNorm's Jacobian at EVERY point
+  (exact rank deficiency by construction), not a distinctively
+  far-field signature. `sigma_max` itself does decay with radius
+  (`~1.2-1.7` at `c=1` down to `~0.001` at `c=1000`, consistent with
+  C3), but the "before" framing in the prediction doesn't match what
+  was measured.
+
+### C5 - two-shell test. Genuinely surprising: neither arm reaches the predicted floor.
+
+`results/round2_C5_two_shell_results.csv`, `figures/round2_C5_two_shell.png`.
+Theoretical worst-case floor (splitting the difference between targets
+at `r1=1` and `r2=50`): `25.235`. **Neither arm comes close**: arm_5
+(prenorm control) RMSE `~0.0002`-`0.04` at both shells; arm_6
+(postnorm) RMSE `~0.004`-`0.08` - `2`-`3` orders of magnitude BELOW
+the predicted floor for both. Postnorm is consistently worse than
+prenorm here (roughly `10`-`40x` on `rmse_r2`), so the qualitative
+prenorm-vs-postnorm ranking survives, but **the specific "network is
+provably at its best and its best is provably bad" claim does NOT
+land** - postnorm was never forced anywhere near the predicted
+compromise. Most likely explanation, not directly verified this round:
+the floor formula assumes the model is FORCED to use a single constant
+gain across `[r1, r2]`, which is only true if the model's own `r*`
+(near-field radius) is SMALLER than `r2=50` - if these particular
+two-shell-trained checkpoints happen to have `r* > 50`, both shells sit
+inside the same near-field ball and there is no forced compromise to
+hit the floor on. `predicted_r_star` was not computed for these
+specific checkpoints this round - the natural, missing diagnostic that
+would confirm or refute this explanation, flagged as an open follow-up.
+
+### C6 - WITHDRAWN by the author of the hypothesis, not counted against the theory.
+
+The original C6 prediction ("postnorm relocates its correct region to
+the training center by adapting the bias") was wrong on the theory's
+OWN terms, not merely inconvenient. The near-field region
+`||PMz| << ||Pb||` is a ball CENTERED AT `z=0`, always - increasing the
+bias enlarges that ball, it never moves it to an annulus elsewhere.
+Getting good behavior at `||z||=50` needs `||Pb|| >> 50 sigma_max(PM)`,
+which gives a ball that ALSO contains the origin. **This entry is
+recorded as WITHDRAWN, not as a failed prediction of the boundedness
+theory** - the theory was never actually tested by this prediction,
+because the prediction did not follow from it. (The measured numbers -
+`Jx=4.56` at the origin, `Jx=0.035` at `x=50`, no plateau anywhere in
+the swept range - stand as raw data and are picked up by C6-revised
+below, not discarded.)
+
+### C6-revised. Parts (a-d) AMBIGUOUS-leaning-FAIL for simple saturation; part (e) PASS on scaling, FAIL on the origin-containment companion claim.
+
+`results/round2_C6revised_ceiling_check.csv`,
+`figures/round2_C6revised_ceiling.png`.
+
+**(a-d) Is the original C6 finding just output saturation?** Required
+output at `x_ref=50`: `~51.5`. Measured `Y_max` (trained weights,
+8 seeds): `115.9`-`146.0`, median ratio `Y_max/required = 2.34` -
+**consistently, across all 8 seeds, more than DOUBLE what's needed.**
+`max|pred|/Y_max` median `0.84` (predictions get moderately close to
+but do not fully saturate the ceiling). **Conclusion: simple output
+saturation does NOT explain the original C6 numbers either** - the
+model has ample headroom to represent the required magnitude, so
+`Jx=0.035` at `x=50` isn't "the model literally can't reach 51.5," it's
+something more specific: DERIVATIVE fidelity (needing the RIGHT LOCAL
+SLOPE) fails independently of whether the OUTPUT AMPLITUDE itself is
+capped - postnorm can hit approximately the right VALUE at a distant
+point via curve-fitting flexibility (a non-locally-linear function
+shape) without that implying anything about the SLOPE being right
+there. This is a sharper, third reading of the original finding -
+neither "relocation" (withdrawn) nor simple "saturation" (this section),
+but a genuine value/derivative dissociation.
+
+**(e) Enlargement test** (`results/round2_C6revised_enlargement_test.csv`,
+`figures/round2_C6revised_enlargement.png`) - origin-centered data,
+`b_enc` scaled by `k in {1,10,50,200}` post-hoc on trained arm_6
+checkpoints:
+- `r*` scaling: median log-log slope `0.913` vs `k` - **close to the
+  predicted `1.0`, PASS.**
+- Companion claim ("the good region always contains the origin,
+  Jx-at-origin should stay near true as `k` grows"): **FAILS as
+  tested.** Median `Jx_at_origin` across all `(seed, k)` combinations
+  is `0.121` (true `1.03`), and it gets WORSE, not better, as `k`
+  increases (e.g. seed 7: `Jx_at_origin` goes `-1.00 -> 0.047 ->
+  0.005 -> -0.002` as `k` goes `1 -> 10 -> 50 -> 200`). **Flagged as
+  AMBIGUOUS rather than a clean refutation**: scaling `b_enc` alone by
+  up to `200x`, post-hoc and without retraining, pushes `v(0)` far
+  outside the S4+GELU+GLU branch's TRAINED operating range - the
+  branch was never exposed to an input of that magnitude during
+  training, so nothing guarantees its response there is well-behaved,
+  independent of whether the theory's own `r*` formula (which DOES
+  recompute `M` and `b` correctly at each new bias level) is right.
+  This complicates POST-HOC bias scaling as a clean test of the
+  theory specifically - a genuine retraining at each bias scale
+  (not attempted this round) would be the clean version of this test.
+
+### C7 - which part of LayerNorm does the damage. PASS, cleanly.
+
+`results/round2_C7_which_part_results.csv`, `figures/round2_C7_which_part.png`.
+Median `jx_err_mean` across 8 seeds each:
+
+| arm | jx_err_mean |
+|---|---|
+| real LayerNorm (arm_6 baseline, computed separately for this comparison) | 0.492 |
+| rmsnorm (drops centering, keeps 1/sigma) | 0.530 |
+| frozen_sigma (keeps centering, drops 1/sigma) | 0.057 |
+| centering_only (identical construction to frozen_sigma, separately labeled) | 0.057 |
+
+**rmsnorm fails within `8%` of real LayerNorm's own error** (`0.530`
+vs `0.492`) - "fails IDENTICALLY" is confirmed closely, not just in
+kind. **frozen_sigma and centering_only both recover to `~1/9` of that
+error** (`0.057`), an order of magnitude improvement, from breaking
+degree-0 homogeneity alone (a fixed denominator) with NOTHING else
+changed. **The 1/sigma prefactor is the culprit; mean-centering is
+exonerated** - both predictions land, and land together (they were
+designed to be redundant checks from opposite directions: killing
+degree-0 fixes it, and a degree-0-preserving variant with centering
+removed fails just as badly).
+
+### C8 - gain sweep. AMBIGUOUS - likely confounded by inconsistent training convergence, not a clean test.
+
+`results/round2_C8_gain_sweep_results.csv`, `figures/round2_C8_gain_sweep.png`.
+**Every one of the 5 gains tested (`rho in {0.5, 0.9, 1.03, 1.5, 3.0}`)
+shows median failure radius `= 1e-6`** - the smallest value tested, an
+IMMEDIATE failure with zero discrimination between stable and unstable
+systems. This directly contradicts C1's OWN finding of a real,
+non-trivial near-field region (`r*~0.375`) for a similarly-configured
+arm_6 checkpoint, which is the internal-consistency flag that matters
+here: **this looks like a setup/convergence problem, not a real
+"failure radius shrinks monotonically" or "flat" finding.** Supporting
+evidence: `train_mse` values are inconsistent and often large (many in
+the `1e-2` to `0.8` range, versus the `1e-6`-`1e-8` this project
+otherwise treats as "well converged") - the per-`rho` excitation
+scheme (`B_true` fixed at `1`, `reset_every` chosen ad hoc per `rho`
+rather than validated the way plant2's own `(A=1.03, B=0.01,
+reset_every=20)` configuration was validated in A9) was not checked
+for training stability before being used to draw conclusions. **Not
+reported as a PASS or FAIL of the gain-sweep prediction - reported as
+AMBIGUOUS, needing a redo with per-`rho` excitation validated for
+convergence quality (matching A9's own rigor) before it says anything
+trustworthy.**
+
+### Bottom line
+
+The user's own stated bar for the strongest, most general claim was
+"if C1 and C5 both land." **C1 lands cleanly (475x collapse under
+bias ablation, confirmed from two independent directions via C7's
+frozen-sigma/centering-only recovery). C5 does not land** - neither
+arm reached the predicted floor, most likely because these particular
+checkpoints' near-field radius already covers both test shells, so
+postnorm was never actually forced into the predicted compromise.
+**The generalized claim ("postnorm residual blocks are uniformly
+bounded-output maps that can only fit a linear system on a bounded
+neighborhood of a bias-determined operating point, and can never
+reproduce an unstable one") is therefore NOT written up as established
+past S4 here** - the mechanism (bounded output, near-field-only
+Jacobian fidelity, degree-0 homogeneity traceable specifically to
+LayerNorm's `1/sigma` term) is well-supported by C1, C2, C4's Euler
+identity, and C7; but C3's exact decay-rate prediction fails as
+stated, C5's clean impossibility demonstration doesn't materialize as
+designed, C6's original form is withdrawn, C6-revised's enlargement
+test is only half-confirmed, and C8 is confounded rather than
+decisive. **What IS established**: postnorm's failure away from the
+origin is a real, structural consequence of LayerNorm's `1/sigma`
+term specifically (not mean-centering, not a generic "postnorm is bad"
+statement, and not a training/relocation artifact) - a narrower,
+better-evidenced claim than the full generalization, with several of
+this round's own sub-tests (C3, C5, C8) identifying exactly where the
+simple picture needs more care before it would support that broader
+statement.
