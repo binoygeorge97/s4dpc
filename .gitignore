@@ -1,5 +1,13 @@
 # CLAUDE.md transport plan (§2, §5)
-results/
+# Anchored (/results/, not results/): a bare `results/` matches a
+# directory of that name at ANY depth, which was silently also catching
+# layernorm_study/results/ - confirmed directly (2026-08-27, round 1) that
+# this made a nested .gitignore's negation impossible to override (git's
+# directory-exclusion short-circuit never descends into an already-
+# excluded directory). Anchoring restricts this rule to the repo-root
+# results/ dir only, which is the only thing it was ever meant to cover -
+# behavior for that directory is unchanged either way.
+/results/
 wandb/
 venv/
 *.msgpack

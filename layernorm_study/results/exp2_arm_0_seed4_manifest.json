@@ -1,0 +1,39 @@
+{
+  "arm": "arm_0",
+  "seed": 4,
+  "description": "zero branch (skip only) - exactly linear, no memory",
+  "block_kwargs": {},
+  "n_layers": 0,
+  "config": {
+    "d_model": 8,
+    "N": 16,
+    "l_max": 100,
+    "epochs": 60000,
+    "learning_rate": 0.001,
+    "seed": 4
+  },
+  "true_plant": {
+    "A": 3.0,
+    "B": 1.0
+  },
+  "result": {
+    "arm": "arm_0",
+    "seed": 4,
+    "description": "zero branch (skip only) - exactly linear, no memory",
+    "teacher_mse_train_final": 5.584688332286423e-17,
+    "teacher_mse": 5.584688334544047e-17,
+    "free_run_rmse": 8.842886244462427e-09,
+    "jx_err_mean": 1.4223440203409154e-09,
+    "jx_err_max": 1.4223440203409154e-09,
+    "ju_err_mean": 1.92034765866822e-09,
+    "ju_err_max": 1.92034765866822e-09,
+    "equilibrium_drift": -1.3283135147368341e-09,
+    "homogeneity_flatness": 1.8640070961605194e-12,
+    "jx_far_from_origin": 3.000000004267032,
+    "jx_at_origin": 3.000000004267032,
+    "jx_origin_spike_ratio": 1.0,
+    "directional_asymmetry_at_smallest_eps": 0.0,
+    "directional_asymmetry_at_largest_eps": 0.0,
+    "sigma_jx_err_correlation": null
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "arm": "arm_4",
+  "seed": 2,
+  "description": "S4, no LN - nonlinear (via memory), no LayerNorm",
+  "block_kwargs": {
+    "norm": "none",
+    "activation": "none",
+    "glu": false,
+    "memoryless": false
+  },
+  "n_layers": 1,
+  "config": {
+    "d_model": 8,
+    "N": 16,
+    "l_max": 100,
+    "epochs": 60000,
+    "learning_rate": 0.001,
+    "seed": 2
+  },
+  "true_plant": {
+    "A": 3.0,
+    "B": 1.0
+  },
+  "result": {
+    "arm": "arm_4",
+    "seed": 2,
+    "description": "S4, no LN - nonlinear (via memory), no LayerNorm",
+    "teacher_mse_train_final": 4.437481537575684e-06,
+    "teacher_mse": 4.437481537576122e-06,
+    "free_run_rmse": 0.0022067896403826846,
+    "jx_err_mean": 0.001543497984236808,
+    "jx_err_max": 0.001543497984236808,
+    "ju_err_mean": 0.0001704776313046219,
+    "ju_err_max": 0.0001704776313046219,
+    "equilibrium_drift": -0.00017268630035065236,
+    "homogeneity_flatness": 4.11383429673078e-12,
+    "jx_far_from_origin": 3.0046304939527104,
+    "jx_at_origin": 3.0046304939527104,
+    "jx_origin_spike_ratio": 1.0,
+    "directional_asymmetry_at_smallest_eps": 0.0,
+    "directional_asymmetry_at_largest_eps": 0.0,
+    "sigma_jx_err_correlation": null
+  }
+}
