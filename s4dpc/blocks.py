@@ -88,6 +88,75 @@ class StaticNorm(nnx.Module):
         return (x - self.mu.value) / self.sigma.value
 
 
+class RMSNorm(nnx.Module):
+    """y = gamma * v / sqrt(mean(v^2) + eps) - drops LayerNorm's mean-
+    centering but KEEPS its degree-0 (per-input) scaling denominator.
+    No beta (matches the standard RMSNorm convention - unlike LayerNorm,
+    RMSNorm papers typically omit the additive shift).
+
+    layernorm_study's Part C, C7: "which part of LN does the damage" -
+    RMSNorm should fail IDENTICALLY to LayerNorm if the 1/sigma prefactor
+    (not mean-centering) is the sole source of the postnorm boundedness
+    pathology; the mean-centering matrix P plays no essential role in the
+    boundedness argument (||v|| bounded implies ||v||/sqrt(mean(v^2))
+    bounded the same way ||Pv|| bounded implies ||Pv||/sqrt(mean((Pv)^2))
+    is) - this arm tests whether that's actually true rather than assumed.
+    """
+
+    def __init__(self, d_model: int, *, epsilon: float = 1e-6, rngs: nnx.Rngs):
+        self.epsilon = epsilon
+        self.gamma = nnx.Param(jnp.ones((d_model,)))
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        rms = jnp.sqrt(jnp.mean(x ** 2, axis=-1, keepdims=True) + self.epsilon)
+        return self.gamma.value * x / rms
+
+
+class FrozenSigmaNorm(nnx.Module):
+    """y = gamma * (v - mean(v)) / sigma_frozen + beta - LayerNorm's
+    mean-centering, computed FRESH per input exactly like real
+    LayerNorm, but divided by a FIXED CONSTANT (sigma_frozen=1.0,
+    never calibrated from data, never trained) instead of the
+    per-input std. Since mean-subtraction is itself linear
+    (mean(c*v)=c*mean(v)), dividing by a CONSTANT makes the whole
+    operation exactly AFFINE (degree-1) in v - this is the "denominator
+    replaced by a constant" variant of Part C's C7 (which part of LN
+    does the damage): if the postnorm pathology vanishes here, the
+    1/sigma prefactor specifically (not mean-centering, not the
+    existence of gamma/beta) is the sole culprit.
+    """
+
+    def __init__(self, d_model: int, *, rngs: nnx.Rngs):
+        del rngs  # unused: gamma/beta init deterministically, sigma is a fixed constant
+        self.gamma = nnx.Param(jnp.ones((d_model,)))
+        self.beta = nnx.Param(jnp.zeros((d_model,)))
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+        return self.gamma.value * (x - mean) + self.beta.value
+
+
+class CenteringOnlyNorm(nnx.Module):
+    """y = gamma * (v - mean(v)) + beta = FrozenSigmaNorm with
+    sigma_frozen fixed at exactly 1 - kept as a SEPARATE class (not an
+    alias) since Part C's C7 asks for this as an independently-labeled
+    third arm ("centering only, no division"), even though it is
+    mathematically identical to FrozenSigmaNorm's construction. Exactly
+    affine in v (degree-1), same reasoning as FrozenSigmaNorm - included
+    to directly test "is centering by itself harmless" as its own
+    labeled result, not inferred from FrozenSigmaNorm's.
+    """
+
+    def __init__(self, d_model: int, *, rngs: nnx.Rngs):
+        del rngs
+        self.gamma = nnx.Param(jnp.ones((d_model,)))
+        self.beta = nnx.Param(jnp.zeros((d_model,)))
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+        return self.gamma.value * (x - mean) + self.beta.value
+
+
 def _memoryless_s4_branch(seq: S4LayerEnsemble, x: jax.Array) -> jax.Array:
     """Truncates the S4 branch to ONLY its zero-lag impulse-response tap
     (h_0 = C_bar @ B_bar, the memoryless instantaneous gain per channel),
@@ -150,6 +219,12 @@ class ConfigurableBlock(nnx.Module):
             self.norm = nnx.LayerNorm(config.d_model, epsilon=config.layer_norm_eps, rngs=nnx.Rngs(params=keys[0]))
         elif config.norm == "static":
             self.norm = StaticNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
+        elif config.norm == "rmsnorm":
+            self.norm = RMSNorm(config.d_model, epsilon=config.layer_norm_eps, rngs=nnx.Rngs(params=keys[0]))
+        elif config.norm == "frozen_sigma":
+            self.norm = FrozenSigmaNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
+        elif config.norm == "centering_only":
+            self.norm = CenteringOnlyNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
         elif config.norm == "none":
             self.norm = None
         else:
