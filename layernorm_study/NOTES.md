@@ -411,3 +411,107 @@ of seed or training budget). This sharpens rather than overturns the
 motivating hypothesis (LN's degree-0 homogeneity), but relocates where
 the real, hard-to-train-away damage lives: not "LN exists" but "LN
 placed after the residual, or LN composed with genuine memory."
+
+## Results, round 1.5: is "trainable away" actually branch suppression? (2026-08-28)
+
+Motivated by a direct objection to round 2's arm_2 correction: LayerNorm
+is homogeneous of degree ZERO by construction (no gamma/beta makes
+`LN(c*z) = c*LN(z)`) - a prenorm block containing a real LayerNorm
+CANNOT represent an exactly homogeneous map unless the branch's
+contribution is driven toward zero. So "trainable away" (round 2)
+should mean the optimizer found an escape route (branch suppression),
+not that LN's nonlinearity itself became benign. Tested directly rather
+than assumed.
+
+**Task 1(a) - gamma/beta, init vs final, all 8 arm_2 seeds**: `gamma`
+does NOT collapse toward zero. It stays close to its init norm
+(`2.83`) throughout - final values range `2.84` to `3.29` (shrink
+factors `0.86x`-`0.99x`, several actually GROW slightly). `beta` grows
+from `0` to a modest `0.15`-`0.73`. **The specific "gamma -> 0" escape
+route is refuted by this alone**, before even running the frozen-LN
+test.
+
+**Task 1(b,c) - branch/skip ratio and J = C + R decomposition, arm_2**:
+the branch's OUTPUT magnitude relative to skip is genuinely small
+(median ratio `0.7%`-`9.4%` across seeds), and the constant term `C`
+(skip alone) already matches `[A_true, B_true]` almost exactly
+(`C_err_rel` `0` to `8.4e-8`) - consistent with suppression, but not
+yet distinguishing WHICH parameter is doing the suppressing.
+
+**Task 1(d) - the decisive test: retrain arm_2 with gamma FROZEN at 1,
+beta FROZEN at 0 (LN's normalization is still fully active every
+forward pass - mean-subtraction, `1/sigma` scaling - the optimizer just
+cannot shrink gamma or shift beta), same pinned 60000 epochs, same 8
+seeds.** Result: **error does NOT jump back to percent-level.** 7 of 8
+seeds stay in the `1e-10` to `1e-8` range (statistically indistinguishable
+from the unfrozen run); the one exception (seed 6, `1.7e-3`) is still
+three orders of magnitude below "percent-level," not a restoration of
+round 1's original finding. **This refutes the specific "gamma->0"
+hypothesis as stated.** Freezing LN's own affine parameters does not
+stop whatever is suppressing the branch.
+
+**Follow-up (not in the original task list, run because Task 1(d)'s
+result demanded it): which knob IS doing the suppression, if not
+gamma/beta?** Checked the S4 gain itself (arm_2 is memoryless, so its
+zero-lag gain `h_0 = C_bar@B_bar` is the only other multiplicative
+factor on the branch path) - it does NOT shrink either (norm `2.7`-`2.9`
+at init, `2.7`-`3.5` at final, several seeds growing). Checked the
+actual geometry instead: at a representative trajectory point (seed 0),
+the PRE-decoder branch vector has substantial norm (`3.07`), `W_dec`
+has a normal norm (`1.63`), but `cos(angle between them) = 0.15` - **the
+two are nearly orthogonal**. Confirmed on a second seed (`5`): branch
+norm `3.82`, `W_dec` norm `1.09`, `cos = 0.16`. **This directly confirms
+the task's alternative hypothesis (e): `W_dec` learned a DIRECTION
+that geometrically nearly-annihilates the branch's contribution, not
+that any individual scalar (gamma, beta, or the S4 gain) collapsed.**
+Precise statement of what round 2 actually found: LayerNorm's degree-0
+term cannot become linear, so it becomes irrelevant via a *geometric*
+route (the decoder projects it out), not a *magnitude* route on any
+single learnable scale factor.
+
+**Task 2 - does arm_5's seed sensitivity correlate with the same
+phenomenon?** Computed the same branch/skip ratio (Task 1b's machinery,
+generic, applied unchanged to arm_5's 8 existing checkpoints - no
+retraining) and correlated it against arm_5's already-recorded
+`jx_err_mean` per seed. **Pearson r = 0.973** (`results/
+round1_5_arm5_branch_ratio_vs_error.csv`, `figures/
+round1_5_arm5_branch_ratio_vs_error.png`) - a very strong, clean,
+monotonic relationship. **Arm_5's seed sensitivity is not mysterious:
+it is basin selection between "branch mostly suppressed" (low ratio,
+low error, e.g. seed 0 at ratio `0.04`/error `0.5%`) and "branch stays
+live" (high ratio, high error, e.g. seed 5 at ratio `1.04`/error
+`40%`).** Exactly the mechanism Task 1 characterizes for arm_2, playing
+out as literal seed-to-seed variance for arm_5 rather than being
+uniformly resolved.
+
+**Task 3 - is arm_0's slow convergence (round 2: 60000 epochs needed,
+failed at 20000 on one seed for an exactly-affine 2-parameter fit) a
+data-conditioning artifact?** `cond(E[z z^T])` for round 1/2's data
+(`k_stab=-2.7`) is `156` - `corr(x, u) = -0.977`, confirming the
+predicted near-rank-deficiency from proportional feedback
+(`u = k_stab*x + a`, closed form `corr = k_stab/sqrt(k_stab^2 + 1 -
+pole^2)`). A scan over the stabilizing range found APRBS amplitude
+barely moves `cond` (the closed-form correlation doesn't depend on it)
+but `k_stab` does: `k_stab=-3.5` (pole `-0.5`) empirically minimizes it
+at `cond=82` - a real `47.6%` reduction, but not dramatic; there is an
+apparent FLOOR to how decorrelated a purely-proportional stabilizing
+loop can make `(x, u)` for this specific unstable plant without
+changing the excitation paradigm entirely (out of scope this round).
+Re-ran arm_0 and arm_5 on the decorrelated data at the SAME PINNED
+60000 epochs (per this round's own methodological note - the budget was
+not re-tuned again): **arm_0's median error barely moves** (`2.4e-9` ->
+`1.1e-9`, both already at the machine-precision floor - conditioning
+doesn't matter once the epoch budget is adequate). **arm_5's median
+error does not improve** (`6.8e-2` -> `1.1e-1`, if anything slightly
+worse) **and which SEEDS are good/bad completely reshuffles** (seed 1:
+`2.6%` -> `23%`; seed 5: `40%` -> `1.9%`; seed 6: `9.2%` -> `0.6%`).
+**The conclusions do not move: data conditioning is real (and now
+documented/parameterized - `scalar_system.generate_scalar_trajectory`'s
+new `k_stab` argument, `regressor_condition_number` helper) but is NOT
+the driver of arm_5's seed sensitivity.** That remains best explained
+by Task 2's basin-selection finding, which is architecture/optimization-
+landscape-inherent, not data-inherent.
+
+**Standing status**: Tasks 4 (harden the postnorm ceiling claim) and 5
+(epsilon sweep on arm_5) are queued but not yet run, per instruction
+to stop and report Task 1(d)/Task 3 first.
