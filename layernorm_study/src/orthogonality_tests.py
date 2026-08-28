@@ -117,6 +117,42 @@ def dominant_direction(vectors: np.ndarray) -> np.ndarray:
     return vt[0]
 
 
+def kink_amplitude_and_r_star(sweep: list[dict]) -> tuple[float, float]:
+    """Operational (amplitude, r*) from an origin sweep (list of dicts
+    with 'c' and 'Jx', e.g. scalar_diagnostics.jx_vs_c_sweep's output):
+    amplitude = |Jx| at the point closest to the origin minus the
+    far-field |Jx| (median of the 5 largest-|c| points on each side);
+    r* = smallest |c| (moving inward from the far side) at which |Jx|
+    first crosses halfway between the far-field value and the peak -
+    the theory's crossover radius between "near field, J~const" and
+    "far field, J~1/r" (or, for a well-behaved prenorm/no-norm arm with
+    amplitude~0, this returns a large/undefined r* by construction,
+    which callers should interpret as "no kink found", not a small one).
+    Used by Part B Task 5 (epsilon sweep) and Part C C1 (bias ablation)."""
+    jx_abs = np.array([abs(r["Jx"]) for r in sweep])
+    c_abs = np.array([abs(r["c"]) for r in sweep])
+    jx_far = float(np.median(np.concatenate([jx_abs[:5], jx_abs[-5:]])))
+    peak_idx = int(np.argmin(c_abs))
+    jx_peak = float(jx_abs[peak_idx])
+    amplitude = jx_peak - jx_far
+    half = jx_far + amplitude / 2
+
+    pos_mask = np.array([r["c"] > 0 for r in sweep])
+    pos_c = c_abs[pos_mask]
+    pos_jx = jx_abs[pos_mask]
+    order = np.argsort(pos_c)[::-1]
+    pos_c, pos_jx = pos_c[order], pos_jx[order]
+    r_star = pos_c[-1]
+    for i in range(len(pos_c)):
+        if amplitude > 0 and pos_jx[i] >= half:
+            r_star = pos_c[i]
+            break
+        elif amplitude < 0 and pos_jx[i] <= half:
+            r_star = pos_c[i]
+            break
+    return amplitude, r_star
+
+
 def angular_displacement_deg(v1: np.ndarray, v2: np.ndarray) -> float:
     """arccos(|cos(v1,v2)|) in degrees - sign-agnostic (both W_dec and
     an SVD-derived dominant direction can flip sign between two

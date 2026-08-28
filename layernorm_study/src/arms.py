@@ -192,6 +192,52 @@ def train_arm_weighted(
     return nnx.state(model, nnx.Param), final_mse
 
 
+def train_arm_no_bias(
+    arm: ArmSpec,
+    inputs: jax.Array,
+    targets: jax.Array,
+    *,
+    d_model: int,
+    N: int,
+    l_max: int,
+    epochs: int,
+    learning_rate: float,
+    seed: int,
+    weight_decay: float = 0.0,
+) -> tuple[nnx.State, float]:
+    """Same as train_arm, but every additive bias (encoder, decoder,
+    the block's out/out2, LayerNorm's beta) is frozen at exactly zero
+    before training (bias_ablation.freeze_all_biases_at_zero) - for
+    Part C's C1 bias ablation. gamma (LN's multiplicative scale) stays
+    trainable; only additive constants are removed."""
+    from layernorm_study.src.bias_ablation import freeze_all_biases_at_zero
+
+    key = jax.random.PRNGKey(seed)
+    model = build_model(
+        arm, d_model=d_model, N=N, l_max=l_max,
+        d_input=inputs.shape[-1], d_output=targets.shape[-1], decode=False, key=key,
+    )
+    freeze_all_biases_at_zero(model)
+    optimizer = nnx.Optimizer(model, optax.adamw(learning_rate, weight_decay=weight_decay), wrt=nnx.Param)
+    states = model.init_state(N=N)
+
+    def loss_fn(m):
+        pred, _ = m(inputs, states)
+        return jnp.mean((pred - targets) ** 2)
+
+    @nnx.jit
+    def train_step(m, opt):
+        loss, grads = nnx.value_and_grad(loss_fn)(m)
+        opt.update(m, grads)
+        return loss
+
+    for _ in range(epochs):
+        train_step(model, optimizer)
+
+    final_mse = float(loss_fn(model))
+    return nnx.state(model, nnx.Param), final_mse
+
+
 def load_arm_model(
     arm: ArmSpec,
     param_state: nnx.State,
