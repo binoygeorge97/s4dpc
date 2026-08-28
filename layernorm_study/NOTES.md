@@ -634,3 +634,95 @@ ever be). Task 2's correlation survives but should be described more
 modestly (Spearman, not just Pearson). Task 3's "conditioning doesn't
 explain it" conclusion survives a genuine second attempt, with the
 caveat that "ruled out" overstates what was actually shown.
+
+## Round 2, Part A follow-ups: A6-A8 (2026-08-28)
+
+**A6 - direction ambiguity: does W_dec rotate toward the branch, or
+does the branch reorganize into W_dec's null space?** Measured angular
+displacement of each from its OWN initialization
+(`results/round2_partA_a6_a7_direction_and_signed_vs_abs.csv`). W_dec
+moved more in 6 of 8 seeds (often by a wide margin - e.g. seed 5:
+`75.8` deg vs `30.2` deg); the branch direction moved more in 2 of 8
+(seeds 4 and 7, and seed 7's margin is a near-tie, `21.5` vs `20.7`
+deg). **Not unanimous, but the dominant pattern (6/8, larger margins)
+supports the original framing ("W_dec learns to project the branch
+out") over the alternative ("the branch reorganizes into W_dec's null
+space") - stated as a majority finding, not a universal one.**
+
+**A7 - signed vs. unsigned cosine.** `abs_cos_median` equals
+`signed_cos_median` to displayed precision for every one of the 8
+seeds. This means the concern behind A7 (a sign-flipping cosine along
+the trajectory hiding a larger true magnitude under a near-zero signed
+median) did NOT occur here empirically - the branch's projection onto
+`W_dec` keeps a consistent sign throughout the real trajectory for
+every seed tested. Worth checking, and checked - the earlier signed
+numbers were not an artifact.
+
+**A8, part 1 - one more conditioning attempt (randomized feedback
+gain).** Scanned `segment_length` (how often the closed-loop gain `k`
+is resampled within the 100-step trajectory) from 2 to 100
+(`results/round2_partA_a8_gain_randomization_scan.csv`). **Contradicts
+the stated prediction**: gain randomization does NOT move conditioning
+"much further than -0.977 -> -0.945" - every segment length tried lands
+at `cond~76-95` (well-randomized, short segments) or WORSE (`cond` up
+to `383` at long segments, which approach single-fixed-k behavior).
+There is an apparent hard floor around `cond~76-80` for this specific
+plant that neither fixed-`k` selection (round 1.5) nor randomization
+(this round) beats - because `B_true=1` gives strong control authority,
+keeping `u` tightly tied to `x` regardless of which stabilizing `k` is
+used. A bonus attempt applying the same method to the user's example
+plant (`A=1.03, B=0.01`, the system Part C will use) hit a clear
+numerical pathology (`cond=1.6e14`, `corr=1.0000` exactly) - flagged as
+NOT a meaningful measurement, not silently reported as a result; that
+plant's weak control authority needs its own dedicated excitation
+tuning, done properly when Part C sets it up rather than reusing this
+plant's defaults opportunistically.
+
+**A8, part 2 - does arm_5's variance track conditioning level? THE
+RESULT IS REAL BUT CONFOUNDED, AND THAT CONFOUND IS REPORTED RATHER
+THAN HIDDEN.** Since the originally-requested targets (`cond~5, 20, 80,
+156`) were not achievable (part 1's floor), used the actual achieved
+spread instead: `segment_length` in `{6, 10, 20, 50}`, giving `cond`
+approximately `{76, 82, 130, 318}`. Retrained arm_5 (8 seeds) at each
+level (`results/round2_partA_a8_arm5_multilevel_results.csv`,
+`figures/round2_partA_a8_arm5_variance_vs_cond.png`):
+
+| cond | median jx_err_mean | std | min | max |
+|---|---|---|---|---|
+| 76.4 | 0.0065 | 0.082 | 0.0007 | 0.197 |
+| 82.1 | 0.0076 | 0.060 | 0.0004 | 0.175 |
+| 130.3 | 0.0964 | 0.312 | 0.0004 | 0.913 |
+| 317.7 | 0.1844 | 0.169 | 0.0004 | 0.424 |
+
+This IS a clear, visible, monotonic-in-median trend - the two
+low-`cond` levels have median error `<1%`; the two high-`cond` levels
+have median error `10-18%`, both wider spread AND worse minimums are
+NOT what moved (the min stays `~0.0004`-`0.0007` at every level - what
+changed is the ceiling). **This looks, at first read, like exactly the
+"conditioning drives arm_5's variance" result the prediction hoped for
+- but it directly CONTRADICTS round 1.5's own direct test (fixed
+`k=-2.7` vs. fixed `k=-3.5`, which found NO improvement and full seed
+reshuffling), and the reason for the contradiction is a confound in
+THIS experiment's own design, not a real reversal of round 1.5's
+finding.** `segment_length` controls two things at once: it changes
+`cond` (as intended), but it ALSO changes how often the effective
+closed-loop relationship switches within one trajectory - a SHORT
+segment_length means the model sees many different local (x,u)
+relationships packed into one 100-step trajectory, which is a
+"persistence of excitation" effect (a classical, distinct concept in
+system identification: does the trajectory excite enough different
+regimes for identification to be well-posed), not the same thing as the
+marginal correlation/condition-number of the pooled (x,u) pairs. This
+round's 4-level sweep varies `segment_length`, and `cond` merely
+happens to move WITH it - the experiment as designed cannot attribute
+the observed trend to conditioning specifically rather than excitation
+richness. **Honest statement: there is a real, strong relationship
+between `segment_length` (short vs. long gain-switching) and arm_5's
+error ceiling, but this round's design conflates that with raw
+regressor conditioning, and cannot separate the two. Round 1.5's
+direct, unconfounded test (same segment structure - a single fixed `k`
+throughout - varying only which `k`) remains the cleaner evidence, and
+it found no improvement. A properly separated follow-up (hold
+`segment_length` fixed, vary `cond` some OTHER way, or vice versa)
+would be needed to settle which variable is doing the work - not run
+this round.**
