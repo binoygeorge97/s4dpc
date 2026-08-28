@@ -1,0 +1,44 @@
+{
+  "arm": "arm_3",
+  "seed": 3,
+  "description": "linear + GELU + GLU, no LN, no memory",
+  "block_kwargs": {
+    "norm": "none",
+    "activation": "gelu",
+    "glu": true,
+    "memoryless": true
+  },
+  "n_layers": 1,
+  "config": {
+    "d_model": 8,
+    "N": 16,
+    "l_max": 100,
+    "epochs": 60000,
+    "learning_rate": 0.001,
+    "seed": 3
+  },
+  "true_plant": {
+    "A": 3.0,
+    "B": 1.0
+  },
+  "result": {
+    "arm": "arm_3",
+    "seed": 3,
+    "description": "linear + GELU + GLU, no LN, no memory",
+    "teacher_mse_train_final": 9.77677757241057e-06,
+    "teacher_mse": 9.776777572406902e-06,
+    "free_run_rmse": 0.0034047967397694947,
+    "jx_err_mean": 0.035411657572368076,
+    "jx_err_max": 0.4386226357304824,
+    "ju_err_mean": 0.0461253589629899,
+    "ju_err_max": 0.6042830748384065,
+    "equilibrium_drift": -0.10909967305537191,
+    "homogeneity_flatness": 0.10930942521364123,
+    "jx_far_from_origin": 2.474527460995005,
+    "jx_at_origin": 2.8297381124317305,
+    "jx_origin_spike_ratio": 1.143546861789077,
+    "directional_asymmetry_at_smallest_eps": 3.8934356638709033e-07,
+    "directional_asymmetry_at_largest_eps": 0.03784374856902406,
+    "sigma_jx_err_correlation": null
+  }
+}

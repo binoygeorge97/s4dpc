@@ -1,0 +1,4 @@
+orig_formula: cond ~ (1+k^2)*var(x)/var(a), residual mean=10.497 range=[5.153,16.488]
+refined_formula: cond ~ (1+k^2)^2*var(x)/var(a), residual mean=1.054 range=[0.801,1.321]
+refined_residual_vs_k: pearson_r=0.7585, p=1.425e-08
+seed_noise_at_fixed_k: std=0.470, k_scan_std=0.178

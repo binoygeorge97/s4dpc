@@ -1,0 +1,2 @@
+our_plant_best_reset_every_3: cond=10.097102892451607
+other_plant_reset20: cond_raw=11.186562202563973, cond_standardized=1.3819980643780638

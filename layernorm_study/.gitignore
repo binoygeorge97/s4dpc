@@ -6,14 +6,22 @@ checkpoints/
 wandb/
 .venv/
 
-# per CLAUDE.md's "CSV is ground truth" convention, output is gitignored,
-# directory structure (.gitkeep) is not. results/ itself needs no rule here -
-# the repo ROOT .gitignore already has a bare `results/`, which (unlike a
-# rule scoped with a leading slash) matches a directory of that name at any
-# depth, catching layernorm_study/results/ too - confirmed directly: adding
-# a `!results/.gitkeep` override here did NOT work, because git's directory-
-# exclusion short-circuit means it never descends into an already-excluded
-# directory to check a deeper .gitignore's negation at all. figures/ has no
-# such parent-level rule, so it needs (and gets) its own here.
+# POLICY (2026-08-28, corrected after round 2's provenance review): CSV
+# and JSON results ARE committed - they're small text, and gitignoring
+# them made every number from rounds 1/1.5/2 exist on only one laptop,
+# an unacceptable single point of failure. Only large/regeneratable
+# binaries stay ignored: *.msgpack (checkpoints, rule above - already
+# catches results/ckpt/*.msgpack regardless of nesting) and figures/
+# (PNGs regeneratable from the committed CSVs + each experiment script's
+# own plotting code, so keeping them out of git keeps repo size down).
+#
+# This required fixing the repo ROOT .gitignore too: it had a bare
+# `results/`, which (unlike a rule scoped with a leading slash) matches
+# a directory of that name at ANY depth, so it was also catching
+# layernorm_study/results/ and made it impossible to ever un-ignore
+# anything under it from here (git's directory-exclusion short-circuit
+# never descends into an already-excluded directory to check a deeper
+# .gitignore's negation) - the root rule is now anchored (/results/),
+# scoped to the parent project's own top-level results/ dir only.
 figures/*
 !figures/.gitkeep

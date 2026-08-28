@@ -1,0 +1,46 @@
+{
+  "arm": "arm_7",
+  "seed": 2,
+  "description": "S4 + LN prenorm AND postnorm combined (user-requested)",
+  "block_kwargs": {
+    "norm": "layer",
+    "activation": "gelu",
+    "glu": true,
+    "memoryless": false,
+    "prenorm": true,
+    "postnorm_also": true
+  },
+  "n_layers": 1,
+  "config": {
+    "d_model": 8,
+    "N": 16,
+    "l_max": 100,
+    "epochs": 60000,
+    "learning_rate": 0.001,
+    "seed": 2
+  },
+  "true_plant": {
+    "A": 3.0,
+    "B": 1.0
+  },
+  "result": {
+    "arm": "arm_7",
+    "seed": 2,
+    "description": "S4 + LN prenorm AND postnorm combined (user-requested)",
+    "teacher_mse_train_final": 0.0001586922223456907,
+    "teacher_mse": 0.0001586922223257358,
+    "free_run_rmse": 0.35458066546567824,
+    "jx_err_mean": 0.7658465678717973,
+    "jx_err_max": 2.0445903446940505,
+    "ju_err_mean": 1.0089974299462425,
+    "ju_err_max": 3.1807717738700454,
+    "equilibrium_drift": 7.104415229546707,
+    "homogeneity_flatness": 4.258461503032221,
+    "jx_far_from_origin": -1.3928977506086465e-05,
+    "jx_at_origin": 3.3509532502357944,
+    "jx_origin_spike_ratio": 240574.24522162863,
+    "directional_asymmetry_at_smallest_eps": 7.020526831613694e-05,
+    "directional_asymmetry_at_largest_eps": 6.146449886968064,
+    "sigma_jx_err_correlation": -0.04748285770001446
+  }
+}
