@@ -1,5 +1,12 @@
 # NOTES
 
+**Provenance (added 2026-08-28):** every number in this document, across
+rounds 1, 1.5, and 2, was produced on LOCAL CPU on the development
+laptop, not TACC - see `layernorm_study/CLAUDE.md` for the compute
+policy this sub-project actually uses (a scoped, deliberate override of
+the parent repo's TACC-by-default policy, not an oversight) and
+`layernorm_study/requirements.txt` for the exact pinned environment.
+
 ## Motivation
 
 The parent repo's `SequenceBlockNNX` wraps each S4 layer as either
