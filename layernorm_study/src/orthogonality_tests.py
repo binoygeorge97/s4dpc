@@ -105,3 +105,23 @@ def projected_contribution_ratio(w: np.ndarray, skip_dmodel: np.ndarray, branch_
     skip_proj = abs(np.dot(w, skip_dmodel))
     branch_proj = abs(np.dot(w, branch_dmodel))
     return branch_proj / skip_proj if skip_proj > 0 else float("inf")
+
+
+def dominant_direction(vectors: np.ndarray) -> np.ndarray:
+    """Leading right singular vector of `vectors` ((L, H)) - "the"
+    direction a collection of vectors (e.g. branch_dmodel across a
+    trajectory, which varies per t and has no single fixed direction)
+    predominantly points in. Sign is arbitrary (SVD doesn't fix it);
+    callers must compare via |cos|, not signed cos."""
+    _, _, vt = np.linalg.svd(vectors, full_matrices=False)
+    return vt[0]
+
+
+def angular_displacement_deg(v1: np.ndarray, v2: np.ndarray) -> float:
+    """arccos(|cos(v1,v2)|) in degrees - sign-agnostic (both W_dec and
+    an SVD-derived dominant direction can flip sign between two
+    independently-obtained snapshots without that being a meaningful
+    "rotation")."""
+    c = abs(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+    c = min(1.0, max(-1.0, c))
+    return float(np.degrees(np.arccos(c)))
