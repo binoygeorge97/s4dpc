@@ -41,6 +41,9 @@ class BlockConfig:
     # residual add, after the primary prenorm/postnorm norm if any) - default
     # False leaves every existing M3-M6/M6_fix variant's forward pass, and
     # its RNG key-splitting order (test_m6_init_params_match_legacy), untouched.
+    layer_norm_eps: float = 1e-6  # layernorm_study's epsilon sweep (Part B Task 5):
+    # flax.nnx.LayerNorm's own default - passed through explicitly rather than left
+    # implicit, so this can be varied without a second, parallel norm implementation.
 
 
 VARIANTS = {
@@ -144,7 +147,7 @@ class ConfigurableBlock(nnx.Module):
 
         keys = jax.random.split(rngs.params(), 3)
         if config.norm == "layer":
-            self.norm = nnx.LayerNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
+            self.norm = nnx.LayerNorm(config.d_model, epsilon=config.layer_norm_eps, rngs=nnx.Rngs(params=keys[0]))
         elif config.norm == "static":
             self.norm = StaticNorm(config.d_model, rngs=nnx.Rngs(params=keys[0]))
         elif config.norm == "none":
@@ -166,7 +169,7 @@ class ConfigurableBlock(nnx.Module):
         self.norm_post = None
         if config.postnorm_also:
             post_key = jax.random.fold_in(keys[0], 1)
-            self.norm_post = nnx.LayerNorm(config.d_model, rngs=nnx.Rngs(params=post_key))
+            self.norm_post = nnx.LayerNorm(config.d_model, epsilon=config.layer_norm_eps, rngs=nnx.Rngs(params=post_key))
 
     def __call__(self, x: jax.Array, s4_state: jax.Array) -> tuple[jax.Array, jax.Array]:
         skip = x
