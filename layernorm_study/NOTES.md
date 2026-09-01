@@ -1570,3 +1570,159 @@ map, the direction of the sweep is not a free implementation detail -
 it determines whether the leading-order term is even present in what
 gets measured, and a single scalar "slope" number silently encodes that
 choice without flagging it.
+
+## Round 3 audit: independent re-derivation of A1/A2/A3 (2026-09-01)
+
+Requested standard: re-derive from the underlying computation, not from
+this document's own prose. `layernorm_study/experiments/round3_audit.py`
+retrains the specific (arm, seed) checkpoints the audited numbers came
+from and interrogates them directly - full method and all three results
+below, `results/round3_audit_A*.csv`.
+
+**Environment caveat, disclosed up front because it affects how to read
+every number below.** This machine has no Python 3.11 (the version
+pinned in `requirements.txt`) - reran on 3.12, identical package pins
+otherwise (`jax==0.7.2`, `flax==0.11.2`, `optax==0.2.8`, confirmed
+installed). The retrained checkpoints are **not bit-identical** to the
+original round-3 runs despite identical seeds: e.g. `LN+linear` seed=0's
+`train_mse` is `2.403e-06` here vs. the committed CSV's
+`1.315e-06`; the `rho=0.5` seed=0 bonus retrain gives `1.940e-05` vs.
+`5.418e-06`. This is NOT the determinism failing in general - two
+INDEPENDENT scripts in the ORIGINAL environment reproduced each other to
+every printed digit (verified before any of this, see the audit script's
+own docstring) - it is specifically the Python 3.11->3.12 (and whatever
+wheel-build/BLAS difference rides along with it) that breaks bit-exactness,
+consistent with the parent repo's own documented worry that float
+differences compound over many nonlinear optimization/recurrence steps.
+Each fresh checkpoint IS internally self-consistent (independent code
+paths computing the same quantity on the same checkpoint agree to full
+precision - e.g. A2's direct dtype-audit and its cross-check against
+`c4_null_space_check()` agree on `sigma_max` to all 6 printed digits).
+**Read everything below as an independent replication on freshly-trained
+checkpoints of the same architecture/data/seed - not as a bit-exact
+verification of the existing CSV rows.** Where the two disagree
+quantitatively but agree qualitatively, that is itself informative (the
+phenomenon survives a real environmental perturbation); it is flagged
+explicitly wherever it isn't just qualitative agreement.
+
+### A1 - C3 non-radial slope: CONFIRMED for LN+linear, NOT robust for the full model
+
+**Direction check (is "non-radial" actually non-radial?).** Measured
+directly, not assumed: at a representative far-field point, `LN+linear`
+seed=0's radial direction (`dv/dx`) sits `7.5deg` from `zhat`; the
+non-radial direction (`dv/du`) sits `89.3deg` from it - i.e. essentially
+exactly orthogonal, not merely "different." Seed=3: `14.7deg` / `89.2deg`,
+same pattern. **This is a clean, decisive confirmation of the mechanism**:
+the radial sweep really is (nearly) the direction LN's bracket
+annihilates, and the non-radial direction really is (nearly) untouched
+by it - not a coincidence of labeling.
+
+**Window sensitivity - the CI's tightness IS robust, but only for
+`LN+linear`.** Fit on 7 different windows per checkpoint (halves,
+narrow near/far edges, an extended range to `1e5`, and a window placed
+just past the checkpoint's own measured `r*`): `Ju` (non-radial) stays
+in `[-0.96, -1.00]` across EVERY window tried, both seeds - the tight CI
+survives fit-range interrogation cleanly. Pointwise (adjacent-pair)
+local slopes confirm this isn't an average masking a transient: `Ju` is
+`-1.00` at every single point across the entire `c=10` to `c=1000`
+sweep for both seeds. `Jx` (radial) does drift within the window
+(`-1.79` at `c=10` climbing to `-2.00` by `c~300+`) - the `-2` law is a
+genuine far-field asymptote, not instantaneous, and the window
+`[10,1000]` sits mostly-but-not-entirely inside full convergence (`r*`
+for these checkpoints is `0.9`-`1.3`, so the window starts `~8`-`11x`
+past `r*` - sufficient here, but see below, not universally sufficient).
+
+**It is NOT robust for `LN+GELU+GLU` (the full model) - flagged, not
+smoothed over, per the standing instruction.** The same window sweep on
+`LN+GELU+GLU` seed=0 (`train_mse=2.7e-5`, one of the noisier fits in the
+original 8-seed spread too - its own recorded `r2=0.91` was already the
+second-lowest of the eight) swings wildly: full-window `Jx=-2.02`
+(`r2=0.74`), lower-half `Jx=+0.20` (`r2=0.05`, wrong SIGN), upper-half
+`Jx=-4.20`, extended-far `Jx=-0.45`. `Ju` is similarly unstable
+(`-0.71` full window, `-2.49` near-edge, `-0.33` upper-half). The
+direction check also weakens for this arm: radial-to-`zhat` angle is
+`24.3deg` (vs `LN+linear`'s `7.5-14.7deg`), non-radial is only `63.3deg`
+from `zhat` (vs `~89deg`) - the clean orthogonality is specific to the
+no-nonlinearity case. **Honest reading: the `-1.005, CI[-1.023,-0.982]`
+result is a real, robust, decisive confirmation of LayerNorm's own law -
+but specifically for the isolated-LayerNorm (`LN+linear`) case. The full
+model's non-radial slope is directionally consistent with `-1` (its own
+originally-recorded CI, `[-1.671,-0.881]`, does contain it) but is not
+independently window-robust on the one checkpoint checked here - GELU/GLU's
+curvature genuinely interferes with getting a clean asymptotic read, it
+doesn't just add noise around an otherwise-stable number.** Only one
+`LN+GELU+GLU` seed was checked this way (seed=0); whether this
+non-robustness holds for all 8 seeds is not established either way.
+
+### A2 - C4 rank/dtype: CONFIRMED directly, not inferred
+
+`jax.config.jax_enable_x64` reads back `True` from the live config (not
+just "we called `update()` so it must be on"). Recomputing the LayerNorm
+Jacobian fresh (`LN+GELU+GLU` seed=0) and printing dtype at each stage,
+unabbreviated: `v.dtype = float64`, `J.dtype` straight out of
+`jax.jacfwd` `= float64`, still `float64` after `np.asarray()`. The full
+8-value singular spectrum makes the rank cut visible rather than
+asserted: at `r=1`, six values cluster within `1.5x` of each other
+(`1.55` down to `1.07`), then drop SIX orders of magnitude to `1.56e-6`,
+then a further ELEVEN orders to `5.48e-17` - an unambiguous rank-6 cut,
+at either tolerance convention. At `r=1000` the same structure holds and
+the second null direction is cleaner still (`4.90e-15`, dropping to
+`1.90e-19`), matching the theory's own prediction that it sharpens as
+`eps` becomes relatively more negligible.
+
+A second, independent argument that needs no rerun at all, from the
+ALREADY-COMMITTED CSV alone: the worst-case (largest) `sigma_H/sigma_max`
+across all 16 originally-recorded rows is `1.24e-16`. float32 machine
+epsilon is `1.19e-7`. `1.24e-16` is roughly `10^9` times smaller than
+float32 can resolve - float32 arithmetic is physically incapable of
+producing a ratio that small; the original numbers could only have come
+from `>=float64`, independent of anything reproduced today. **Both
+lines of evidence agree: x64 was genuinely active, not just declared.**
+
+### A3 - C8 "pinned at 1e-6": reworded, and independently confirmed as a real failure, not a grid artifact
+
+`C_VALUES = np.logspace(-6, 3, 60)`: smallest tested value is exactly
+`1.000e-6` (second-smallest `1.421e-6`). `failure_radius()` scans from
+the smallest `c` upward and returns the FIRST value whose relative error
+exceeds 10% - if `c[0]` itself already fails, the function returns
+`c[0]` without ever probing anything smaller. **Per-rho breakdown of
+converged seeds, computed directly from the existing results CSV:**
+
+| rho | converged | at grid floor | real measured crossings |
+|---|---|---|---|
+| 0.5 | 5/8 | 5/5 (100%) | none |
+| 0.9 | 6/8 | 6/6 (100%) | none |
+| 1.03 | 6/8 | 6/6 (100%) | none |
+| 1.5 | 7/8 | 5/7 (71%) | seed4=0.441, seed5=0.310 |
+| 3.0 | 4/8 | 1/4 (25%) | seed0=29.8, seed1=1.80, seed4=0.0092 |
+
+**For `rho<=1.03`, "failure radius = 1e-6" is unanimous censoring - not
+one of 17 converged seeds across those three gains ever showed a real
+measured crossing.** The correct statement is "postnorm's Jacobian is
+already wrong by >10% at the smallest scale tested," not "the failure
+radius is 1e-6" - the latter wording implies a measured crossing point
+that these rows never actually contain. `rho=1.5` and especially
+`rho=3.0` are different: a real minority of seeds show genuine measured
+crossings well above the floor, so "pinned" over-states uniformity there
+specifically (median is still `1e-6` because it's the majority value,
+not because every seed lands there).
+
+**Bonus, to settle whether this is a hidden nearby crossing or a
+genuine at-every-scale failure**: retrained `rho=0.5` seed=0 (a
+unanimously-censored case) and extended the grid to `[1e-15, 1e3]`, 91
+points. Despite the environment-driven non-reproduction (`train_mse`
+doesn't match, see caveat above, though it's still converged by the
+project's own `<1e-4` threshold), the result is unambiguous: `Jx=+6.25`
+at `c=1e-15`, IDENTICAL at `c=1e-9` and `c=1e-6` (i.e. flat - the
+near-field plateau C1 predicts really is flat here), still `Jx=+3.31`
+even at `c=1` - against a true `rho=0.5`, that is a relative error of
+`1150%` at the smallest scale tested, decaying only to `562%` by `c=1`.
+**No point anywhere in 15 orders of magnitude ever comes within 10% of
+the true value.** This is not a censored-but-nearby crossing the
+original 60-point grid merely failed to resolve - it is a genuine,
+uniform, order-of-magnitude failure across the model's entire near-field
+plateau, for one of the mildest (stable, `rho=0.5`) gains in the sweep.
+If anything this independently STRENGTHENS C8-revised's own reading
+("postnorm's Jacobian error is present at every radius including the
+origin... cuts against framing this failure as being about instability
+at all") rather than calling it into question.
