@@ -1726,3 +1726,236 @@ If anything this independently STRENGTHENS C8-revised's own reading
 ("postnorm's Jacobian error is present at every radius including the
 origin... cuts against framing this failure as being about instability
 at all") rather than calling it into question.
+
+## Round 3 second audit: C1 vs C8 reconciliation, environment standardized, A1 resolved (2026-09-01)
+
+Three items, raised as a direct tension between two of today's own
+results (C1's bias-determined good region vs. C8's deep-grid failure)
+plus two follow-ups. `layernorm_study/experiments/round3_c1_c8_reconciliation.py`,
+`round3_determinism_check.py`, `round3_a1_orthogonal_direction.py`;
+`results/round3_c1c8_recon_*.csv`, `results/round3_determinism_check_run*.json`,
+`results/round3_a1_orthogonal_direction*`.
+
+### 1. C1's r* measures plateau departure, not correctness - the tuning claim is FALSIFIED
+
+**(a) The exact criterion, quoted.** `orthogonality_tests.kink_amplitude_and_r_star`:
+
+```python
+jx_far = median(|Jx| at the 5 largest-|c| points on each side)   # far-field magnitude
+jx_peak = |Jx| at the single point closest to c=0                # near-origin magnitude
+amplitude = jx_peak - jx_far
+half = jx_far + amplitude / 2
+r_star = smallest |c|, scanning inward from large c, where |Jx| first crosses `half`
+```
+
+**`A_TRUE` and `B_TRUE` do not appear anywhere in this function's body.**
+`r*` is built entirely from the sweep's own far-field value and its own
+near-origin value - a pure curve-shape (plateau-departure) computation.
+The docstring says as much directly: "the crossover radius between
+'near field, J~const' and 'far field, J~1/r'" - a statement about
+SHAPE, not about agreement with the true system. This alone confirms
+the hypothesis structurally, before any new numbers.
+
+**(b) Both curves, on C1's own 8 with-bias-baseline checkpoints
+(arm_6/plant2, identical training call to `round2_partC_c1_bias_ablation.py`).**
+`|J(z) - J_plateau|` has a real, reproducible knee at `r*` by
+construction (cross-checked against the original function, matches to
+displayed precision every seed) - that part of C1 is not in question.
+`|J(z) - [A_TRUE, B_TRUE]|` is large EVERYWHERE: the far-field value
+itself decays toward 0 for every seed (consistent with the 1/r law,
+but 0 is also not `1.03`), and - the number that matters - the
+near-origin plateau is nowhere close to truth either. **The conflation
+is confirmed**: the knee is real, but it is a knee in self-similarity,
+not in correctness.
+
+**(c) The decisive number - plateau value vs. true `(A,B)`, all 8 seeds:**
+
+| seed | Jx plateau | vs. true A=1.03 | Ju plateau | vs. true B=0.01 |
+|---|---|---|---|---|
+| 0 | 1.492 | 44.8% off | 0.114 | 1044% off |
+| 1 | 2.998 | 191.1% off | 0.264 | 2540% off |
+| 2 | 3.087 | 199.7% off | 1.422 | 14116% off |
+| 3 | 6.395 | 520.8% off | 2.423 | 24132% off |
+| 4 | 6.622 | 542.9% off | 0.405 | 3955% off |
+| 5 | 1.891 | 83.6% off | 1.812 | 18023% off |
+| 6 | 3.391 | 229.2% off | 1.205 | 11950% off |
+| 7 | 0.011 | 98.9% off | 1.085 | 10755% off |
+
+Median relative error: **195.4%** (Jx vs. true A) and **11353%** (Ju vs.
+true B). Scanning EVERY tested radius from `1e-6` to `1000` on EVERY
+seed: Jx is never within 10% of true A anywhere (`8/8`); Ju is never
+within 10% of true B anywhere (`8/8`). **The plateau is not
+approximately correct on any seed, by any reasonable margin.** Seed 0
+is the closest on Jx and still `45%` off; the worst (seed 4) is `543%`
+off. Ju is uniformly catastrophic - every seed's near-origin
+sensitivity to `u` is `10x` to `241x` too large.
+
+**This falsifies, cleanly, the reading that the optimizer tunes
+`||gamma||/sigma(b)` until the near-field constant equals `[A_TRUE,
+B_TRUE]`.** It does not. Per instruction, stated without softening:
+**the plateau is wrong**, by 1-2 orders of magnitude, in every seed
+tested, for both components of the Jacobian.
+
+**(d) Training-distribution control - and an important qualifier that
+is NOT a hedge on the verdict above, but does explain the mechanism.**
+Checked both checkpoints' own training data directly:
+
+- **plant2 (C1's own data, `generate_data(seed=42)`)**: `|x|` ranges
+  `[0.43, 3.42]` across the 100 real training points, median `1.60`.
+  **Zero of the 100 points have `|x| <= 0.375`** - C1's own median
+  measured `r*`. Zero have `|x| <= 0.01`. **The entire region C1's
+  origin-sweep probes is outside this checkpoint's training support -
+  not sparsely covered, literally never sampled.**
+- **C8's `rho=0.5` data** (part (d) as originally asked): `|x|` ranges
+  `[0.05, 19.1]`, median `7.75`. Only `16%` of points have `|x| <= 1.0`
+  - thin coverage, not zero coverage (unlike plant2's near-origin
+  region). `c=1e-15` (where the earlier ">1000% wrong" figure was read)
+  is at the literal limit `c->0`, sampled by 0% of any real trajectory
+  by construction - that specific number is a theoretical limit, not an
+  in-distribution measurement. `c=1`, though, sits in roughly the
+  bottom-6th of the 100 real points, not the median - real, but not
+  "typical operation" the way the median point is.
+
+**Why this matters, and why it doesn't rescue the falsification above:**
+teacher-forced training only ever sees the 100 real trajectory points -
+there is no loss-gradient pressure on the model's behavior at `x=0` (or
+near it) if training data never visits there. The plateau's value is
+therefore not a target the optimizer ever tried and failed to hit; it
+is an ACCIDENT of how the network's architecture/bias happens to
+extrapolate into a region the loss function never scored. This is a
+sharper mechanistic explanation than "the optimizer mistuned it" - there
+was never a tuning signal to begin with. It explains WHY the plateau is
+wrong without in any way disputing THAT it is wrong: the verdict in (c)
+stands on its own regardless of mechanism, and (d) supplies the
+mechanism rather than an excuse.
+
+**C1 rewritten, per instruction, as the simpler (not weaker) story:**
+postnorm's Jacobian is not correct at the far field (decays toward 0,
+not toward `[A,B]`) and not correct at the near-field plateau either
+(wrong by 1-2 orders of magnitude, every seed) - there is no radius
+this study has found, for either checkpoint family tested, where
+postnorm's local Jacobian matches the true system. **What C1's 475x
+bias-ablation collapse actually established is narrower than originally
+read: bias determines the EXTENT of a near-constant region (a real,
+reproducible structural fact - removing bias collapses that extent
+475x, exactly as measured), not the CORRECTNESS of the value inside it
+(refuted, directly, by (b)/(c) above).** The "Round 3 bottom line" claim
+"the good region is a bias-determined operating point" is corrected to:
+**the good-SHAPED region is bias-determined; whether it is good in the
+sense of matching truth is a separate question this round answers no
+to, in every case tested.**
+
+### 2. Environment standardized on Python 3.12; determinism confirmed WITHIN one environment
+
+**Decision, per instruction ("either is fine; having two is not")**:
+standardized on **Python 3.12.1**, not 3.11 - this machine has no 3.11
+available (`py -0p` confirmed), and 3.12 satisfies every `==` pin
+unchanged (`jax==0.7.2`, `flax==0.11.2`, `optax==0.2.8`, all ship cp312
+wheels). `requirements.txt` updated in place with a dated block
+explaining the switch; `uvloop` dropped (Windows-incompatible, not
+imported by any code in this project - `pip freeze` noise from the
+original capture, not a real dependency).
+
+**Determinism check, as specified**: retrained the IDENTICAL checkpoint
+(`arm_6`, plant2, seed=0) twice, as two fully separate process
+invocations, in this same 3.12 environment. Result: **bit-identical**
+- `train_mse = 2.6850601606589895e-05`, hex `0x1.c27a74ade1ca5p-16`,
+matching to every digit both times. **The training path is
+deterministic within a fixed environment.** The 2-4x discrepancies
+found in the first audit round are isolated specifically to crossing
+Python 3.11->3.12 (wheel-build/BLAS/XLA-codegen level, not investigated
+further - diminishing returns), not evidence of nondeterminism in the
+training path itself (no unseeded randomness anywhere in `arms.py` -
+data generation and model init are both seeded explicitly).
+
+**Environment provenance - what this means for existing claims:**
+
+| Work | Environment | Cross-seed comparisons valid? |
+|---|---|---|
+| Rounds 1, 1.5, 2, round 3's original numbers (C1/C3/C4/C5/C8, all `results/round2_*.csv` and `results/round3_C*.csv`) | Python 3.11.15 (original capture) | Yes - every seed within a given experiment was run in that SAME environment |
+| First audit round (`round3_audit.py`, `round3_audit_A*.csv`) | Python 3.12.1 (this session) | Yes internally, but NOT bit-comparable to the 3.11 rows it cross-checked against - already flagged when written |
+| This second audit round (`round3_c1_c8_reconciliation.py`, `round3_determinism_check.py`, `round3_a1_orthogonal_direction.py`) | Python 3.12.1 | Yes internally (all 8 seeds, same environment) |
+| Everything from here forward | Python 3.12.1 (pinned in `requirements.txt`) | Yes |
+
+**Arm_5's basin-selection correlation (round 1.5/2 Task 2, Pearson
+`r=0.973`, Spearman `rho=0.738`) is NOT compromised** - all 8 of its
+seeds were trained within the single original 3.11 session, never
+compared across environments. The determinism finding above means this
+was always safe, and confirms it rather than merely assuming it. The
+general rule going forward: **a seed index is only comparable to
+another seed index (same or different value) if both came from the
+same environment row in the table above; it is never safe to assume
+"seed 3" means the same checkpoint across rows.**
+
+### 3. A1: the full model's far-field exponent is unresolved - and now precisely why
+
+Per instruction, this is not "directionally consistent" (round 3's
+audit write-up over-stated it) - it is genuinely unmeasured for
+`LN+GELU+GLU`. **The `-1` decay law is established for isolated
+LayerNorm only** (`LN+linear`: `Ju` slope `-1.005`, CI
+`[-1.023,-0.982]`, robust across every fit window tried, direction
+angle `89deg` from `zhat`). The full block's exponent remains open.
+
+**Attempted the suggested fix - find a direction genuinely orthogonal
+to `zhat`, computed exactly rather than relying on `u` happening to be
+far enough from `zhat`.** At every sweep point independently: given
+`M = dv/d(x,u)` and `zhat`, let `a = M_x.zhat`, `b = M_u.zhat`; the
+direction `d = (b,-a)/||(b,-a)||` is EXACTLY orthogonal to the LOCAL
+`zhat` at that point, by construction (no approximation, no reliance on
+`u` "happening to" be favorable). The directional derivative of the
+scalar output along `d`, at each point, is `Jx*d0 + Ju*d1` (both
+already computed, no extra autodiff needed).
+
+**Result: this does NOT fix it.** Locally-orthogonal directional
+derivative: far-field slope `-0.727`, `r2=0.782`. Naive `Ju`-only
+sweep, same checkpoint, same 15 points: slope `-0.708`, `r2=0.779`.
+**Statistically indistinguishable.** Checked the other suspect too -
+does `zhat` itself rotate enough across the window `[10,1000]` to
+explain the mess: end-to-end rotation is `10.71deg`, concentrated near
+the window's near edge (`2.57deg`/step at `c=10`, decaying to
+`0.03deg`/step by `c=1000`) - real, but too small on its own to explain
+swings from `+0.20` to `-4.20` across sub-windows.
+
+**Conclusion, now evidence-based rather than a guess: the full model's
+far-field messiness is not a wrong-direction artifact** - the exactly-
+correct direction was tried and changed nothing. **It is that GELU and
+GLU's own nonlinear structure prevents a clean single power law from
+describing this block's decay at these radii, independent of
+LayerNorm's zhat-cancellation mechanism.** Whatever GELU/GLU contribute
+is comparable in magnitude to LN's own leading term over this radius
+range, so no single exponent characterizes it. Measuring the full
+block's true asymptotic exponent, if one exists at all, would need
+either much larger radii (to reach a regime where LN's term dominates
+GELU/GLU's) or a decomposition of the block's nonlinear composition
+that isolates LN's contribution algebraically rather than sweeping
+radius - neither attempted this round.
+
+### Revised claim set
+
+Three claims that survive today's audit, no footnotes needed:
+
+1. **LayerNorm's own Jacobian law is exactly what the theory says**:
+   rank-deficient by exactly 2 (C4, principal angles `~1e-14deg`,
+   visible 6-order-of-magnitude spectral gap) and decaying as `-1/r` in
+   every direction except the one it annihilates (C3's non-radial
+   slope, `-1.005` CI `[-1.023,-0.982]`, robust to every fit window
+   tried) - demonstrated for isolated LayerNorm, and mechanistically
+   exact (C7: RMSNorm fails within 8% of real LayerNorm; freezing
+   `1/sigma` alone recovers 9x).
+2. **Postnorm's local Jacobian is not correct anywhere this study has
+   measured it** - not at the far field (decays toward 0, not truth),
+   not at the near-field plateau (wrong by 1-2 orders of magnitude,
+   every seed, both Jx and Ju, C1/C8 reconciliation above), not for
+   stable or unstable plants alike (C8-revised). The near-field
+   "good region" is real as a SHAPE (bias sets its extent, 475x
+   collapse under ablation) but not as a claim of accuracy - that
+   reading is retracted.
+3. **The output ceiling is real per-checkpoint but is a learned, not
+   architectural, quantity** (`Y_max` tracks training-data scale,
+   `1.19`-`1.91x`) - so Theorem 2 is true and vacuous, and the
+   generalized impossibility claim (postnorm can never represent an
+   unstable system) stays explicitly unestablished, for this stated
+   reason.
+
+The full model's far-field exponent (GELU+GLU composed with LayerNorm)
+remains genuinely open - not claimed, not guessed at.
