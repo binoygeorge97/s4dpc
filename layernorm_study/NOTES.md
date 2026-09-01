@@ -1959,3 +1959,179 @@ Three claims that survive today's audit, no footnotes needed:
 
 The full model's far-field exponent (GELU+GLU composed with LayerNorm)
 remains genuinely open - not claimed, not guessed at.
+
+## Round 3 third pass: the training-support confound in claim #2, and C9 (2026-09-01)
+
+Direct objection to this document's own immediately-preceding claim #2
+("postnorm's local Jacobian is not correct anywhere this study has
+measured it"): correct as a description of what was measured, but
+overstated as architectural evidence, for a reason the C1/C8
+reconciliation section already contained the data for without drawing
+out.
+
+### The confound, stated precisely
+
+`0/100` of plant2's training points have `|x| <= 0.375` (C1's own
+median `r*`) - already established above. Two consequences neither the
+reconciliation write-up nor claim #2 drew out:
+
+**(a) C1's 475x bias-ablation collapse and the plateau's inaccuracy
+answer DIFFERENT questions.** The collapse is a statement about
+LayerNorm: removing bias changes where the near-constant region's
+EXTENT sits, measured by comparing the SAME architecture with vs.
+without bias, both evaluated identically - entirely internal to the
+model, no reference to training data's support anywhere in that
+comparison. That IS evidence about LN's structure. The plateau's
+inaccuracy is a statement about whether the region's VALUE matches
+truth - and since the region sits outside training support, no
+optimization pressure ever acted on that value, so it being wrong is
+unsurprising and not specific to LayerNorm. Treating both as one "C1
+finding" repeated, one level up, the exact error `r*` itself makes at
+the measurement level: reading a shape fact as a correctness fact.
+
+**(b) C8's deep-grid result (`Jx` wrong `500-1150%`, `c=1e-15` to
+`c=1`, `rho=0.5`) is real and reproducible, but is WEAK evidence about
+postnorm SPECIFICALLY.** At `c=1e-15`, on a checkpoint whose training
+data's own minimum `|x|` is `0.05`, ANY architecture - normed or not -
+would have an arbitrary Jacobian there, because nothing in training
+ever informed it. What C8 actually demonstrates on its own is that
+postnorm's error persists into the extrapolation regime at least as
+badly as its in-support behavior turns out to be - not, by itself, that
+postnorm extrapolates uniquely badly, which needs a comparison arm.
+
+### Claim #2, retracted and replaced
+
+"Postnorm's local Jacobian is not correct anywhere this study has
+measured it" is withdrawn as stated. Replaced with the narrower claim
+that IS fully supported: postnorm's Jacobian is wrong at every
+OUT-OF-SUPPORT radius tested (near-field plateau and far field alike) -
+real, reproducible, decisive - but this is not yet evidence that
+postnorm SPECIFICALLY (as opposed to any architecture trained the same
+way) fails architecturally, because every tested radius was
+extrapolation. Whether postnorm is ALSO wrong INSIDE its own training
+support, and whether that differs from prenorm or no-norm on identical
+data, is the open question C9 answers directly below.
+
+### C9 - the in-support test
+
+`layernorm_study/experiments/round3_c9_in_support.py`. Same plant2
+data, same 8 seeds, same 60000-epoch/lr=1e-3 training call as C1 -
+run separately for `arm_6` (postnorm), `arm_5` (prenorm), and `arm_4`
+(no norm, no GELU, no GLU, real S4 memory - this study's standing
+no-norm control, matching the parent project's M3). Two measurements
+per checkpoint: a dense synthetic sweep (`u=0`, matching every other
+radius sweep's convention) restricted to the EMPIRICAL in-support `|x|`
+range, and the actual 100 real `(x_t, u_t)` trajectory points with
+trajectory-evolved state (`scalar_diagnostics.jx_ju_along_trajectory`,
+existing project code, not reimplemented) - the most literal possible
+"in support" check, using real `u` values rather than the `u=0`
+convention.
+
+**Training data support, reported explicitly (plant2, seed=42, 100
+points):** `|x|` in `[0.43, 3.42]`, quartiles `[0.71, 1.29, 1.60, 2.27]`.
+`|u|` quartiles `[1.96, 4.14, 4.84, 8.23]` - real `u` is nowhere near 0.
+`|z|=sqrt(x^2+u^2)` quartiles `[2.42, 4.22, 5.45, 8.39]`. **This
+script's in-support interval: `|x| in [0.43, 3.42]`** - the marginal-`x`
+support the PRIMARY sweep uses. Flagged directly: since real `u` is
+never near 0, the PRIMARY sweep's own `u=0` convention (matching every
+other radius sweep in this study, for comparability) is ITSELF partly
+out of the true JOINT `(x,u)` support even when `x` is in-support - this
+is exactly why the SECONDARY measurement (actual real `(x_t,u_t)`
+pairs, no synthetic `u`) is the more trustworthy of the two, not a
+redundant check.
+
+**Results, all three arms, same data/seeds/hyperparameters as C1,
+median relative error across 8 seeds:**
+
+| Arm | PRIMARY `Jx` (u=0, synthetic) | PRIMARY `Ju` | SECONDARY `Jx` (real data) | SECONDARY `Ju` |
+|---|---|---|---|---|
+| `arm_4` (no norm) | **0.0%** (range 0.0-0.1%) | 0.2% | **0.0%** (range 0.0-0.1%) | 0.2% |
+| `arm_5` (prenorm) | 1.3% (range 0.0-34.5%) | 227.2% | 0.2% (range 0.0-28.7%) | 9.7% |
+| `arm_6` (postnorm) | **99.8%** (range 60.5-137.5%) | 3625.0% | **35.6%** (range 25.8-66.7%) | 506.3% |
+
+**This is a clean, three-way separation, not just a median difference.**
+Per-seed `SECONDARY Jx` (the most rigorous measurement - real `(x,u)`
+pairs, trajectory-evolved state):
+
+- `arm_4`: `[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1]%` - flat, tiny, every seed.
+- `arm_5`: `[0.2, 28.7, 0.1, 1.0, 0.2, 2.6, 0.0, 0.2]%` - 7 of 8 seeds at
+  or below `2.6%`; one outlier (seed 1, `28.7%`) - matching round 2's
+  OWN already-documented finding that arm_5 is this study's most
+  seed-sensitive arm (basin selection between branch-suppressed and
+  branch-live solutions, Pearson `r=0.973` on a DIFFERENT metric,
+  Task 2) - not a new anomaly, a expected recurrence of a known effect.
+- `arm_6`: `[25.8, 38.4, 32.9, 66.7, 53.5, 41.5, 32.3, 32.2]%` - EVERY
+  seed above `25%`, no seed anywhere near the other two arms' typical
+  range. `arm_6`'s best seed (`25.8%`) is still worse than `arm_5`'s
+  WORST seed short of its one outlier, and far worse than any `arm_4`
+  seed.
+
+Convergence quality is comparable across arms (ruling out "postnorm
+just fit worse" as the explanation): `train_mse` ranges
+`2e-8`-`2.5e-7` (`arm_4`), `4e-9`-`9e-7` (`arm_5`), `3e-7`-`2.7e-5`
+(`arm_6`) - `arm_6` is somewhat higher but not by orders of magnitude,
+matching round 1's original finding that postnorm's one-step prediction
+MSE is only modestly worse than prenorm's even though its Jacobian is
+categorically worse. **This is exactly the founding "low prediction
+error does not guarantee Jacobian fidelity" observation that motivated
+this whole sub-project - reproduced here with the confound (training
+support) finally controlled for.**
+
+**Verdict: postnorm is wrong IN-SUPPORT, specifically - this is a real
+architectural finding, not an extrapolation artifact.** No-norm is
+essentially exact in-support (`~0%`). Prenorm is close to exact on the
+majority of its seeds and only moderately worse on `Ju`, consistent
+with its already-known seed-sensitivity. Postnorm is uniformly,
+substantially wrong on every seed, by every measure, including the
+most rigorous one (real data, real `u`, evolved state) - `35.6%`
+median `Jx` error and `506%` median `Ju` error, in the exact region the
+model was trained on. **The interesting answer, not the boring one**:
+this is not "postnorm doesn't extrapolate" (true of most networks,
+uninteresting) - postnorm is measurably, architecturally worse than
+both alternatives on data it was actually fit to.
+
+### Claim set, resolved
+
+Per instruction, this becomes the headline, with the LayerNorm-structure
+findings as its mechanism rather than as independent, hedged claims:
+
+**HEADLINE, ESTABLISHED - postnorm's local Jacobian is wrong INSIDE its
+own training support, specifically.** Median `35.6%` (`Jx`) and `506%`
+(`Ju`) relative error on real training data (`arm_6`), against a
+matched no-norm control accurate to `~0%` and a matched prenorm control
+accurate on `7/8` seeds (`arm_5`) - same data, same seeds, comparable
+one-step prediction MSE across all three. This directly reproduces the
+sub-project's founding motivation ("low prediction error does not
+guarantee Jacobian fidelity") with the training-support confound
+controlled for, rather than assumed away.
+
+**MECHANISM, ESTABLISHED, architecture-independent** - LayerNorm's own
+Jacobian is rank-deficient by exactly 2 (C4: principal angles
+`~1e-14deg`) and decays as `-1/r` off the annihilated direction (C3:
+`Ju` slope `-1.005`, CI `[-1.023,-0.982]`), traced specifically to the
+`1/sigma` term and not mean-centering (C7: RMSNorm fails within `8%` of
+real LayerNorm; freezing `1/sigma` alone recovers `9x`). This explains
+why normalization corrupts a Jacobian in principle. **Gap, named rather
+than papered over**: this mechanism is established for LayerNorm in
+isolation, and postnorm/prenorm's placement difference (skip bypasses
+LN in prenorm, does not in postnorm) is the physically motivated reason
+placement should matter - but no experiment this round directly
+connects the two (e.g. "does freezing `1/sigma` on `arm_6` also close
+C9's in-support gap, the way C7 closed the isolated-LayerNorm gap?" was
+not run). That is the natural next experiment, not yet claimed as done.
+
+**ESTABLISHED, narrower than originally read** - the near-field
+plateau's EXTENT is bias-determined (C1, `475x` collapse under
+ablation) - a real fact about LN's structure, not a claim that the
+plateau's VALUE is accurate (retracted this round).
+
+**UNESTABLISHED, with stated reasons, not open questions** - the
+generalized impossibility claim (`Y_max` is a learned, not
+architectural, quantity, so Theorem 2 is true and vacuous) and the full
+block's far-field decay exponent (GELU/GLU prevent a clean power law at
+these radii, independent of direction choice - checked, not assumed).
+
+**The DPC link is no longer only a motivating observation** - C9 is a
+demonstrated architectural cause (postnorm specifically corrupts the
+in-support Jacobian others get right on identical data), not merely a
+plausible mechanism awaiting confirmation.
