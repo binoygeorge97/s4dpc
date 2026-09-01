@@ -1,13 +1,48 @@
-# EXACT pins, captured via `pip freeze` from the environment that
-# actually produced every number in rounds 1, 1.5, and 2 (2026-08-28,
-# mid-round-2, captured explicitly before the environment could be lost -
-# see NOTES.md's "environment/provenance" note for why this mattered).
+# EXACT pins. SUPERSEDED 2026-09-01 - see the dated block below before
+# trusting the Python version at the top of this comment for anything
+# newer than round 3's original numbers.
 #
-# Python 3.11.15. CPU only (no CUDA jaxlib installed - jax.default_backend()
-# == "cpu", confirmed directly, not assumed - a GPU may be present on the
-# host but nothing in this sub-project's environment can use it).
+# Original pins (rounds 1, 1.5, 2, and round 3's non-audit numbers):
+# captured via `pip freeze` from the environment that actually produced
+# those numbers (2026-08-28, mid-round-2, captured explicitly before the
+# environment could be lost - see NOTES.md's "environment/provenance"
+# note for why this mattered). Python 3.11.15, CPU only, host OS not
+# recorded at the time (see NOTES.md's environment-provenance table -
+# it was not Windows: `uvloop`, below, does not build there).
 #
-# To recreate: python3.11 -m venv layernorm_study/.venv && source
+# ---------------------------------------------------------------------
+# 2026-09-01 UPDATE - standardized on Python 3.12, not 3.11.
+#
+# Reason: round 3's audit session ran on a machine with no Python 3.11
+# available (confirmed - not in `py -0p`'s list), so the audit used 3.12
+# with these SAME `==` pins, which pip happily satisfied - jax==0.7.2 /
+# flax==0.11.2 / optax==0.2.8 all ship cp312 wheels. That produced
+# checkpoints that were NOT bit-identical to the original 3.11 runs
+# despite identical seeds (train_mse differing 2-4x - see NOTES.md's
+# "environment provenance" table for the determinism finding that
+# isolated this to the environment, not to nondeterminism in the
+# training path itself). Running two undocumented environments side by
+# side is worse than picking one, so this project now standardizes on
+# **3.12.1** going forward, deliberately, per this project's own
+# precedent of raising a policy mismatch explicitly rather than quietly
+# drifting (`layernorm_study/CLAUDE.md`'s TACC-vs-local decision, same
+# pattern). All C1/C8-reconciliation numbers from 2026-09-01 onward were
+# produced under this 3.12 pin set. Rounds 1-3's ORIGINAL numbers remain
+# 3.11-sourced and are NOT bit-reproducible under this environment -
+# treat any seed-indexed comparison that crosses the 2026-09-01 boundary
+# as a different-checkpoint comparison, not a same-checkpoint one.
+#
+# `uvloop` is dropped: Windows-incompatible (`RuntimeError: uvloop does
+# not support Windows`), and nothing in this project's own code imports
+# it - it was `pip freeze` noise from whatever tooling produced the
+# original list, not a real runtime dependency. `colorama`, `nest-asyncio`,
+# `tzdata` are added: transitive deps pip pulled in on THIS platform that
+# the original capture didn't need (Windows-vs-original-platform
+# asymmetry, most likely - not investigated further, not load-bearing).
+#
+# To recreate: python3.12 -m venv layernorm_study/.venv && (on
+# Windows) layernorm_study\.venv\Scripts\pip install -r
+# layernorm_study/requirements.txt (on Unix) source
 # layernorm_study/.venv/bin/activate && pip install -r
 # layernorm_study/requirements.txt
 #
@@ -20,6 +55,7 @@
 
 absl-py==2.5.0
 aiofiles==25.1.0
+colorama==0.4.6
 contourpy==1.3.3
 cycler==0.12.1
 etils==1.14.0
@@ -36,6 +72,7 @@ matplotlib==3.11.1
 mdurl==0.1.2
 ml_dtypes==0.6.0
 msgpack==1.2.2
+nest-asyncio==1.6.0
 numpy==2.4.6
 opt_einsum==3.4.0
 optax==0.2.8
@@ -60,5 +97,5 @@ six==1.17.0
 tensorstore==0.1.85
 treescope==0.1.10
 typing_extensions==4.16.0
-uvloop==0.22.1
+tzdata==2026.3
 zipp==4.1.0
