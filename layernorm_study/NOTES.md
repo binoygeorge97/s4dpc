@@ -1476,3 +1476,97 @@ DPC analysis is about - DPC backpropagates through the surrogate's
 DERIVATIVES, so a surrogate can look well-fit by one-step MSE and
 still be useless for control. This sub-project's LayerNorm mechanism
 is one concrete, fully-traced instance of that general failure mode.
+
+## Round 3 correction, by the hypothesis author: Theorem 2 is vacuous, not merely blocked by a confound (2026-09-01)
+
+Two corrections to how round 3's own findings should be understood
+theoretically, recorded by the person who wrote the original boundedness
+theory, after reviewing round 3's results.
+
+**Theorem 2 (the postnorm output bound) is TRUE and VACUOUS.** The
+original claim was that postnorm output is bounded by
+`Y_max = ||W_dec||(||gamma||_inf sqrt(H) + ||beta||) + ||b_dec||`, stated
+as if this were an ARCHITECTURAL constraint - a structural limit that
+holds of the postnorm architecture as such, the way "LayerNorm's output
+lies in a ball of radius `sqrt(H)`" holds regardless of what any
+particular checkpoint's weights are. That framing was wrong. `gamma`,
+`W_dec`, and `b_dec` are TRAINABLE weights, not architectural constants -
+the bound is correctly derived, and is exactly true for any one FIXED
+`theta`, but nothing in the postnorm architecture stops `gamma` or
+`W_dec` from growing during training to whatever scale the data demands.
+Round 3's own measurement is the direct evidence this isn't a
+theoretical nitpick but what actually happens: `Y_max` tracked the
+training-data scale at a near-constant ratio across three separate,
+independently-trained experiments (`1.19`-`1.91x` the required output
+magnitude - round 3's `Y_max` scaling table, above). **A bound that is
+true for every fixed `theta` but where `theta` is itself free to grow
+without limit does not restrict the function class the architecture can
+express - "bounded for any given trained model" is a fundamentally
+weaker statement than "bounded, therefore cannot represent an unstable
+system," and only the first one is what the theorem actually proves.**
+This is the precise sense in which the theorem is vacuous: not incorrect
+in its derivation, but applied to a claim (representability) it was
+never positioned to settle, because its own free parameter absorbs
+exactly the growth the impossibility argument needed to be impossible.
+
+**Consequence for the generalized claim.** "Postnorm residual blocks can
+never reproduce an unstable system" stays exactly where round 3 left it -
+explicitly UNESTABLISHED - but now for a STATED structural reason rather
+than an unresolved negative result. What Theorem 2 actually licenses is
+narrower and remains true: postnorm IS bounded for any given trained
+checkpoint, and that bound explains failure OUTSIDE that checkpoint's
+training range (round 2's C2 free-run ceiling, Task 4) - an
+extrapolation claim, not a representability claim. It does not, and was
+never going to, prove postnorm cannot fit an unstable system on some
+bounded operating range, because "bounded on a fixed range with
+free-to-grow weights" was never in tension with representing instability
+on that same range. Nothing about this weakens C1, C4, or C7 - those are
+claims about the LOCAL JACOBIAN's structure (rank deficiency, the
+`1/sigma` term, the bias-determined near field), which do not route
+through `Y_max` and are unaffected by this correction.
+
+**C3's original GLU-compounding hypothesis was WRONG - the real
+mechanism is the same fact C4 already proved, seen from a different
+angle.** The prediction going into C3-revised was that GLU's product
+structure (`a(v)*sigmoid(b(v))`, each factor independently decaying like
+`1/r`) would compound to `1/r^2`, and that peeling GELU/GLU off would
+walk the slope back to `-1`. That prediction is falsified by round 3's
+own data: `LN+linear` - no GELU, no GLU, nothing left to compound -
+still measures a radial slope of `-1.9`, not `-1` (`round3_C3revised_slopes.csv`).
+The actual mechanism, found by round3_c3_radial_check.py, has nothing to
+do with nonlinearity composition: LayerNorm's Jacobian bracket
+`[P - zhat zhat^T/H]` ANNIHILATES the `zhat` direction exactly - this is
+C4's Euler identity, `||J(v)v|| ~ 1e-14` relative, confirmed to
+principal angles of `~1e-14` degrees. Sweeping the scalar state `x`
+outward moves the pre-norm activation `v = b + Mz` essentially radially,
+so the swept perturbation direction is asymptotically PARALLEL to
+`zhat` itself - exactly the direction the bracket kills. The leading
+`1/r` term cancels along that one specific direction, and the
+subleading `1/r^2` term is what's left to set the slope - giving `-2`,
+not because two nonlinear stages compounded, but because the radial
+sweep direction happens to coincide with LN's own null direction. The
+non-radial derivative (`Ju`, perturbing along `u` instead of `x`, which
+is NOT parallel to `zhat`) retains the uncancelled leading term and
+measures `-1.005` (CI `[-1.023, -0.982]`) for the same checkpoints where
+the radial derivative measures `-1.9` to `-2.3`.
+
+**This is the sharpest methodological finding in the study.** C3 (a
+decay-RATE measurement, log-log slope vs. radius) and C4 (a
+rank-deficiency measurement, SVD of the Jacobian at a point) look like
+two unrelated diagnostics testing two unrelated predictions. They are
+the SAME structural fact - LayerNorm's Jacobian exactly annihilates the
+`zhat` direction - measured two different ways. C4 finds the null
+direction directly, by decomposing the Jacobian. C3 found it
+indirectly and by accident, by choosing a sweep direction that happened
+to align with it, which silently removed the leading-order term from
+what was being measured and reported the next order down as if it were
+the whole story. The original round-2 `-2.33` result was never evidence
+against the `-1` law - it was the theory's own null space showing up
+inside an underspecified measurement, and it would have looked exactly
+as "wrong" for ANY architecture whose Jacobian has an exact null
+direction aligned with how someone chose to sweep it. The general
+caution: when measuring "the" decay slope of a rank-deficient linear
+map, the direction of the sweep is not a free implementation detail -
+it determines whether the leading-order term is even present in what
+gets measured, and a single scalar "slope" number silently encodes that
+choice without flagging it.
