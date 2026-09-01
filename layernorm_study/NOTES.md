@@ -1254,3 +1254,225 @@ better-evidenced claim than the full generalization, with several of
 this round's own sub-tests (C3, C5, C8) identifying exactly where the
 simple picture needs more care before it would support that broader
 statement.
+
+## Round 3: C5-revised, C3-revised, C4-fixed, C8-revised (2026-08-31)
+
+Three corrections to how round 2 should be read, plus the C8 fix/drop
+decision (chose fix). Same execution provenance as every other round:
+local CPU, `layernorm_study/CLAUDE.md`.
+
+### Results table (rounds 2-3 combined, current status)
+
+| Test | Status | Key number |
+|---|---|---|
+| Task 4 (output bound) | PASS | bound never exceeded, 16/16 ckpts (max ratio 0.74) |
+| Task 5 (sqrt(eps) kink scaling) | FAIL | amplitude `~eps^-0.066`, width `~eps^0.030` (predicted `+-0.5`) |
+| C1 (bias ablation) | **PASS, decisive** | r\* collapses `0.375 -> 0.00079` = **475x** |
+| C2 (ceiling, free-run) | PASS | median plateau/Y_max `0.316` |
+| C3 (decay slope) | **PASS (corrected prediction)** | non-radial `Ju` slope `-1.005`, CI `[-1.023, -0.982]` |
+| C4 (rank / Euler) | **PASS, clean** | rank `= H-2` 100% of seeds; principal angles `~1e-14` deg |
+| C5 (two-shell floor) | **does not apply** (3rd reason) | postnorm beats floor by `530x` |
+| C6 (relocation) | WITHDRAWN | ill-posed prediction, retracted by hypothesis author |
+| C6-revised (ceiling / enlargement) | mixed | `Y_max/required = 2.34`; r\* scaling slope `0.913` |
+| C7 (which part of LN) | **PASS, clean** | RMSNorm `0.530` vs real LN `0.492`; frozen-sigma `0.057` |
+| C8 (gain sweep) | FAIL (prediction), no longer ambiguous | failure radius pinned at `1e-6` for `rho<=1.5` |
+
+### C3-revised + radial check: PASS, with the prediction corrected
+
+Peeling the block's nonlinearities off (all postnorm, all else equal,
+8 seeds each, `results/round3_C3revised_slopes.csv`):
+
+| arm | median far-field slope | 95% CI across seeds |
+|---|---|---|
+| LN+GELU+GLU | `-2.332` | `[-2.787, -1.759]` |
+| LN+GELU | `-1.984` | `[-2.691, -1.787]` |
+| LN+linear | `-1.925` | `[-2.498, -1.592]` |
+
+The GLU-compounding hypothesis is **partially confirmed**: removing GLU
+moves the slope `-2.33 -> -1.98`, which is most of the available
+movement, and removing GELU adds almost nothing (`-1.98 -> -1.93`). But
+it does **not** walk to `-1` - a purely linear branch still measures
+`-1.9`. Rather than log that as a second bare FAIL, the mechanism was
+worked out and tested (`round3_c3_radial_check.py`).
+
+**The `-1` law was being measured along the one direction where it
+cancels.** LayerNorm's Jacobian annihilates `zhat` (exactly C4's Euler
+identity). Sweeping the SCALAR state `x` outward moves the pre-norm
+activation `v = b + Mz` essentially radially, so the perturbation
+direction is asymptotically parallel to `zhat` itself - the direction
+the bracket kills. The leading `1/r` term cancels and the subleading
+`1/r^2` sets the slope. The discriminating test is the **non-radial**
+derivative on the SAME checkpoints
+(`results/round3_C3_radial_check.csv`):
+
+| arm | `Jx` (radial) | `Ju` (non-radial) |
+|---|---|---|
+| LN+linear | `-1.925` CI `[-2.498, -1.592]` | **`-1.005`** CI `[-1.023, -0.982]` |
+| LN+GELU+GLU | `-2.332` CI `[-2.787, -1.759]` | `-1.027` CI `[-1.671, -0.881]` |
+
+`Ju` for the linear branch lands at `-1.005` with a CI of
+`[-1.023, -0.982]` - tight, and containing `-1` while excluding
+everything else. **C3 becomes a PASS with a corrected prediction: the
+`-1` law is LayerNorm's own and holds in every direction EXCEPT the
+radial one, where the Euler identity cancels it to `-2`.** Round 2's
+`-2.33` was never evidence against the theory; it was the theory's own
+C4 structure showing up in C3's measurement geometry. C3 and C4 are the
+same fact seen twice.
+
+### C4-fixed: PASS, cleanly
+
+`results/round3_C4fixed_null_space.csv`. Corrected per the round-2
+catch (LN's Jacobian has TWO exact null directions - `1` via `P`, and
+`zhat` via the outer-product term - so a single-vector alignment check
+was the wrong test):
+
+- **rank `= H-2 = 6`** at relative tolerance `1e-4`, for **100% of
+  seeds at both radii** tested.
+- **Principal angles** between the measured 2D null space and
+  `span{1, zhat}`: median `(2.2e-14, 1.3e-5)` deg at `r=1`, and
+  `(2.0e-14, 1.1e-11)` deg at `r=1000`. Essentially exact.
+- Bonus confirmation not predicted in advance but consistent: the
+  second null direction gets *more* exact with radius
+  (`sigma_{H-1}/sigma_max`: `6.4e-7` at `r=1` -> `9.1e-13` at
+  `r=1000`), which is what the `eps->0` limit requires, since
+  `sigma = sqrt(||Pv||^2/H + eps)` makes `eps` relatively negligible as
+  `||v||` grows. Reported at two tolerances rather than one precisely
+  because a machine-eps rank alone says `H-1` and hides this.
+
+### C5-revised: still does not apply - and the third reason is the important one
+
+`results/round3_C5revised_results.csv`. Both shells were placed above
+the C1-measured `r*` (`r1 = 10r* = 5`, `r2 = 500r* = 250`) and the
+far-field condition was verified empirically as instructed: median
+local log-log Jacobian slope `-1.794` at `r1` and `-1.772` at `r2` -
+**both clearly in the decay regime, not the plateau. Round 2's
+mis-specification is genuinely fixed.**
+
+**And postnorm still misses the floor - by 530x in the safe direction.**
+Predicted floor `126.175`; achieved postnorm `rmse_r2` median `0.236`
+(ratio `0.0019`). Prenorm control `0.00069`.
+
+**Flagging a confound in my own verification before interpreting this**:
+the check performed (local Jacobian decay slope at each shell, which is
+what was specified) is NECESSARY but NOT SUFFICIENT for the floor to
+apply. The floor's actual precondition is on `F`, not `J`: it assumes
+`F(r1 w) ~ F(r2 w)`, i.e. the map is degree-0 BETWEEN the shells. A
+decaying Jacobian does not establish that - `J ~ r^-1.8` still
+integrates to a large output change over `5 -> 250`. Measured directly
+from the achieved errors: `F(r1) ~ 5.15` and `F(r2) ~ 257.5`, both
+correct, **differing by ~50x**. The map is emphatically not degree-0
+across that range, so the floor does not bind. My verification passed
+while the condition the floor actually needs failed.
+
+**Why the model can do this, and why it matters more than the C5
+result itself:** `Y_max` is not a fixed structural barrier. It is
+`||W_dec||(||gamma||_inf sqrt(H) + ||beta||) + ||b_dec||` - every
+factor trainable. Measured across three separate experiments, it
+tracks the training-data scale at a near-constant ratio:
+
+| experiment | max abs target | measured `Y_max` | ratio |
+|---|---|---|---|
+| round 2 C2 (origin-centered) | `3.5` | `6.7` | `1.91` |
+| round 2 C6-revised (`x_ref=50`) | `100.9` | `120.3` | `1.19` |
+| round 3 C5-revised (`r2=250`) | `336.0` | `407.5` | `1.21` |
+
+**The ceiling is a LEARNED quantity that expands to cover whatever
+range the training data occupies.** This substantially corrects the
+impossibility framing at its root: `||F(z)|| <= Y_max` is true for any
+FIXED checkpoint, but nothing stops training from scaling `Y_max` up to
+whatever the data demands. So there is no impossibility for data in a
+bounded range - and the two-shell test appears to be **unfalsifiable by
+construction in this setup**, because both `r*` and `Y_max` adapt to
+wherever the shells are put. Making it bite would require CONSTRAINING
+`Y_max` (freezing the `gamma`/`W_dec` scales) while pushing the data
+out - not attempted here, and flagged as the design that would be
+needed rather than claimed as a result.
+
+**What survives:** boundedness is real per-checkpoint, so the
+DPC-relevant statement is about EXTRAPOLATION, not representability -
+a trained postnorm surrogate is bounded by its own `Y_max`, and a
+free-running rollout of an unstable plant leaves the training range and
+hits that ceiling (round 2's C2, which measured exactly this). That is
+a narrower claim than the impossibility theorem, and it is the one the
+evidence supports.
+
+### C8-revised: FAIL for the stated prediction, no longer ambiguous
+
+Chose fix over drop, and the round-2 confound is confirmed as the
+diagnosis. Per-rho excitation is now scale-matched and validated BEFORE
+training (`results/round3_C8revised_excitation_validation.csv`):
+`max|x|` spread `19.1-22.8` across all five gains (round 2's
+uncontrolled version: `19.5-311`), condition numbers `4.95-9.33`
+(round 2: `10-165`), and least-squares `(A,B)` recovery to `~1e-16`
+everywhere - so the data is exactly identifiable at every gain, and
+round 2's rho=1.5 dataset (which required outputs of `~467` against a
+`Y_max` of `~120-150`, i.e. unrepresentable) is fixed.
+
+Result (`results/round3_C8revised_results.csv`), converged runs only:
+
+| rho | median failure radius | converged |
+|---|---|---|
+| 0.5 | `1e-6` | 5/8 |
+| 0.9 | `1e-6` | 6/8 |
+| 1.03 | `1e-6` | 6/8 |
+| 1.5 | `1e-6` | 7/8 |
+| 3.0 | `0.902` (min `1e-6`, max `29.8`) | 4/8 |
+
+**The prediction ("failure radius shrinks monotonically as gain rises,
+with stable systems on the same curve") is NOT supported.** For
+`rho <= 1.5` the failure radius is pinned at the smallest radius
+tested - postnorm's Jacobian is already >10% wrong AT THE ORIGIN - and
+`rho=3.0` moves in the OPPOSITE direction (larger, not smaller) with a
+huge spread and the worst convergence rate (4/8).
+
+Two honest observations rather than one tidy conclusion. First, this is
+now a real negative on validated data, not a setup artifact - the
+`1e-6` floor is not an artifact of unrepresentable targets any more.
+Second, and more informative: postnorm's Jacobian error is present at
+every radius **including the origin, for STABLE plants (`rho=0.5`,
+`0.9`) exactly as much as unstable ones**. That cuts against framing
+this failure as being about instability at all. Standing caveat: 30% of
+runs still did not converge below `1e-4` (and only 4/8 at `rho=3`), so
+the `rho=3` row in particular should not be over-read.
+
+### Round 3 bottom line
+
+**The bar was C1 and C5 both landing. C1 lands; C5 does not** - and
+round 3 establishes precisely *why* it does not, which is a more useful
+outcome than a third inconclusive attempt: the impossibility argument
+implicitly treats `Y_max` as fixed, and it is not. **The generalized
+claim is therefore kept explicitly UNESTABLISHED**, as instructed.
+
+What IS supported, correctly scoped:
+
+1. **Postnorm's failure away from the origin traces specifically to
+   LayerNorm's `1/sigma` term** - C7: RMSNorm (drops centering, keeps
+   `1/sigma`) fails within 8% of real LayerNorm (`0.530` vs `0.492`);
+   frozen-sigma (keeps centering, drops `1/sigma`) recovers ~9x to
+   `0.057`. Mean-centering is exonerated.
+2. **The good region is a bias-determined operating point** - C1: 475x
+   collapse in `r*` under bias ablation, with `r* ~ ||Pb||^0.93`
+   (directionally right, `r^2=0.31`, not a clean power law).
+3. **The output ceiling is real and measurable per-checkpoint** - Task
+   4 and C2 - **but it is learned, not fixed** (round 3's `Y_max`
+   scaling table above). The defensible form is about extrapolation
+   beyond the training range, not about representability within it.
+4. **LayerNorm's Jacobian is exactly rank-deficient by 2, with the
+   `-1/r` law holding off the radial direction** - C4 (principal
+   angles `~1e-14` deg, rank `H-2` on 100% of seeds) and C3's radial
+   check (`Ju` slope `-1.005`, CI `[-1.023, -0.982]`) are the same
+   structural fact measured two ways.
+
+**Open thread, named rather than resolved (the link back to the parent
+project):** C6-revised found `Y_max/required = 2.34` - the model had
+ample headroom to represent the required magnitude yet still got
+`Jx = 0.035` where the truth is `1.03`. Combined with round 3's C5
+result (postnorm fits VALUES at both shells to `~0.2` RMSE while its
+Jacobian decays as `r^-1.8` through that same range), this is a
+**value/derivative dissociation**: the model fits outputs acceptably
+while getting derivatives badly wrong, and the two failures are not
+the same failure. That is precisely the phenomenon the parent repo's
+DPC analysis is about - DPC backpropagates through the surrogate's
+DERIVATIVES, so a surrogate can look well-fit by one-step MSE and
+still be useless for control. This sub-project's LayerNorm mechanism
+is one concrete, fully-traced instance of that general failure mode.
