@@ -1,0 +1,8 @@
+{
+  "seed": 0,
+  "arm": "arm_6",
+  "epochs": 60000,
+  "train_mse": 2.6850601606589895e-05,
+  "train_mse_hex": "0x1.c27a74ade1ca5p-16",
+  "elapsed_s": 170.9348702430725
+}
